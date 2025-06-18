@@ -1,0 +1,32 @@
+[project]
+name = "eflips-x"
+version = "0.1.0"
+description = "Workflow Orchestrator for Running [eFLIPS](https://github.com/stars/ludgerheide/lists/ebus2030)  electric city bus network simulations."
+authors = [
+    {name = "Ludger Heide",email = "ludger.heide@tu-berlin.de"}
+]
+license = {text = "AGPL-3.0-or-later"}
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "eflips-model @ file:///Users/arbeit/Documents/Arbeit/Software/eflips-model",
+    "eflips-depot @ file:///Users/arbeit/Documents/Arbeit/Software/eflips-depot",
+    "eflips-ingest @ file:///Users/arbeit/Documents/Arbeit/Software/eflips-ingest",
+    "eflips-eval @ file:///Users/arbeit/Documents/Arbeit/Software/eflips-eval",
+    "eflips-opt @ file:///Users/arbeit/Documents/Arbeit/Software/eflips-opt",
+    "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)"
+]
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.group.dev.dependencies]
+mypy = "^1.16.1"
+black = "^25.1.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 99
