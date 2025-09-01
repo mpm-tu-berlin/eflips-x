@@ -4,18 +4,32 @@ This file contains all sorts of workflow steps used in the eflips pipelines.
 
 """
 
-import glob
 from pathlib import Path
 from typing import List, Dict
-from fuzzywuzzy import fuzz
+
 import eflips.model
-from eflips.model import Rotation, VehicleType, Station, Route, AssocRouteStation, StopTime, Line
+import pandas as pd
+import seaborn as sns
+from eflips.ingest.legacy import bvgxml
+from eflips.model import (
+    Rotation,
+    VehicleType,
+    Station,
+    Route,
+    AssocRouteStation,
+    StopTime,
+    Line,
+    Trip,
+    TripType,
+)
+from fuzzywuzzy import fuzz
 from geoalchemy2.shape import to_shape
+from matplotlib import pyplot as plt
+from prefect import task
 from sqlalchemy import not_, func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from eflips.x.util import pipeline_step
-from eflips.ingest.legacy import bvgxml
 
 
 @pipeline_step(
@@ -456,3 +470,149 @@ def set_battery_capacity_and_mass(
             )
         session.flush()
         session.commit()
+
+
+@task(
+    name="vehicle-type-and-depot-plot",
+)
+def vehicle_type_and_depot_plot(db_path: Path, output_path: Path):
+    """
+    Create a plot showing the vehicle types and depots in the database.
+    :param db_path: The path to the database to read.
+    :param output_path: The path to the output plot file.
+    :return: Nothing
+    """
+
+    url = f"sqlite:///{db_path}"
+    engine = eflips.model.create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        # Identify all the places where rotations start or end.
+        all_start_end_stations = set()
+        all_rotations = (
+            session.query(Rotation)
+            .options(joinedload(Rotation.trips).joinedload(Trip.route))
+            .all()
+        )
+        for rotation in all_rotations:
+            if len(rotation.trips) == 0:
+                raise ValueError(f"Rotation {rotation.name} has no trips")
+            all_start_end_stations.add(rotation.trips[0].route.departure_station)
+            all_start_end_stations.add(rotation.trips[-1].route.arrival_station)
+
+        vehicle_type_data: List[Dict[str, int | float]] = []
+        for vehicle_type in session.query(VehicleType).all():
+            for station in all_start_end_stations:
+                depot_station_name = station.name
+                depot_station_name = depot_station_name.removeprefix("Betriebshof ")
+                depot_station_name = depot_station_name.removeprefix("Abstellfläche ")
+
+                rotations = (
+                    session.query(Rotation)
+                    .join(Trip)
+                    .join(Route)
+                    .join(Station, Route.departure_station_id == Station.id)
+                    .join(VehicleType)
+                    .filter(
+                        VehicleType.id == vehicle_type.id,
+                        Station.id == station.id,
+                    )
+                    .all()
+                )
+                trips = sum([len(rotation.trips) for rotation in rotations]) - 2
+                total_distance_pax = (
+                    sum(
+                        [
+                            sum(
+                                [
+                                    (
+                                        trip.route.distance
+                                        if trip.trip_type == TripType.PASSENGER
+                                        else 0
+                                    )
+                                    for trip in rotation.trips
+                                ]
+                            )
+                            for rotation in rotations
+                        ]
+                    )
+                    / 1000
+                )
+                total_distance = (
+                    sum(
+                        [
+                            sum([(trip.route.distance) for trip in rotation.trips])
+                            for rotation in rotations
+                        ]
+                    )
+                    / 1000
+                )
+                vehicle_type_data.append(
+                    {
+                        "Fahrzeugtyp": vehicle_type.name_short,
+                        "depot": depot_station_name,
+                        "Umläufe": len(rotations),
+                        "trips": trips,
+                        "Nutzwagenkilometer": total_distance_pax,
+                        "Wagenkilometer": total_distance,
+                    }
+                )
+
+        vehicle_type_df = pd.DataFrame(vehicle_type_data)
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+        vehicle_type_df.to_pickle(f"{output_path}/vehicle_type_and_depot_data.pkl")
+        vehicle_type_df.to_excel(f"{output_path}/vehicle_type_and_depot_data.xlsx")
+
+        vehicle_name_translation = {
+            "EN": "Single Decker",
+            "GN": "Articulated Bus",
+            "DD": "Double Decker",
+        }
+
+        # Now, do two stacked bar plots, one for kilometers and one for trips
+        # Stack each vehicle type on top of each other
+        fig, ax = plt.subplots(
+            1,
+            1,
+        )
+
+        # Replace the vehicle type names with the translated names
+        vehicle_type_df["Fahrzeugtyp"] = vehicle_type_df["Fahrzeugtyp"].apply(
+            lambda x: vehicle_name_translation[x]
+        )
+        vehicle_type_df["Nutzwagenkilometer"] *= 52 / 1000000
+
+        # Change the color palette to seaborns default color palette, but start at the 3rd color
+        palette = sns.color_palette("Set2")
+
+        df2 = vehicle_type_df.pivot(
+            index="depot", columns="Fahrzeugtyp", values="Nutzwagenkilometer"
+        )
+
+        # Order:Single Decker, Double Decker, Articulated Bus
+        df2 = df2[["Single Decker", "Articulated Bus", "Double Decker"]]
+        # Plot the data
+        df2.plot(kind="bar", stacked=True, ax=ax, color=palette)
+        df2.to_pickle("03a_vehicle_type_and_depot_plot.pkl")
+
+        ax.set_title("")
+        ax.set_ylabel(r"Revenue Mileage $\left[ \frac{km \times 10^6}{a} \right]$")
+
+        # Remove xlabel, as the depots are already labeled on the x-axis
+        ax.set_xlabel("")
+        # 45 degree rotation for better readability
+        plt.xticks(rotation=45)
+
+        # Name Legend
+        plt.legend(title="", bbox_to_anchor=(0, 1.02, 1, 0.2), loc="upper left", ncols=3)
+
+        plt.tight_layout()
+        # plt.subplots_adjust(top=0.8)
+        plt.savefig(f"{output_path}/vehicle_type_and_depot_plot.png", dpi=300)
+        plt.savefig(f"{output_path}/vehicle_type_and_depot_plot.pdf")
+        plt.close()

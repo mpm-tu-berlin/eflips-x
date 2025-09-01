@@ -1,7 +1,7 @@
 import glob
 from pathlib import Path
 
-from prefect import task, flow
+from prefect import flow
 
 from eflips.x.steps import (
     bvgxml_ingest_2025_06,
@@ -9,6 +9,7 @@ from eflips.x.steps import (
     remove_unused_rotations,
     merge_stations,
     remove_unused_data,
+    vehicle_type_and_depot_plot,
 )
 
 
@@ -63,8 +64,13 @@ def existing_depots_unchanged() -> None:
     - prepares simulation data
     -
     """
-    raise NotImplementedError
+    base_dir = Path(__file__).parent.parent.parent.parent
+    output_dir = base_dir / "data" / "output" / "bvg_brazil" / "existing_depots_unchanged"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    db_path = prepare_dataset_bvg_brazil()
+    vehicle_type_and_depot_plot(db_path=db_path, output_path=output_dir)
 
 
 if __name__ == "__main__":
-    prepare_dataset_bvg_brazil()
+    existing_depots_unchanged()
