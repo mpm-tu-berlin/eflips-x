@@ -4,12 +4,25 @@ This file contains all sorts of workflow steps used in the eflips pipelines.
 
 """
 
+import logging
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
+from zoneinfo import ZoneInfo
 
 import eflips.model
+import numpy as np
 import pandas as pd
 import seaborn as sns
+from eflips.depot.api import (
+    simple_consumption_simulation,
+    generate_consumption_result,
+    generate_depot_optimal_size,
+    init_simulation,
+    add_evaluation_to_database,
+    apply_even_smart_charging,
+)
 from eflips.ingest.legacy import bvgxml
 from eflips.model import (
     Rotation,
@@ -21,6 +34,13 @@ from eflips.model import (
     Line,
     Trip,
     TripType,
+    VehicleClass,
+    ConsumptionLut,
+    Scenario,
+    Temperatures,
+    ChargeType,
+    VoltageLevel,
+    Event,
 )
 from fuzzywuzzy import fuzz
 from geoalchemy2.shape import to_shape
@@ -28,8 +48,21 @@ from matplotlib import pyplot as plt
 from prefect import task
 from sqlalchemy import not_, func
 from sqlalchemy.orm import Session, joinedload
+from tqdm import tqdm
 
+from eflips.x.flows.util_station_electrification import (
+    remove_terminus_charging_from_okay_rotations,
+    number_of_rotations_below_zero,
+    add_charging_station,
+)
 from eflips.x.util import pipeline_step
+from eflips.model import Base
+from eflips.x.util_depot_assignment import optimize_scenario
+from eflips.x.util_legacy import (
+    update_trip_loaded_masses,
+    make_depot_stations_electrified,
+    clear_previous_simulation_results,
+)
 
 
 @pipeline_step(
@@ -42,6 +75,9 @@ def bvgxml_ingest_2025_06(db_path: Path, input_files: List[Path]):
     :param db_path: The path to the database to create and populate.
     :return: nothing
     """
+    # Remove the database if it already exists
+    if db_path.exists():
+        db_path.unlink()
     url = f"sqlite:///{db_path}"
     engine = eflips.model.create_engine(url)
     eflips.model.Base.metadata.create_all(engine)
@@ -53,7 +89,7 @@ def bvgxml_ingest_2025_06(db_path: Path, input_files: List[Path]):
 
 @pipeline_step(
     step_name="remove-unused-vehicle-types",
-    code_version="1.0.0",
+    code_version="1.0.1",
 )
 def remove_unused_vehicle_types(db_path: Path):
     """
@@ -65,6 +101,7 @@ def remove_unused_vehicle_types(db_path: Path):
     :param db_path: THe path to the database to modify.
     :return: Nothing
     """
+    logger = logging.getLogger(__name__)
     url = f"sqlite:///{db_path}"
     engine = eflips.model.create_engine(url)
     with Session(engine) as session:
@@ -101,13 +138,12 @@ def remove_unused_vehicle_types(db_path: Path):
         ]
         rotations_to_remove = (
             session.query(Rotation)
-            .filter(Rotation.scenario_id == SCENARIO_ID)
             .join(VehicleType)
             .filter(not_(VehicleType.name_short.in_(vehicle_types_we_want_to_keep)))
             .all()
         )
         for rotation in rotations_to_remove:
-            print(
+            logger.debug(
                 f"Removing rotation {rotation.name}, vehicle type {rotation.vehicle_type.name_short}, start {rotation.trips[0].route.departure_station.name}, end {rotation.trips[-1].route.arrival_station.name}"
             )
             for trip in rotation.trips:
@@ -125,7 +161,7 @@ def remove_unused_vehicle_types(db_path: Path):
             name_short="EN",
             battery_capacity=500.0,
             battery_capacity_reserve=0.0,
-            charging_curve=[[0, 300], [1, 300]],
+            charging_curve=[[0, 450], [1, 450]],
             opportunity_charging_capable=True,
             minimum_charging_power=10,
             length=12.0,
@@ -143,7 +179,7 @@ def remove_unused_vehicle_types(db_path: Path):
             name_short="GN",
             battery_capacity=640.0,
             battery_capacity_reserve=0.0,
-            charging_curve=[[0, 300], [1, 300]],
+            charging_curve=[[0, 450], [1, 450]],
             opportunity_charging_capable=True,
             minimum_charging_power=10,
             length=18.0,
@@ -161,7 +197,7 @@ def remove_unused_vehicle_types(db_path: Path):
             name_short="DD",
             battery_capacity=472,
             battery_capacity_reserve=0,
-            charging_curve=[[0, 300], [1, 300]],
+            charging_curve=[[0, 450], [1, 450]],
             opportunity_charging_capable=True,
             minimum_charging_power=10,
             length=12.0,
@@ -218,6 +254,7 @@ def remove_unused_rotations(db_path: Path):
     :param db_path: THe path to the database to modify.
     :return: Nothing
     """
+    logger = logging.getLogger(__name__)
     url = f"sqlite:///{db_path}"
     engine = eflips.model.create_engine(url)
     with Session(engine) as session:
@@ -256,7 +293,7 @@ def remove_unused_rotations(db_path: Path):
             first_station_id = rotation.trips[0].route.departure_station_id
             last_station_id = rotation.trips[-1].route.arrival_station_id
             if first_station_id != last_station_id or first_station_id not in station_ids_to_keep:
-                print(
+                logger.debug(
                     f"Removing rotation {rotation.name}, vehicle type {rotation.vehicle_type.name_short}, start {rotation.trips[0].route.departure_station.name}, end {rotation.trips[-1].route.arrival_station.name}"
                 )
                 for trip in rotation.trips:
@@ -282,6 +319,7 @@ def merge_stations(db_path: Path, max_distance_meters: float, match_percentage: 
     :param db_path: The path to the database to modify.
     :return: nothing
     """
+    logger = logging.getLogger(__name__)
     url = f"sqlite:///{db_path}"
     engine = eflips.model.create_engine(url)
     with Session(engine) as session:
@@ -333,16 +371,16 @@ def merge_stations(db_path: Path, max_distance_meters: float, match_percentage: 
                                 break
                         if not found:
                             to_merge.append([station, nearby_station])
-                        print(
+                        logger.debug(
                             f"Found nearby stations to merge: {station.name} and {nearby_station.name} ({percentage}%)"
                         )
 
         for merge_group in to_merge:
             # Print the stations to merge
-            print(f"Merging stations: {[station.name for station in merge_group]}")
+            logger.debug(f"Merging stations: {[station.name for station in merge_group]}")
             # Pick the station with the shortest name as the one to keep
             station_to_keep = min(merge_group, key=lambda s: len(s.name))
-            print(f"Keeping station: {station_to_keep.name}")
+            logger.debug(f"Keeping station: {station_to_keep.name}")
             stations_to_remove = [s for s in merge_group if s != station_to_keep]
             for other_station in stations_to_remove:
                 other_station_geom = other_station.geom
@@ -375,6 +413,7 @@ def merge_stations(db_path: Path, max_distance_meters: float, match_percentage: 
     code_version="1.0.0",
 )
 def remove_unused_data(db_path: Path):
+    logger = logging.getLogger(__name__)
     url = f"sqlite:///{db_path}"
     engine = eflips.model.create_engine(url)
     with Session(engine) as session:
@@ -388,7 +427,7 @@ def remove_unused_data(db_path: Path):
         all_routes = session.query(Route).all()
         for route in all_routes:
             if len(route.trips) == 0:
-                print(f"Removing route {route.name}")
+                logger.debug(f"Removing route {route.name}")
                 for assoc_route_station in route.assoc_route_stations:
                     session.delete(assoc_route_station)
                 session.delete(route)
@@ -397,7 +436,7 @@ def remove_unused_data(db_path: Path):
         all_lines = session.query(Line).all()
         for line in all_lines:
             if len(line.routes) == 0:
-                print(f"Removing line {line.name}")
+                logger.debug(f"Removing line {line.name}")
                 session.delete(line)
 
         # Remove all stations that are not part of a route
@@ -408,13 +447,13 @@ def remove_unused_data(db_path: Path):
                 and len(station.routes_departing) == 0
                 and len(station.routes_arriving) == 0
             ):
-                print(f"Removing station {station.name}")
+                logger.debug(f"Removing station {station.name}")
                 session.delete(station)
 
         # Print the number of remaining routes, lines, and stations
-        print(f"Number of remaining routes: {session.query(Route).count()}")
-        print(f"Number of remaining lines: {session.query(Line).count()}")
-        print(f"Number of remaining stations: {session.query(Station).count()}")
+        logger.debug(f"Number of remaining routes: {session.query(Route).count()}")
+        logger.debug(f"Number of remaining lines: {session.query(Line).count()}")
+        logger.debug(f"Number of remaining stations: {session.query(Station).count()}")
         session.flush()
         session.commit()
 
@@ -437,6 +476,7 @@ def set_battery_capacity_and_mass(
     :param full_masses: A dictionary mapping vehicle type short names to full masses in kg.
     :return: Nothing
     """
+    logger = logging.getLogger(__name__)
     url = f"sqlite:///{db_path}"
     engine = eflips.model.create_engine(url)
     with Session(engine) as session:
@@ -465,7 +505,7 @@ def set_battery_capacity_and_mass(
             vehicle_type.battery_capacity = battery_capacities[vehicle_type.name_short]
             vehicle_type.empty_mass = empty_masses[vehicle_type.name_short]
             vehicle_type.allowed_mass = full_masses[vehicle_type.name_short]
-            print(
+            logger.debug(
                 f"Set vehicle type {vehicle_type.name_short} battery capacity to {vehicle_type.battery_capacity} kWh, empty mass to {vehicle_type.empty_mass} kg, and allowed mass to {vehicle_type.allowed_mass} kg"
             )
         session.flush()
@@ -616,3 +656,405 @@ def vehicle_type_and_depot_plot(db_path: Path, output_path: Path):
         plt.savefig(f"{output_path}/vehicle_type_and_depot_plot.png", dpi=300)
         plt.savefig(f"{output_path}/vehicle_type_and_depot_plot.pdf")
         plt.close()
+
+
+@pipeline_step(
+    step_name="reduce-to-one-day-two-depots",
+    code_version="1.0.1",
+)
+def reduce_to_one_day_two_depots(db_path: Path):
+    logger = logging.getLogger(__name__)
+    url = f"sqlite:///{db_path}"
+    engine = eflips.model.create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        # find the day with the most trips
+        # We can't use the day with the fewest trips since this might be just an overflow into the wee hours of the following day
+        day_counts = (
+            session.query(func.strftime("%Y-%m-%d", Trip.departure_time), func.count(Trip.id))
+            .group_by(func.strftime("%Y-%m-%d", Trip.departure_time))
+            .all()
+        )
+        day_with_most_trips = max(day_counts, key=lambda x: x[1])[0]
+        logger.debug(f"Day with most trips is {day_with_most_trips}")
+
+        # Identify all the places where rotations start or end.
+        all_start_end_stations: Dict[Station, int] = defaultdict(int)
+        all_rotations = (
+            session.query(Rotation)
+            .options(joinedload(Rotation.trips).joinedload(Trip.route))
+            .all()
+        )
+        for rotation in all_rotations:
+            if len(rotation.trips) == 0:
+                raise ValueError(f"Rotation {rotation.name} has no trips")
+            all_start_end_stations[rotation.trips[0].route.departure_station] += 1
+
+        # Keep only the two depots with the fewest rotations starting or ending there
+        depots_to_keep = sorted(all_start_end_stations.items(), key=lambda x: x[1])[:2]
+        depot_station_ids_to_keep = [depot[0].id for depot in depots_to_keep]
+        logger.debug(f"Keeping depots: {[depot[0].name for depot in depots_to_keep]}")
+
+        all_rotations = (
+            session.query(Rotation)
+            .options(joinedload(Rotation.trips).joinedload(Trip.route))
+            .all()
+        )
+        to_delete: List[Base] = []
+        for rotation in tqdm(all_rotations, desc="Processing rotations"):
+            if len(rotation.trips) == 0:
+                raise ValueError(f"Rotation {rotation.name} has no trips")
+            first_station_id = rotation.trips[0].route.departure_station_id
+            date = rotation.trips[0].departure_time.date().isoformat()
+            if first_station_id not in depot_station_ids_to_keep or date != day_with_most_trips:
+                logger.debug(
+                    f"Removing rotation {rotation.name}, vehicle type {rotation.vehicle_type.name_short}, start {rotation.trips[0].route.departure_station.name}, end {rotation.trips[-1].route.arrival_station.name}, date {date}"
+                )
+                for trip in rotation.trips:
+                    for stop_time in trip.stop_times:
+                        to_delete.append(stop_time)
+                    to_delete.append(trip)
+                to_delete.append(rotation)
+        for obj in tqdm(to_delete, desc="Deleting objects"):
+            session.delete(obj)
+        session.commit()
+
+
+@pipeline_step(
+    step_name="add-temperatures-and-consumption",
+    code_version="0.1.2",
+    input_files=["../../..data/input/consumption_lut_gn.xlsx"],
+)
+def add_temperatures_and_consumption(db_path: Path):
+    """
+    Add temperature data and consumption data to the database.
+    :param db_path: The path to the database to modify.
+    :return: Nothing
+    """
+    logger = logging.getLogger(__name__)
+    url = f"sqlite:///{db_path}"
+    engine = eflips.model.create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        CONSUMPTION_LUT_PATH = Path("../../../data/input/consumption_lut_gn.xlsx")
+        if not CONSUMPTION_LUT_PATH.exists():
+            raise ValueError(f"Consumption LUT file {CONSUMPTION_LUT_PATH} does not exist")
+
+        with open(CONSUMPTION_LUT_PATH, "rb") as f:
+            consumption_lut_gn = pd.read_excel(f)
+            # The LUT is a 2D table. The first column is the average speed.
+            # The first row contains the temperatures.
+            # Turn it into a multi-indexed dataframe
+            emp_temperatures = np.array(consumption_lut_gn.columns[1:]).astype(np.float64)
+            emp_speeds = np.array(consumption_lut_gn.iloc[:, 0]).astype(np.float64)
+            emp_data = np.array(consumption_lut_gn.iloc[:, 1:]).astype(np.float64)
+
+        vehicle_type = session.query(VehicleType).filter(VehicleType.name_short == "GN").one()
+
+        # Create a vehicle class for the vehicle type
+        vehicle_class = VehicleClass(
+            scenario_id=vehicle_type.scenario_id,
+            name="Consumption LUT for GN",
+            vehicle_types=[vehicle_type],
+        )
+        session.add(vehicle_class)
+
+        # Create a LUT for the vehicle class
+        # It is first filled with dummy values, then updated below
+        consumption_lut = ConsumptionLut.from_vehicle_type(vehicle_type, vehicle_class)
+        session.add(consumption_lut)
+
+        new_coordinates = []
+        new_values = []
+
+        # Update the LUT with the empirical data
+        incline = 0.0
+        level_of_loading = 0.5
+        for i, temperature in enumerate(emp_temperatures):
+            for j, speed in enumerate(emp_speeds):
+                # Interpolate the empirical data to the coordinates
+                consumption = emp_data[i, j]
+                if not np.isnan(consumption):
+                    new_coordinates.append((incline, temperature, level_of_loading, speed))
+                    new_values.append(consumption)
+        consumption_lut.data_points = [
+            [float(value) for value in coord] for coord in new_coordinates
+        ]
+        consumption_lut.values = [float(value) for value in new_values]
+
+        # For the other vehicle types, just create dummy consumption LUTs, then multiply the values by a factor
+        other_vehicle_types = (
+            session.query(VehicleType).filter(VehicleType.id != vehicle_type.id).all()
+        )
+        for other_vehicle_type in other_vehicle_types:
+            factor = 2
+            vehicle_class = VehicleClass(
+                scenario_id=other_vehicle_type.scenario_id,
+                name=f"Consumption LUT for {other_vehicle_type.name_short}",
+                vehicle_types=[other_vehicle_type],
+            )
+            session.add(vehicle_class)
+            consumption_lut = ConsumptionLut.from_vehicle_type(other_vehicle_type, vehicle_class)
+            session.add(consumption_lut)
+            consumption_lut.data_points = [
+                [float(value) for value in coord] for coord in new_coordinates
+            ]
+            consumption_lut.values = [float(value * factor) for value in new_values]
+
+        session.flush()
+
+        # Now, add the temperature data to all trips
+        tz = ZoneInfo("Europe/Berlin")
+        datetimes = [datetime(1971, 1, 1, tzinfo=tz), datetime(2037, 12, 21, tzinfo=tz)]
+        temps = [-12, -12]
+
+        try:
+            scenarios = session.query(Scenario).all()
+            for scenario in scenarios:
+                scenario_temperatures = Temperatures(
+                    scenario_id=scenario.id,
+                    name="-12 °C",
+                    use_only_time=False,
+                    datetimes=datetimes,
+                    data=temps,
+                )
+
+                session.add(scenario_temperatures)
+        except:
+            session.rollback()
+            raise
+        finally:
+            session.commit()
+
+
+@pipeline_step(
+    step_name="depot-assignment",
+    code_version="0.1.1",
+    input_files=None,
+)
+def depot_assignment(db_path: Path):
+    logger = logging.getLogger(__name__)
+    url = f"sqlite:///{db_path}"
+    engine = eflips.model.create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        scenario = session.query(Scenario).one()
+
+        optimize_scenario(scenario, session)
+        session.commit()
+
+
+@pipeline_step(
+    step_name="is-station-electrification-possible",
+    code_version="0.1.0",
+    input_files=None,
+)
+def is_station_electrification_possible(db_path: Path):
+    logger = logging.getLogger(__name__)
+    url = f"sqlite:///{db_path}"
+    engine = eflips.model.create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        scenario = session.query(Scenario).one()
+        update_trip_loaded_masses(scenario, session)
+        make_depot_stations_electrified(scenario, session)
+
+        # Electrify ALL stations
+        station_q = session.query(Station).filter(Station.scenario_id == scenario.id)
+        station_q.update(
+            {
+                "is_electrified": True,
+                "amount_charging_places": 100,
+                "power_per_charger": 450,
+                "power_total": 100 * 450,
+                "charge_type": ChargeType.OPPORTUNITY,
+                "voltage_level": VoltageLevel.MV,
+            }
+        )
+
+        clear_previous_simulation_results(scenario, session)
+        consumption_results = generate_consumption_result(scenario)
+        simple_consumption_simulation(
+            scenario, initialize_vehicles=True, consumption_result=consumption_results
+        )
+
+        min_soc_end = (
+            session.query(func.min(Event.soc_end))
+            .filter(Event.scenario_id == scenario.id)
+            .first()[0]
+        )
+        count_of_electrified_termini = (
+            session.query(Station)
+            .filter(Station.scenario_id == scenario.id, Station.is_electrified == True)
+            .count()
+        )
+        logger.info(
+            f"Minimum SOC at end of day: {min_soc_end}, Electrified termini: {count_of_electrified_termini}"
+        )
+        if min_soc_end < 0:
+
+            raise ValueError(
+                "Scenario has rotations with SOC below 0% even with all stations electrified."
+            )
+
+
+@pipeline_step(
+    step_name="do-station-electrification",
+    code_version="0.1.0",
+    input_files=None,
+)
+def do_station_electrification(db_path: Path):
+    logger = logging.getLogger(__name__)
+    url = f"sqlite:///{db_path}"
+    engine = eflips.model.create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        scenario = session.query(Scenario).one()
+
+        # Set the loaded masses for correct consumption calculation
+        update_trip_loaded_masses(scenario, session)
+
+        # Make the depots electrified
+        make_depot_stations_electrified(scenario, session)
+
+        # Now, for the roations that do not need terminus charging, we also do not make them electirfiable
+        # This way, our chargers are not hogged biy buses that do not need them
+        remove_terminus_charging_from_okay_rotations(scenario, session)
+
+        consumption_results = generate_consumption_result(scenario)
+
+        while number_of_rotations_below_zero(scenario, session) > 0:
+            # Log the current state and write it to an excel table for monitoring
+            number_of_eletrified_termini = (
+                session.query(Station)
+                .filter(Station.scenario_id == scenario.id)
+                .filter(Station.is_electrified == True)
+                .count()
+            )
+            logger.info(
+                f"Number of rotations with SOC below 0%: {number_of_rotations_below_zero(scenario, session)}, Number of electrified termini: {number_of_eletrified_termini}"
+            )
+
+            electrified_station_id = add_charging_station(scenario, session, power=450)
+            logger.info(
+                f"Added charging station {session.query(Station).filter(Station.id == electrified_station_id).one().name}"
+                f" ({electrified_station_id}) to scenario"
+            )
+
+            # Run the consumption simulation again
+            clear_previous_simulation_results(scenario, session)
+
+            consumption_results = generate_consumption_result(scenario)
+            simple_consumption_simulation(
+                scenario, initialize_vehicles=True, consumption_result=consumption_results
+            )
+
+            min_soc_end = (
+                session.query(func.min(Event.soc_end))
+                .filter(Event.scenario_id == scenario.id)
+                .first()[0]
+            )
+            count_of_electrified_termini = (
+                session.query(Station)
+                .filter(Station.scenario_id == scenario.id, Station.is_electrified == True)
+                .count()
+            )
+            logger.info(
+                f"Minimum SOC at end of day: {min_soc_end}, Electrified termini: {count_of_electrified_termini}"
+            )
+        session.commit()
+
+
+@pipeline_step(
+    step_name="run-simulation",
+    code_version="0.1.0",
+    input_files=None,
+)
+def run_simulation(db_path: Path):
+    logger = logging.getLogger(__name__)
+    url = f"sqlite:///{db_path}"
+    engine = eflips.model.create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        scenario = session.query(Scenario).one()
+
+        #### Step 0: Update loaded masses and Make depot stations electrified #####
+        update_trip_loaded_masses(scenario, session)
+        make_depot_stations_electrified(scenario, session)
+
+        ##### Step 1: Consumption simulation
+        clear_previous_simulation_results(scenario, session)
+        consumption_results = generate_consumption_result(scenario)
+        simple_consumption_simulation(
+            scenario, initialize_vehicles=True, consumption_result=consumption_results
+        )
+
+        ##### Step 2: Generate the depot layout
+        generate_depot_optimal_size(
+            scenario=scenario,
+            charging_power=120,
+            delete_existing_depot=True,
+            use_consumption_lut=True,
+        )
+
+        ##### Step 3: Run the simulation
+        # This can be done using eflips.api.run_simulation. Here, we use the three steps of
+        # eflips.api.init_simulation, eflips.api.run_simulation, and eflips.api.add_evaluation_to_database
+        # in order to show what happens "under the hood".
+        simulation_host = init_simulation(
+            scenario=scenario,
+            session=session,
+            repetition_period=None,
+        )
+        depot_evaluations = eflips.depot.api.run_simulation(simulation_host)
+
+        add_evaluation_to_database(scenario, depot_evaluations, session)
+        session.flush()
+        session.expire_all()
+
+        ##### Step 4: Consumption simulation
+        consumption_results = generate_consumption_result(scenario)
+        simple_consumption_simulation(
+            scenario, initialize_vehicles=False, consumption_result=consumption_results
+        )
+
+        ##### Step 4.5: Insert dummy standby departure events
+        # This is something we need to do due to an unclear reason. The depot simulation sometimes does not
+        # generate the correct departure events for the vehicles. Therefore, we insert dummy standby departure events
+        # for depot in session.query(Depot).filter(Depot.scenario_id == scenario.id).all():
+        #    insert_dummy_standby_departure_events(
+        #        depot.id, session, sim_time_end=END_OF_SIMULATION
+        #    )
+
+        ##### Step 5: Apply even smart charging
+        # This step is optional. It can be used to apply even smart charging to the vehicles, reducing the peak power
+        # consumption. This is done by shifting the charging times of the vehicles. The method is called
+        # apply_even_smart_charging and is part of the eflips.depot.api module.
+        apply_even_smart_charging(scenario)
+        session.commit()
+
+        print(f"Simulation complete for scenario {scenario.name_short}.")

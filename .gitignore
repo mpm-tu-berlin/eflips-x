@@ -226,7 +226,10 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
+# For IP reasons, we ognore the XML files
+data/input/Berlin 2025-06/*.xml
 
-config.ini
-snapshots/*
-output/*
+# Ignore cache and output
+data/cache/**/*
+data/output/**/*
+

@@ -1,5 +1,6 @@
 import glob
 from pathlib import Path
+from tempfile import gettempdir
 
 from prefect import flow
 
@@ -10,6 +11,12 @@ from eflips.x.steps import (
     merge_stations,
     remove_unused_data,
     vehicle_type_and_depot_plot,
+    reduce_to_one_day_two_depots,
+    add_temperatures_and_consumption,
+    depot_assignment,
+    is_station_electrification_possible,
+    do_station_electrification,
+    run_simulation,
 )
 
 
@@ -57,8 +64,29 @@ def prepare_dataset_bvg_brazil() -> Path:
     return post_cleanup_path
 
 
+@flow(name="prepare-dataset-one-day-two-depots")
+def prepare_dataset_one_day_two_depots() -> None:
+    """
+    This flow
+    - prepares simulation data
+    - reduces the data to one day and two depots
+    - creates plots of vehicle types and depots
+    """
+    base_dir = Path(__file__).parent.parent.parent.parent
+    cache_dir = base_dir / "data" / "cache" / "one_day_two_depots"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    db_path = prepare_dataset_bvg_brazil()
+    one_day_two_depot_path = cache_dir / "one_day_two_depots.db"
+    reduce_to_one_day_two_depots(
+        input_db=db_path,
+        output_db=one_day_two_depot_path,
+    )
+    return one_day_two_depot_path
+
+
 @flow(name="existing-depots-unchanged")
-def existing_depots_unchanged() -> None:
+def prepare_and_simulate_existing_depots_unchanged() -> None:
     """
     This flow
     - prepares simulation data
@@ -66,11 +94,46 @@ def existing_depots_unchanged() -> None:
     """
     base_dir = Path(__file__).parent.parent.parent.parent
     output_dir = base_dir / "data" / "output" / "bvg_brazil" / "existing_depots_unchanged"
+    cache_dir = base_dir / "data" / "cache" / "existing_depots_unchanged"
+    cache_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    db_path = prepare_dataset_bvg_brazil()
+    db_path = prepare_dataset_one_day_two_depots()
     vehicle_type_and_depot_plot(db_path=db_path, output_path=output_dir)
+
+    post_add_temperature_consumption_path = cache_dir / "01_temperature_consumption.db"
+    add_temperatures_and_consumption(
+        input_db=db_path,
+        output_db=post_add_temperature_consumption_path,
+    )
+
+    post_depot_assignment_path = cache_dir / "02_depot_assignment.db"
+    depot_assignment(
+        input_db=post_add_temperature_consumption_path,
+        output_db=post_depot_assignment_path,
+    )
+
+    post_is_electrification_possible_path = (
+        Path(gettempdir()) / "03_is_electrification_possible.db"
+    )
+    is_station_electrification_possible(
+        input_db=post_depot_assignment_path,
+        output_db=post_is_electrification_possible_path,
+    )
+
+    post_do_station_electrification_path = cache_dir / "04_do_station_electrification.db"
+    do_station_electrification(
+        input_db=post_depot_assignment_path,
+        output_db=post_do_station_electrification_path,
+    )
+
+    post_run_simulation_path = cache_dir / "05_run_simulation.db"
+    run_simulation(
+        input_db=post_do_station_electrification_path,
+        output_db=post_run_simulation_path,
+    )
+    return post_run_simulation_path
 
 
 if __name__ == "__main__":
-    existing_depots_unchanged()
+    prepare_and_simulate_existing_depots_unchanged()
