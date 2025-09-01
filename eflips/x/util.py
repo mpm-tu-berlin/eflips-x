@@ -1,13 +1,12 @@
-import warnings
-
-from prefect import task, flow
-from prefect.artifacts import create_markdown_artifact
 import hashlib
+import os
 import shutil
+import warnings
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-import sqlite3
-import os
+
+from prefect import task
+from prefect.artifacts import create_markdown_artifact
 
 
 def compute_file_hash(filepath: Path) -> str:
@@ -92,7 +91,9 @@ def pipeline_step(
                 code_version=code_version,
             ),
         )
-        def wrapper(input_db: Optional[str], output_db: str, **kwargs) -> str:
+        def wrapper(
+            input_db: Optional[str] | Path, output_db: Optional[str] | Path, **kwargs
+        ) -> str:
             # Copy input database to output path (preserves intermediate states)
             if input_db:
                 shutil.copy2(input_db, output_db)
