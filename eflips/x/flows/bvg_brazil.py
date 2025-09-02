@@ -19,6 +19,7 @@ from eflips.x.steps import (
     do_station_electrification,
     run_simulation,
     vehicle_scheduling,
+    calculate_tco,
 )
 
 
@@ -143,7 +144,14 @@ def prepare_and_simulate_existing_depots_unchanged() -> None:
         input_db=post_do_station_electrification_path,
         output_db=post_run_simulation_path,
     )
-    return post_run_simulation_path
+
+    post_calculate_tco_path = cache_dir / "06_calculate_tco.db"
+    calculate_tco(
+        input_db=post_run_simulation_path,
+        output_db=post_calculate_tco_path,
+    )
+
+    return post_calculate_tco_path
 
 
 if __name__ == "__main__":

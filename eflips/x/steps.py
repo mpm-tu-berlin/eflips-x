@@ -69,6 +69,9 @@ from eflips.x.util_legacy import (
     clear_previous_simulation_results,
 )
 
+from eflips.x.util_tco_calculation import tco_parameters
+from eflips.tco import TCOCalculator, init_tco_parameters
+
 
 @pipeline_step(
     step_name="bvgxml-ingest-2025-06",
@@ -1152,3 +1155,43 @@ def run_simulation(db_path: Path):
         session.commit()
 
         print(f"Simulation complete for scenario {scenario.name_short}.")
+
+
+@pipeline_step(
+    step_name="tco-calculation",
+    code_version="0.1.0",
+    input_files=None,
+)
+def calculate_tco(db_path: Path):
+    logger = logging.getLogger(__name__)
+    url = f"sqlite:///{db_path}"
+    engine = eflips.model.create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        scenario = session.query(Scenario).one()
+        dict_tco_params = tco_parameters(scenario, session)
+        init_tco_parameters(
+            scenario=scenario,
+            scenario_tco_parameters=dict_tco_params["scenario_tco_parameters"],
+            vehicle_types=dict_tco_params["vehicle_types"],
+            battery_types=dict_tco_params["battery_types"],
+            charging_point_types=dict_tco_params["charging_point_types"],
+            charging_infrastructure=dict_tco_params["charging_infrastructure"],
+        )
+        tco_calculator = TCOCalculator(scenario=scenario, energy_consumption_mode="constant")
+        tco_calculator.calculate()
+        result = tco_calculator.tco_by_type
+        result["INFRASTRUCTURE"] += result.get("CHARGING_POINT", 0.0)
+        result.pop("CHARGING_POINT", None)
+        # Write the result to json file
+
+        import json
+
+        with open("tco_result.json", "w") as f:
+            json.dump(result, f, indent=4)
+
+        logger.info(f"Total Cost of Ownership (TCO): {tco_calculator.tco_unit_distance} EUR / km")
