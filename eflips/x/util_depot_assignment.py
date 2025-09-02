@@ -345,8 +345,6 @@ def optimize_scenario(scenario: Scenario, session: sqlalchemy.orm.session.Sessio
     assert optimizer.data["result"].shape[0] == optimizer.data["rotation"].shape[0]
 
     fig = optimizer.visualize()
-    fig.write_html(f"06b_complete_rotation_plan_{scenario.name_short}.html")
-    fig.write_image(f"06b_complete_rotation_plan_{scenario.name_short}.svg")
 
     # Save a geographic trip plot
     # We will need to flush and expunge the session in order for the geom to be converted to binary
@@ -394,5 +392,4 @@ def optimize_scenario(scenario: Scenario, session: sqlalchemy.orm.session.Sessio
     ax.set_yticklabels(keys)
 
     plt.tight_layout()
-    plt.savefig(f"06b_depot_rotation_count_{scenario.name_short}.svg")
     plt.show()

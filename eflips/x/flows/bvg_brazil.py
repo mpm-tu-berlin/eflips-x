@@ -1,4 +1,5 @@
 import glob
+from datetime import timedelta
 from pathlib import Path
 from tempfile import gettempdir
 
@@ -17,6 +18,7 @@ from eflips.x.steps import (
     is_station_electrification_possible,
     do_station_electrification,
     run_simulation,
+    vehicle_scheduling,
 )
 
 
@@ -107,9 +109,18 @@ def prepare_and_simulate_existing_depots_unchanged() -> None:
         output_db=post_add_temperature_consumption_path,
     )
 
+    post_scheduling_path = cache_dir / "01b_scheduling.db"
+    vehicle_scheduling(
+        input_db=post_add_temperature_consumption_path,
+        output_db=post_scheduling_path,
+        minimum_break_time=timedelta(seconds=0),
+        maximum_schedule_duration=timedelta(hours=24),
+        battery_margin=0.1,
+    )
+
     post_depot_assignment_path = cache_dir / "02_depot_assignment.db"
     depot_assignment(
-        input_db=post_add_temperature_consumption_path,
+        input_db=post_scheduling_path,
         output_db=post_depot_assignment_path,
     )
 

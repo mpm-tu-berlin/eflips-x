@@ -7,6 +7,7 @@ This file contains all sorts of workflow steps used in the eflips pipelines.
 import logging
 from collections import defaultdict
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import List, Dict
 from zoneinfo import ZoneInfo
@@ -22,8 +23,10 @@ from eflips.depot.api import (
     init_simulation,
     add_evaluation_to_database,
     apply_even_smart_charging,
+    ConsumptionResult,
 )
 from eflips.ingest.legacy import bvgxml
+from eflips.model import Base
 from eflips.model import (
     Rotation,
     VehicleType,
@@ -42,10 +45,13 @@ from eflips.model import (
     VoltageLevel,
     Event,
 )
+from eflips.model import create_engine
+from eflips.opt.scheduling import create_graph, solve, write_back_rotation_plan
 from fuzzywuzzy import fuzz
 from geoalchemy2.shape import to_shape
 from matplotlib import pyplot as plt
 from prefect import task
+from prefect.artifacts import create_progress_artifact, update_progress_artifact
 from sqlalchemy import not_, func
 from sqlalchemy.orm import Session, joinedload
 from tqdm import tqdm
@@ -56,7 +62,6 @@ from eflips.x.flows.util_station_electrification import (
     add_charging_station,
 )
 from eflips.x.util import pipeline_step
-from eflips.model import Base
 from eflips.x.util_depot_assignment import optimize_scenario
 from eflips.x.util_legacy import (
     update_trip_loaded_masses,
@@ -638,7 +643,7 @@ def vehicle_type_and_depot_plot(db_path: Path, output_path: Path):
         df2 = df2[["Single Decker", "Articulated Bus", "Double Decker"]]
         # Plot the data
         df2.plot(kind="bar", stacked=True, ax=ax, color=palette)
-        df2.to_pickle("03a_vehicle_type_and_depot_plot.pkl")
+        df2.to_pickle(f"{output_path}/vehicle_type_and_depot_pivoted_data.pkl")
 
         ax.set_title("")
         ax.set_ylabel(r"Revenue Mileage $\left[ \frac{km \times 10^6}{a} \right]$")
@@ -833,6 +838,95 @@ def add_temperatures_and_consumption(db_path: Path):
             raise
         finally:
             session.commit()
+
+
+@pipeline_step(
+    step_name="vehicle-scheduling",
+    code_version="0.1.2",
+    input_files=None,
+)
+def vehicle_scheduling(
+    db_path: Path,
+    minimum_break_time: timedelta = timedelta(seconds=0),
+    maximum_schedule_duration=timedelta(hours=24),
+    battery_margin=0.1,
+) -> None:
+    progress_artifact_id = create_progress_artifact(
+        progress=0.0,
+        description="Starting vehicle scheduling",
+    )
+    logger = logging.getLogger(__name__)
+    url = f"sqlite:///{db_path}"
+    engine = create_engine(url)
+    with Session(engine) as session:
+        # make sure there is just one scenario
+        scenario_q = session.query(eflips.model.Scenario)
+        if scenario_q.count() != 1:
+            raise ValueError(f"Expected exactly one scenario, found {scenario_q.count()}")
+        scenario = scenario_q.one()
+
+        # Create a dictionary of the energy consumption for each rotation, tehn convert it to the format
+        # eflips-opt expects.
+        consumption: Dict[int, ConsumptionResult] = generate_consumption_result(scenario)
+
+        # this is of the format {trip_id: ConsumptionResult, ...}, we need to convert it to
+        # {trip_is: delta_soc, ...} and also turn the delta_soc into a positive number
+        delta_socs: Dict[int, float] = {}
+        for trip_id, result in consumption.items():
+            delta_socs[trip_id] = -1 * result.delta_soc_total / (1 - battery_margin)
+
+        update_progress_artifact(
+            artifact_id=progress_artifact_id,
+            progress=0.1,
+            description="Generated consumption results",
+        )
+
+        # Create the graph of all possible connections between trips
+        # Internally, this is done separately for each vehicle type
+        # We will also do it separately for each vehicle type, so we can log some progress information
+        all_vehicle_types = session.query(VehicleType).join(Rotation).distinct().all()
+        if len(all_vehicle_types) == 0:
+            raise ValueError("No vehicle types found in the database")
+        for i, vehicle_type in enumerate(all_vehicle_types):
+            trips = (
+                session.query(Trip)
+                .join(Rotation)
+                .filter(Rotation.vehicle_type_id == vehicle_type.id)
+                .filter(Trip.trip_type == TripType.PASSENGER)
+                .all()
+            )
+            graph = create_graph(
+                trips=trips,
+                delta_socs=delta_socs,
+                maximum_schedule_duration=maximum_schedule_duration,
+                minimum_break_time=minimum_break_time,
+            )
+            progress = ((3 * i + 1) / (3 * len(all_vehicle_types))) * 100
+            update_progress_artifact(
+                artifact_id=progress_artifact_id,
+                progress=progress,
+                description=f"Created graph for vehicle type {vehicle_type.name_short}",
+            )
+
+            rotation_plan = solve(graph)
+            progress = ((3 * i + 2) / (3 * len(all_vehicle_types))) * 100
+            update_progress_artifact(
+                artifact_id=progress_artifact_id,
+                progress=progress,
+                description=f"Solved vehicle scheduling for vehicle type {vehicle_type.name_short}",
+            )
+
+            write_back_rotation_plan(rotation_plan, session)
+            progress = ((3 * i + 3) / (3 * len(all_vehicle_types))) * 100
+            update_progress_artifact(
+                artifact_id=progress_artifact_id,
+                progress=progress,
+                description=f"Wrote back rotation plan for vehicle type {vehicle_type.name_short}",
+            )
+
+            logger.info(
+                f"Created graph for vehicle type {vehicle_type.name_short} with {len(graph.nodes)} nodes and {len(graph.edges)} edges"
+            )
 
 
 @pipeline_step(
