@@ -47,6 +47,7 @@ from eflips.model import (
 )
 from eflips.model import create_engine
 from eflips.opt.scheduling import create_graph, solve, write_back_rotation_plan
+from eflips.tco import TCOCalculator, init_tco_parameters
 from fuzzywuzzy import fuzz
 from geoalchemy2.shape import to_shape
 from matplotlib import pyplot as plt
@@ -68,9 +69,7 @@ from eflips.x.util_legacy import (
     make_depot_stations_electrified,
     clear_previous_simulation_results,
 )
-
 from eflips.x.util_tco_calculation import tco_parameters
-from eflips.tco import TCOCalculator, init_tco_parameters
 
 
 @pipeline_step(
@@ -845,7 +844,7 @@ def add_temperatures_and_consumption(db_path: Path):
 
 @pipeline_step(
     step_name="vehicle-scheduling",
-    code_version="0.1.2",
+    code_version="0.1.3",
     input_files=None,
 )
 def vehicle_scheduling(
@@ -930,11 +929,12 @@ def vehicle_scheduling(
             logger.info(
                 f"Created graph for vehicle type {vehicle_type.name_short} with {len(graph.nodes)} nodes and {len(graph.edges)} edges"
             )
+        session.commit()
 
 
 @pipeline_step(
     step_name="depot-assignment",
-    code_version="0.1.1",
+    code_version="0.1.2",
     input_files=None,
 )
 def depot_assignment(db_path: Path):
@@ -1010,10 +1010,12 @@ def is_station_electrification_possible(db_path: Path):
                 "Scenario has rotations with SOC below 0% even with all stations electrified."
             )
 
+        session.commit()
+
 
 @pipeline_step(
     step_name="do-station-electrification",
-    code_version="0.1.0",
+    code_version="0.1.1",
     input_files=None,
 )
 def do_station_electrification(db_path: Path):
