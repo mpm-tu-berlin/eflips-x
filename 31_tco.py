@@ -310,7 +310,7 @@ warnings.simplefilter("ignore", ConsistencyWarning)
 def main() -> None:
     """Main execution function."""
     assert (
-            "DATABASE_URL" in os.environ
+        "DATABASE_URL" in os.environ
     ), "Please set the DATABASE_URL environment variable."
 
     database_url = os.environ["DATABASE_URL"]

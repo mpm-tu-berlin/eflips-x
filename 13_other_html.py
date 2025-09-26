@@ -54,7 +54,7 @@ def inner_generate_vehicle_plot(
     assert os.path.exists(vehicle_folder), f"Folder {vehicle_folder} does not exist"
     output_file_name = os.path.join(vehicle_folder, f"{vehicle.id}.html")
     if not os.path.exists(output_file_name):
-        df, descriptions = eflips.eval.output.prepare.vehicle_soc(vehicle.id, session)
+        df, descriptions = (vehicle.id, session)
         fig = eflips.eval.output.visualize.vehicle_soc(df, descriptions)
         fig.update_layout(
             title=f"Vehicle {vehicle.id} of type {vehicle.vehicle_type.name_short}"
