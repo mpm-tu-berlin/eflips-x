@@ -6,9 +6,4 @@
     <option name="sdkName" value="Poetry (eflips-x)" />
   </component>
   <component name="ProjectRootManager" version="2" project-jdk-name="Poetry (eflips-x)" project-jdk-type="Python SDK" />
-  <component name="SshConsoleOptionsProvider">
-    <option name="myEncoding" value="UTF-8" />
-    <option name="myConnectionType" value="NONE" />
-    <option name="myConnectionId" value="" />
-  </component>
 </project>
