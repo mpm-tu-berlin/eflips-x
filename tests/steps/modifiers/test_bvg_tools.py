@@ -6,6 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import eflips.model
+import numpy as np
 import pytest
 from eflips.model import (
     Rotation,
@@ -16,6 +17,9 @@ from eflips.model import (
     VehicleType,
     TripType,
     ConsistencyWarning,
+    ConsumptionLut,
+    VehicleClass,
+    AssocVehicleTypeVehicleClass,
 )
 from geoalchemy2.elements import WKTElement
 from sqlalchemy.orm import Session
@@ -252,6 +256,90 @@ class TestRemoveUnusedVehicleTypes:
         assert gn_rotations == 2  # GN and GEG
         assert en_rotations == 1  # EN
         assert dd_rotations == 1  # D
+
+    def test_remove_unused_vehicle_types_with_multiplier(
+        self, temp_db: Path, scenario_with_vehicle_types, db_session: Session
+    ):
+        """Test RemoveUnusedVehicleTypes modifier using default parameters."""
+        modifier = RemoveUnusedVehicleTypes()
+
+        # Create pipeline context
+        context = PipelineContext(work_dir=temp_db.parent, current_db=temp_db)
+
+        params = {
+            "RemoveUnusedVehicleTypes.override_consumption_lut": {
+                "GN": 2.0,
+            }
+        }
+
+        # Run modifier
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            modifier.modify(
+                session=db_session,
+                params=params,
+            )
+
+            # Check that warnings were emitted for using defaults
+            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
+
+            assert len(non_consistency_warnings) == 2
+            assert "new_vehicle_types" in str(non_consistency_warnings[0].message)
+            assert "vehicle_type_conversion" in str(non_consistency_warnings[1].message)
+
+        # Cehck that the new "GN" short name vehicle type has a consumption lut
+        consumption_lut = (
+            db_session.query(ConsumptionLut)
+            .join(VehicleClass)
+            .join(AssocVehicleTypeVehicleClass)
+            .join(VehicleType)
+            .filter(VehicleType.name_short == "GN")
+            .one()
+        )
+
+        assert np.isclose(max(consumption_lut.values), 5.332117566234736)
+
+    def test_remove_unused_vehicle_types_with_path(
+        self, temp_db: Path, scenario_with_vehicle_types, db_session: Session
+    ):
+        """Test RemoveUnusedVehicleTypes modifier using default parameters."""
+        modifier = RemoveUnusedVehicleTypes()
+
+        # Create pipeline context
+        context = PipelineContext(work_dir=temp_db.parent, current_db=temp_db)
+
+        params = {
+            "RemoveUnusedVehicleTypes.override_consumption_lut": {
+                "GN": Path("data/input/consumption_lut_gn.xlsx").absolute()
+            }
+        }
+
+        # Run modifier
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            modifier.modify(
+                session=db_session,
+                params=params,
+            )
+
+            # Check that warnings were emitted for using defaults
+            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
+
+            assert len(non_consistency_warnings) == 2
+            assert "new_vehicle_types" in str(non_consistency_warnings[0].message)
+            assert "vehicle_type_conversion" in str(non_consistency_warnings[1].message)
+
+        # Cehck that the new "GN" short name vehicle type has a consumption lut
+        consumption_lut = (
+            db_session.query(ConsumptionLut)
+            .join(VehicleClass)
+            .join(AssocVehicleTypeVehicleClass)
+            .join(VehicleType)
+            .filter(VehicleType.name_short == "GN")
+            .one()
+        )
+
+        assert np.isclose(max(consumption_lut.values), 3.593211767009342)
 
     def test_remove_unused_vehicle_types_with_custom_params(
         self, temp_db: Path, scenario_with_vehicle_types
