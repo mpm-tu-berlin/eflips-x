@@ -19,6 +19,9 @@ class TripDistanceAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
+    def document_params(self) -> Dict[str, str]:
+        return dict()
+
     def analyze(self, db: Path, params: Dict[str, Any]) -> float:
         """
         Analyze the database and return the total distance of all trips.
