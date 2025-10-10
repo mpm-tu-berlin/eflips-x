@@ -57,6 +57,18 @@ class PipelineStep(ABC):
         self._prefect_task = None
 
     @abstractmethod
+    def document_params(self) -> Dict[str, str]:
+        """
+        This method documents the parameters of the generator. It returns a dictionary where the keys are the parameter
+        and the values are a description of the parameter. The values may use markdown formatting. They may be
+        multi-line strings.
+        If the parameters are specific to a subclass, the key should be prefixed with the class name and a dot.
+        For example, if the class is MyGenerator and the parameter is my_param, the key should be MyGenerator.my_param.
+        :return: A dictionary documenting the parameters of the generator.
+        """
+        pass
+
+    @abstractmethod
     def compute_cache_key(self, context: PipelineContext) -> str:
         """Compute cache key for this step."""
         pass

@@ -46,6 +46,14 @@ class BVGXMLIngester(Generator):
             raise ValueError(f"The following input files do not exist: {missing_files}")
 
     def document_params(self) -> Dict[str, str]:
+        """
+        This method documents the parameters of the generator. It returns a dictionary where the keys are the parameter
+        and the values are a description of the parameter. The values may use markdown formatting. They may be
+        multi-line strings.
+        If the parameters are specific to a subclass, the key should be prefixed with the class name and a dot.
+        For example, if the class is MyGenerator and the parameter is my_param, the key should be MyGenerator.my_param.
+        :return: A dictionary documenting the parameters of the generator.
+        """
         return {
             "log_level": "Logging level. One of DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is INFO.",
             f"{self.__class__.__name__}.multithreading": "Whether to use multithreading. Default is True.",
