@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        PYTHON_VERSION: [ "3.12", "3.13", "3.14" ]
+        PYTHON_VERSION: [ "3.12", "3.13" ]
         DATABASE: [ "sqlite" ]
 
     steps:
