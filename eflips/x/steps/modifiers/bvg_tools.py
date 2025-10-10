@@ -13,7 +13,19 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import eflips.model
-from eflips.model import Rotation, VehicleType, Station, Route, AssocRouteStation, StopTime, Trip
+import numpy as np
+import pandas as pd
+from eflips.model import (
+    Rotation,
+    VehicleType,
+    Station,
+    Route,
+    AssocRouteStation,
+    StopTime,
+    Trip,
+    VehicleClass,
+    ConsumptionLut,
+)
 from fuzzywuzzy import fuzz
 from geoalchemy2.shape import to_shape
 from sqlalchemy import not_, func
@@ -139,7 +151,88 @@ old type short names to convert.
 }
 ```
             """.strip(),
+            f"{self.__class__.__name__}.override_consumption_lut": """
+This should be a Dict[str, float | Path], with the key being the short name of the (new)
+vehicle type to override. If the value is a float, a default LUT based on Ji(2022) will 
+be created using eflips-model and it's consumption will be scaled by multiplying with the
+given float. If the value is a Path, it should point to an Excel file (see
+`data/input/consumption_lut_gn.xlsx` for an example) that contains the consumption LUT
+for the vehicle type.
+""".strip(),
         }
+
+    def add_consumption_lut_for_vehicle_type(
+        self,
+        session: Session,
+        vehicle_type: VehicleType,
+        multiplier: float = 1.0,
+        path: Path = None,
+    ) -> None:
+        """
+        This method creates the correpsonding vehicle class and consumption LUT for the given vehicle type.
+        If a path is given, it will load the consumption LUT from the given Excel file.
+
+        :param session: An open SQLAlchemy session
+        :param vehicle_type: The vehicle type to create the consumption LUT for
+        :param multiplier: an optional multiplier to scale the consumption LUT. Default is 1.0 (no scaling)
+        :param path: an optional path to an Excel file containing the consumption LUT. if set
+        this will override the multiplier.
+        :return: None. The LUT is added to the database via the session.
+        """
+        logger = logging.getLogger(__name__)
+
+        # Create a vehicle class for the vehicle type
+        vehicle_class = VehicleClass(
+            scenario_id=vehicle_type.scenario_id,
+            name=f"Consumption LUT for {vehicle_type.name_short}",
+            vehicle_types=[vehicle_type],
+        )
+        session.add(vehicle_class)
+        session.flush()  # To get assign the IDs
+
+        # Create a LUT for the vehicle class
+        # It may be scaked or updated below.
+        consumption_lut = ConsumptionLut.from_vehicle_type(vehicle_type, vehicle_class)
+        session.add(consumption_lut)
+
+        if path is not None:
+            with open(path, "rb") as f:
+                consumption_lut_file = pd.read_excel(f)
+
+            # The LUT is a 2D table. The first column is the average speed.
+            # The first row contains the temperatures.
+            # Turn it into a multi-indexed dataframe
+            emp_temperatures = np.array(consumption_lut_file.columns[1:]).astype(np.float64)
+            emp_speeds = np.array(consumption_lut_file.iloc[:, 0]).astype(np.float64)
+            emp_data = np.array(consumption_lut_file.iloc[:, 1:]).astype(np.float64)
+
+            new_coordinates = []
+            new_values = []
+
+            # Update the LUT with the empirical data
+            incline = 0.0
+            level_of_loading = 0.5
+            for i, temperature in enumerate(emp_temperatures):
+                for j, speed in enumerate(emp_speeds):
+                    # Interpolate the empirical data to the coordinates
+                    consumption = emp_data[i, j]
+                    if not np.isnan(consumption):
+                        new_coordinates.append((incline, temperature, level_of_loading, speed))
+                        new_values.append(consumption)
+            consumption_lut.data_points = [
+                [float(value) for value in coord] for coord in new_coordinates
+            ]
+            consumption_lut.values = [float(value) for value in new_values]
+            logger.info(
+                f"Loaded consumption LUT for vehicle type {vehicle_type.name_short} from {path}"
+            )
+        elif multiplier != 1.0:
+            consumption_lut.values = [
+                float(value * multiplier) for value in consumption_lut.values
+            ]
+            logger.info(
+                f"Scaled consumption LUT for vehicle type {vehicle_type.name_short} by {multiplier}"
+            )
 
     def modify(self, session: Session, params: Dict[str, Any]) -> Path:
         """
@@ -267,6 +360,27 @@ old type short names to convert.
             vt.scenario_id = scenario_id
             session.add(vt)
             created_vehicle_types.append(vt)
+
+            # Check if we need to override the consumption LUT for this vehicle type
+            param_key_lut = f"{self.__class__.__name__}.override_consumption_lut"
+            override_lut: Dict[str, Any] = params.get(param_key_lut, {})
+            if vt.name_short in override_lut:
+                lut_value = override_lut[vt.name_short]
+                if isinstance(lut_value, (float, int)):
+                    self.add_consumption_lut_for_vehicle_type(
+                        session, vt, multiplier=float(lut_value)
+                    )
+                elif isinstance(lut_value, (str, Path)):
+                    self.add_consumption_lut_for_vehicle_type(session, vt, path=Path(lut_value))
+                else:
+                    raise ValueError(
+                        f"Invalid value for {param_key_lut}['{vt.name_short}']: {lut_value}. "
+                        "Must be float or Path."
+                    )
+            else:
+                # Add a default consumption LUT without scaling
+                self.add_consumption_lut_for_vehicle_type(session, vt)
+
         session.flush()
 
         # Build a mapping from vehicle type instances to their short names for lookup
