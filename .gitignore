@@ -233,3 +233,4 @@ data/input/Berlin 2025-06/*.xml
 data/cache/**/*
 data/output/**/*
 
+doc/_build/*

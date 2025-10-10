@@ -1,29 +1,17 @@
 import logging
 import os
-import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
-from tempfile import gettempdir
-from typing import Tuple, Dict, List, Any
+from typing import Tuple, Dict, List
 from urllib.parse import urlparse
 
 import eflips.model
 import pytz
-import sqlalchemy
 from alembic import command
 from alembic.config import Config
 from eflips.depot.api import (
     group_rotations_by_start_end_stop,
-    ConsumptionResult,
-    simple_consumption_simulation,
-    generate_depot_layout,
-    init_simulation,
-    run_simulation,
-    add_evaluation_to_database,
-    insert_dummy_standby_departure_events,
-    apply_even_smart_charging,
-    generate_consumption_result,
 )
 from eflips.model import (
     Event,
@@ -35,13 +23,8 @@ from eflips.model import (
     ChargeType,
     VoltageLevel,
     Trip,
-    EventType,
-    Area,
-    Process,
-    Depot,
 )
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 from tqdm.asyncio import tqdm
 
 tz = pytz.timezone("Europe/Berlin")
@@ -184,14 +167,13 @@ def update_trip_loaded_masses(scenario: Scenario, session: Session) -> None:
 def _progress_process_method(total_count: int, queue: Queue):
     """
     This method reports progress. It sets up a tqdm, gets a count from the progress queue and updates the command line.
-     It may later be overridden / monkey-patched to do analytics.
-    Args:
-        total_count: The total amount of iterations (may be routes, trips, generations for evolutionary algorithms…
-                     Each iteration should take a similar amount of wallclock time.
-        queue: the progress queue object. Set automatically from `train_in_parallel()`
+    It may later be overridden / monkey-patched to do analytics.
 
-    Returns:
-        Nothing.
+    :param total_count: The total amount of iterations (may be routes, trips, generations for evolutionary algorithms.
+        Each iteration should take a similar amount of wallclock
+        time.
+    :param queue: the progress queue object. Set automatically from `train_in_parallel()`
+    :return: None
 
     """
     progress_reporter = tqdm(total=total_count, smoothing=0)
