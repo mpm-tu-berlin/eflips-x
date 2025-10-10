@@ -17,10 +17,15 @@ from eflips.model import (
     TripType,
     ConsistencyWarning,
 )
+from geoalchemy2.elements import WKTElement
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import PipelineContext
-from eflips.x.steps.modifiers.bvg_tools import RemoveUnusedVehicleTypes
+from eflips.x.steps.modifiers.bvg_tools import (
+    RemoveUnusedVehicleTypes,
+    RemoveUnusedRotations,
+    MergeStations,
+)
 
 
 class TestRemoveUnusedVehicleTypes:
@@ -443,3 +448,597 @@ class TestRemoveUnusedVehicleTypes:
         assert "RemoveUnusedVehicleTypes.vehicle_type_conversion" in docs
         assert "VehicleType" in docs["RemoveUnusedVehicleTypes.new_vehicle_types"]
         assert "Dict[str, List[str]]" in docs["RemoveUnusedVehicleTypes.vehicle_type_conversion"]
+
+
+class TestRemoveUnusedRotations:
+    """Test suite for RemoveUnusedRotations modifier."""
+
+    @pytest.fixture
+    def scenario_with_rotations(self, db_session: Session) -> Scenario:
+        """Create a test scenario with rotations starting/ending at different stations."""
+        scenario = Scenario(name="Test Scenario", name_short="TEST")
+        db_session.add(scenario)
+        db_session.flush()
+
+        # Create stations
+        depot1 = Station(
+            name="Betriebshof Lichtenberg",
+            name_short="BF L",
+            scenario_id=scenario.id,
+            geom=None,
+            is_electrified=False,
+        )
+        depot2 = Station(
+            name="Betriebshof Marzahn",
+            name_short="BF M",
+            scenario_id=scenario.id,
+            geom=None,
+            is_electrified=False,
+        )
+        other_station = Station(
+            name="Other Station",
+            name_short="OTHER",
+            scenario_id=scenario.id,
+            geom=None,
+            is_electrified=False,
+        )
+        intermediate_station = Station(
+            name="Intermediate Station",
+            name_short="INTER",
+            scenario_id=scenario.id,
+            geom=None,
+            is_electrified=False,
+        )
+        db_session.add_all([depot1, depot2, other_station, intermediate_station])
+        db_session.flush()
+
+        # Create a vehicle type
+        vt = VehicleType(
+            name="Test Bus",
+            scenario_id=scenario.id,
+            name_short="TB",
+            battery_capacity=400.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 300], [1, 300]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+        )
+        db_session.add(vt)
+        db_session.flush()
+
+        # Create routes
+        route_depot1_inter = Route(
+            name="Route Depot1 to Inter",
+            name_short="D1-I",
+            scenario_id=scenario.id,
+            departure_station=depot1,
+            arrival_station=intermediate_station,
+            distance=5000,
+        )
+        route_inter_depot1 = Route(
+            name="Route Inter to Depot1",
+            name_short="I-D1",
+            scenario_id=scenario.id,
+            departure_station=intermediate_station,
+            arrival_station=depot1,
+            distance=5000,
+        )
+        route_depot2_inter = Route(
+            name="Route Depot2 to Inter",
+            name_short="D2-I",
+            scenario_id=scenario.id,
+            departure_station=depot2,
+            arrival_station=intermediate_station,
+            distance=5000,
+        )
+        route_inter_depot2 = Route(
+            name="Route Inter to Depot2",
+            name_short="I-D2",
+            scenario_id=scenario.id,
+            departure_station=intermediate_station,
+            arrival_station=depot2,
+            distance=5000,
+        )
+        route_other_inter = Route(
+            name="Route Other to Inter",
+            name_short="O-I",
+            scenario_id=scenario.id,
+            departure_station=other_station,
+            arrival_station=intermediate_station,
+            distance=5000,
+        )
+        route_inter_other = Route(
+            name="Route Inter to Other",
+            name_short="I-O",
+            scenario_id=scenario.id,
+            departure_station=intermediate_station,
+            arrival_station=other_station,
+            distance=5000,
+        )
+        db_session.add_all(
+            [
+                route_depot1_inter,
+                route_inter_depot1,
+                route_depot2_inter,
+                route_inter_depot2,
+                route_other_inter,
+                route_inter_other,
+            ]
+        )
+        db_session.flush()
+
+        # Rotation 1: Depot1 -> Inter -> Depot1 (should be kept)
+        rotation1 = Rotation(
+            name="Rotation Valid Depot1",
+            scenario_id=scenario.id,
+            vehicle_type=vt,
+            allow_opportunity_charging=False,
+        )
+        db_session.add(rotation1)
+        db_session.flush()
+        trip1_1 = Trip(
+            rotation=rotation1,
+            route=route_depot1_inter,
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 8, 0, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 8, 30, tzinfo=ZoneInfo("UTC")),
+        )
+        trip1_2 = Trip(
+            rotation=rotation1,
+            route=route_inter_depot1,
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 8, 45, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 9, 15, tzinfo=ZoneInfo("UTC")),
+        )
+        db_session.add_all([trip1_1, trip1_2])
+
+        # Rotation 2: Depot2 -> Inter -> Depot2 (should be kept)
+        rotation2 = Rotation(
+            name="Rotation Valid Depot2",
+            scenario_id=scenario.id,
+            vehicle_type=vt,
+            allow_opportunity_charging=False,
+        )
+        db_session.add(rotation2)
+        db_session.flush()
+        trip2_1 = Trip(
+            rotation=rotation2,
+            route=route_depot2_inter,
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 9, 0, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 9, 30, tzinfo=ZoneInfo("UTC")),
+        )
+        trip2_2 = Trip(
+            rotation=rotation2,
+            route=route_inter_depot2,
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 9, 45, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 10, 15, tzinfo=ZoneInfo("UTC")),
+        )
+        db_session.add_all([trip2_1, trip2_2])
+
+        # Rotation 3: Other -> Inter -> Other (should be removed - not a depot)
+        rotation3 = Rotation(
+            name="Rotation Invalid Other",
+            scenario_id=scenario.id,
+            vehicle_type=vt,
+            allow_opportunity_charging=False,
+        )
+        db_session.add(rotation3)
+        db_session.flush()
+        trip3_1 = Trip(
+            rotation=rotation3,
+            route=route_other_inter,
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 10, 0, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 10, 30, tzinfo=ZoneInfo("UTC")),
+        )
+        trip3_2 = Trip(
+            rotation=rotation3,
+            route=route_inter_other,
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 10, 45, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 11, 15, tzinfo=ZoneInfo("UTC")),
+        )
+        db_session.add_all([trip3_1, trip3_2])
+
+        # Rotation 4: Depot1 -> Inter -> Depot2 (should be removed - starts and ends at different depots)
+        rotation4 = Rotation(
+            name="Rotation Invalid Different Depots",
+            scenario_id=scenario.id,
+            vehicle_type=vt,
+            allow_opportunity_charging=False,
+        )
+        db_session.add(rotation4)
+        db_session.flush()
+        trip4_1 = Trip(
+            rotation=rotation4,
+            route=route_depot1_inter,
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 11, 0, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 11, 30, tzinfo=ZoneInfo("UTC")),
+        )
+        trip4_2 = Trip(
+            rotation=rotation4,
+            route=route_inter_depot2,
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 11, 45, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 12, 15, tzinfo=ZoneInfo("UTC")),
+        )
+        db_session.add_all([trip4_1, trip4_2])
+
+        db_session.commit()
+        return scenario
+
+    def test_remove_unused_rotations_with_defaults(
+        self, temp_db: Path, scenario_with_rotations, db_session: Session
+    ):
+        """Test RemoveUnusedRotations modifier using default parameters."""
+        modifier = RemoveUnusedRotations()
+
+        # Run modifier with default BVG depot names (includes "BF L" and "BF M")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            modifier.modify(session=db_session, params={})
+
+            # Check that warning was emitted for using defaults
+            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
+            assert len(non_consistency_warnings) == 1
+            assert "depot_station_short_names" in str(non_consistency_warnings[0].message)
+
+        # Default depot names include "BF L" and "BF M", so 2 valid rotations should remain
+        rotations = db_session.query(Rotation).all()
+        assert len(rotations) == 2
+
+        # Verify the kept rotations are the valid ones
+        rotation_names = {rot.name for rot in rotations}
+        assert rotation_names == {"Rotation Valid Depot1", "Rotation Valid Depot2"}
+
+    def test_remove_unused_rotations_with_custom_params(
+        self, temp_db: Path, scenario_with_rotations, db_session: Session
+    ):
+        """Test RemoveUnusedRotations modifier with custom depot station names."""
+        modifier = RemoveUnusedRotations()
+
+        # Use custom depot names that match our test depots
+        params = {"RemoveUnusedRotations.depot_station_short_names": ["BF L", "BF M"]}
+
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Check that only valid rotations remain (2 rotations starting/ending at the same depot)
+        rotations = db_session.query(Rotation).all()
+        assert len(rotations) == 2
+
+        # Verify the kept rotations are the valid ones
+        rotation_names = {rot.name for rot in rotations}
+        assert rotation_names == {"Rotation Valid Depot1", "Rotation Valid Depot2"}
+
+        # Verify trips were properly deleted for removed rotations
+        all_trips = db_session.query(Trip).all()
+        assert len(all_trips) == 4  # 2 trips per valid rotation
+
+    def test_remove_unused_rotations_keeps_single_depot(
+        self, temp_db: Path, scenario_with_rotations, db_session: Session
+    ):
+        """Test that only rotations from a single depot can be kept."""
+        modifier = RemoveUnusedRotations()
+
+        # Only keep depot1
+        params = {"RemoveUnusedRotations.depot_station_short_names": ["BF L"]}
+
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Check that only depot1 rotation remains
+        rotations = db_session.query(Rotation).all()
+        assert len(rotations) == 1
+        assert rotations[0].name == "Rotation Valid Depot1"
+
+    def test_remove_unused_rotations_empty_depot_list_error(
+        self, temp_db: Path, scenario_with_rotations, db_session: Session
+    ):
+        """Test that empty depot list raises ValueError."""
+        modifier = RemoveUnusedRotations()
+
+        params = {"RemoveUnusedRotations.depot_station_short_names": []}
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            modifier.modify(session=db_session, params=params)
+
+    def test_remove_unused_rotations_nonexistent_depot(
+        self, temp_db: Path, scenario_with_rotations, db_session: Session
+    ):
+        """Test behavior when depot station names don't exist in database."""
+        modifier = RemoveUnusedRotations()
+
+        params = {"RemoveUnusedRotations.depot_station_short_names": ["NONEXISTENT"]}
+
+        # Should not raise error, but should remove all rotations
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        rotations = db_session.query(Rotation).all()
+        assert len(rotations) == 0
+
+    def test_document_params(self):
+        """Test that document_params returns expected parameter documentation."""
+        modifier = RemoveUnusedRotations()
+        docs = modifier.document_params()
+
+        assert "RemoveUnusedRotations.depot_station_short_names" in docs
+        assert "List[str]" in docs["RemoveUnusedRotations.depot_station_short_names"]
+        assert "BVG" in docs["RemoveUnusedRotations.depot_station_short_names"]
+
+
+class TestMergeStations:
+    """Test suite for MergeStations modifier."""
+
+    @pytest.fixture
+    def scenario_with_nearby_stations(self, db_session: Session) -> Scenario:
+        """Create a test scenario covering all three merging test cases."""
+        scenario = Scenario(name="Test Scenario", name_short="TEST")
+        db_session.add(scenario)
+        db_session.flush()
+
+        # Test Case 1: Nearby stations with similar names (SHOULD merge)
+        station_nearby_similar_1 = Station(
+            name="Berlin Hauptbahnhof",
+            name_short="HBF1",
+            scenario_id=scenario.id,
+            geom=WKTElement("POINT(0 0)", srid=4326),
+            is_electrified=False,
+        )
+        station_nearby_similar_2 = Station(
+            name="S+U Berlin Hauptbahnhof",
+            name_short="HBF2",
+            scenario_id=scenario.id,
+            geom=WKTElement("POINT(0.0005 0)", srid=4326),  # ~50m away
+            is_electrified=False,
+        )
+
+        # Test Case 2: Far away stations with similar names (should NOT merge)
+        station_far_similar = Station(
+            name="Berlin Hbf Platform 2",
+            name_short="HBF3",
+            scenario_id=scenario.id,
+            geom=WKTElement("POINT(1 1)", srid=4326),  # ~157km away
+            is_electrified=False,
+        )
+
+        # Test Case 3: Nearby stations with different names (should NOT merge)
+        station_nearby_different = Station(
+            name="Zoologischer Garten",
+            name_short="ZOO",
+            scenario_id=scenario.id,
+            geom=WKTElement("POINT(0.0005 0.0005)", srid=4326),  # ~70m away, different name
+            is_electrified=False,
+        )
+
+        # Destination station for routes
+        station_destination = Station(
+            name="Alexanderplatz",
+            name_short="ALEX",
+            scenario_id=scenario.id,
+            geom=WKTElement("POINT(0.01 0.01)", srid=4326),
+            is_electrified=False,
+        )
+
+        db_session.add_all(
+            [
+                station_nearby_similar_1,
+                station_nearby_similar_2,
+                station_far_similar,
+                station_nearby_different,
+                station_destination,
+            ]
+        )
+        db_session.flush()
+
+        # Create a vehicle type
+        vt = VehicleType(
+            name="Test Bus",
+            scenario_id=scenario.id,
+            name_short="TB",
+            battery_capacity=400.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 300], [1, 300]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+        )
+        db_session.add(vt)
+        db_session.flush()
+
+        # Create routes using all stations so they're considered for merging
+        routes = [
+            Route(
+                name=f"Route from {station.name_short}",
+                name_short=f"R{i}",
+                scenario_id=scenario.id,
+                departure_station=station,
+                arrival_station=station_destination,
+                distance=5000,
+            )
+            for i, station in enumerate(
+                [
+                    station_nearby_similar_1,
+                    station_nearby_similar_2,
+                    station_far_similar,
+                    station_nearby_different,
+                ]
+            )
+        ]
+        db_session.add_all(routes)
+        db_session.flush()
+
+        # Create a rotation with a trip
+        rotation = Rotation(
+            name="Test Rotation",
+            scenario_id=scenario.id,
+            vehicle_type=vt,
+            allow_opportunity_charging=False,
+        )
+        db_session.add(rotation)
+        db_session.flush()
+
+        trip = Trip(
+            rotation=rotation,
+            route=routes[0],
+            scenario_id=scenario.id,
+            trip_type=TripType.PASSENGER,
+            departure_time=datetime(2024, 1, 1, 8, 0, tzinfo=ZoneInfo("UTC")),
+            arrival_time=datetime(2024, 1, 1, 8, 30, tzinfo=ZoneInfo("UTC")),
+        )
+        db_session.add(trip)
+
+        db_session.commit()
+        return scenario
+
+    def test_merge_stations_with_defaults(
+        self, temp_db: Path, scenario_with_nearby_stations, db_session: Session
+    ):
+        """Test MergeStations modifier covering all three test cases."""
+        modifier = MergeStations()
+
+        # Count initial stations
+        initial_station_count = db_session.query(Station).count()
+        assert initial_station_count == 5  # 4 test stations + 1 destination
+
+        # Run modifier with defaults (100m distance, 80% match)
+        modifier.modify(session=db_session, params={})
+        db_session.commit()
+
+        # After merging: 4 stations should remain
+        # 1. Berlin Hauptbahnhof (merged with S+U Berlin Hauptbahnhof)
+        # 2. Berlin Hbf Platform 2 (NOT merged - far away despite similar name)
+        # 3. Zoologischer Garten (NOT merged - nearby but different name)
+        # 4. Alexanderplatz (destination)
+        stations = db_session.query(Station).all()
+        assert len(stations) == 4, f"Expected 4 stations after merging, got {len(stations)}"
+
+        station_names = {s.name for s in stations}
+
+        # Case 1: Nearby + Similar name -> SHOULD merge (keep shorter name)
+        assert "Berlin Hauptbahnhof" in station_names
+        assert "S+U Berlin Hauptbahnhof" not in station_names
+
+        # Case 2: Far + Similar name -> should NOT merge
+        assert "Berlin Hbf Platform 2" in station_names
+
+        # Case 3: Nearby + Different name -> should NOT merge
+        assert "Zoologischer Garten" in station_names
+
+        # Destination should remain
+        assert "Alexanderplatz" in station_names
+
+    def test_merge_stations_with_stricter_params(
+        self, temp_db: Path, scenario_with_nearby_stations, db_session: Session
+    ):
+        """Test MergeStations with stricter matching criteria."""
+        modifier = MergeStations()
+
+        # Use stricter criteria (smaller distance, higher percentage)
+        params = {
+            "MergeStations.max_distance_meters": 30.0,  # Only 30 meters
+            "MergeStations.match_percentage": 90.0,  # 90% match required
+        }
+
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # With stricter criteria, no stations should be merged
+        stations = db_session.query(Station).all()
+        assert len(stations) == 5  # All original stations remain
+
+    def test_merge_stations_updates_routes(
+        self, temp_db: Path, scenario_with_nearby_stations, db_session: Session
+    ):
+        """Test that routes are properly updated to reference merged stations."""
+        modifier = MergeStations()
+
+        # Get initial route references
+        route1 = db_session.query(Route).filter(Route.name_short == "R0").one()
+        route2 = db_session.query(Route).filter(Route.name_short == "R1").one()
+        initial_departure_1 = route1.departure_station_id
+        initial_departure_2 = route2.departure_station_id
+
+        # These should be different initially
+        assert initial_departure_1 != initial_departure_2
+
+        # Run merger
+        modifier.modify(session=db_session, params={})
+        db_session.commit()
+
+        # Refresh routes
+        db_session.expire_all()
+        route1 = db_session.query(Route).filter(Route.name_short == "R0").one()
+        route2 = db_session.query(Route).filter(Route.name_short == "R1").one()
+
+        # After merging, both routes should point to the same station
+        assert route1.departure_station_id == route2.departure_station_id
+
+    def test_merge_stations_validation_negative_distance(
+        self, temp_db: Path, scenario_with_nearby_stations, db_session: Session
+    ):
+        """Test that negative distance raises ValueError."""
+        modifier = MergeStations()
+
+        params = {"MergeStations.max_distance_meters": -10.0}
+
+        with pytest.raises(ValueError, match="must be positive"):
+            modifier.modify(session=db_session, params=params)
+
+    def test_merge_stations_validation_invalid_percentage(
+        self, temp_db: Path, scenario_with_nearby_stations, db_session: Session
+    ):
+        """Test that invalid match percentage raises ValueError."""
+        modifier = MergeStations()
+
+        # Test percentage > 100
+        params = {"MergeStations.match_percentage": 150.0}
+
+        with pytest.raises(ValueError, match="between 0 and 100"):
+            modifier.modify(session=db_session, params=params)
+
+        # Test negative percentage
+        params = {"MergeStations.match_percentage": -10.0}
+
+        with pytest.raises(ValueError, match="between 0 and 100"):
+            modifier.modify(session=db_session, params=params)
+
+    def test_merge_stations_keeps_shortest_name(
+        self, temp_db: Path, scenario_with_nearby_stations, db_session: Session
+    ):
+        """Test that the station with the shortest name is kept."""
+        modifier = MergeStations()
+
+        # Run merger
+        modifier.modify(session=db_session, params={})
+        db_session.commit()
+
+        # Get remaining stations
+        stations = db_session.query(Station).all()
+        station_names = {s.name for s in stations}
+
+        # "Berlin Hauptbahnhof" (21 chars) should be kept over "S+U Berlin Hauptbahnhof" (24 chars)
+        assert "Berlin Hauptbahnhof" in station_names
+        assert "S+U Berlin Hauptbahnhof" not in station_names
+
+    def test_document_params(self):
+        """Test that document_params returns expected parameter documentation."""
+        modifier = MergeStations()
+        docs = modifier.document_params()
+
+        assert "MergeStations.max_distance_meters" in docs
+        assert "MergeStations.match_percentage" in docs
+        assert "float" in docs["MergeStations.max_distance_meters"]
+        assert "100.0" in docs["MergeStations.max_distance_meters"]
+        assert "80.0" in docs["MergeStations.match_percentage"]

@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import eflips.model
-from eflips.model import Rotation, VehicleType
-from sqlalchemy import not_
+from eflips.model import Rotation, VehicleType, Station, Route, AssocRouteStation, StopTime
+from fuzzywuzzy import fuzz
+from geoalchemy2.shape import to_shape
+from sqlalchemy import not_, func
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import Modifier
@@ -297,3 +299,356 @@ old type short names to convert.
         )
 
         return None  # Modifier doesn't return a specific result, just modifies the database
+
+
+class RemoveUnusedRotations(Modifier):
+    """
+    Remove unused rotations from a just-imported BVGXML dataset.
+
+    A just-imported BVGXML dataset contains some dummy data that does not seem to refer to actual
+    operations. This modifier removes all rotations that do not start and end at stations from a
+    specified list of depot/garage stations.
+
+    The modifier performs the following operations:
+    1. Identifies depot stations based on their short names
+    2. Removes all rotations that do not start and end at the same depot station
+    3. Removes all rotations that do not start at one of the specified depot stations
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def _get_default_depot_short_names() -> List[str]:
+        """Get the default list of depot station short names to keep."""
+        return [
+            "BTRB",
+            "BF B",
+            "BF C",
+            "BFI",
+            "BF I",
+            "BHKO",
+            "BHLI",
+            "BF L",
+            "BHMA",
+            "BF M",
+            "BF S",
+            "BF MDA",
+        ]
+
+    def document_params(self) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary documenting the parameters of this modifier.
+        """
+        return {
+            f"{self.__class__.__name__}.depot_station_short_names": """
+List of station short names that represent depots/garages where rotations should start and end.
+Only rotations that start and end at the same station from this list will be kept.
+
+**Format:** `List[str]` containing station short names.
+
+**Default:**
+```python
+[
+    "BTRB", "BF B", "BF C", "BFI", "BF I", "BHKO",
+    "BHLI", "BF L", "BHMA", "BF M", "BF S", "BF MDA"
+]
+```
+
+**Note:** The default values are specific to BVG (Berlin) depots.
+            """.strip(),
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Modify the database by removing rotations that don't start/end at specified depots.
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database to modify
+        params : Dict[str, Any]
+            Pipeline parameters containing optional depot_station_short_names
+
+        Returns:
+        --------
+        None
+            This modifier modifies the database in place and doesn't return a specific result
+        """
+        # Make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+        scenario_id = scenarios[0].id
+
+        # Get parameters with defaults
+        param_key = f"{self.__class__.__name__}.depot_station_short_names"
+        depot_short_names: List[str] = params.get(param_key, self._get_default_depot_short_names())
+
+        # Emit warning if using defaults
+        if param_key not in params:
+            warnings.warn(
+                f"Parameter '{param_key}' not provided, using default BVG depot station names",
+                UserWarning,
+            )
+
+        # Validation: Check that the list is not empty
+        if not depot_short_names:
+            raise ValueError("depot_station_short_names cannot be empty")
+
+        # Get the station IDs for the depots we want to keep
+        station_ids_to_keep = (
+            session.query(Station.id)
+            .filter(
+                Station.scenario_id == scenario_id,
+                Station.name_short.in_(depot_short_names),
+            )
+            .all()
+        )
+        station_ids_to_keep = [station_id for station_id, in station_ids_to_keep]
+
+        if not station_ids_to_keep:
+            self.logger.warning(
+                f"No stations found with short names: {depot_short_names}. "
+                "No rotations will be kept."
+            )
+
+        self.logger.info(
+            f"Keeping rotations that start and end at {len(station_ids_to_keep)} depot stations"
+        )
+
+        # Process all rotations and remove those that don't meet the criteria
+        all_rotations = session.query(Rotation).filter(Rotation.scenario_id == scenario_id).all()
+        rotations_removed = 0
+
+        for rotation in all_rotations:
+            if not rotation.trips:
+                self.logger.warning(f"Rotation {rotation.name} has no trips, removing it")
+                session.delete(rotation)
+                rotations_removed += 1
+                continue
+
+            first_station_id = rotation.trips[0].route.departure_station_id
+            last_station_id = rotation.trips[-1].route.arrival_station_id
+
+            # Remove rotation if it doesn't start and end at the same depot station
+            # or if the depot is not in our keep list
+            if first_station_id != last_station_id or first_station_id not in station_ids_to_keep:
+                self.logger.debug(
+                    f"Removing rotation {rotation.name}, "
+                    f"vehicle type {rotation.vehicle_type.name_short}, "
+                    f"start {rotation.trips[0].route.departure_station.name}, "
+                    f"end {rotation.trips[-1].route.arrival_station.name}"
+                )
+                for trip in rotation.trips:
+                    for stop_time in trip.stop_times:
+                        session.delete(stop_time)
+                    session.delete(trip)
+                session.delete(rotation)
+                rotations_removed += 1
+
+        self.logger.info(f"Removed {rotations_removed} unused rotations")
+
+        return None
+
+
+class MergeStations(Modifier):
+    """
+    Merge nearby stations in a BVGXML dataset.
+
+    A BVGXML dataset contains quite some stations that are different Station objects in the database,
+    but from an electrification perspective refer to the same thing. Especially when doing vehicle
+    scheduling and not allowing "deadheading" between nearby stations, this can lead to problems.
+    This modifier merges stations that are:
+    1. Within a specified distance of each other (geospatial proximity)
+    2. Have similar names (fuzzy name matching above a threshold)
+
+    The modifier performs the following operations:
+    1. Identifies stations that are used in routes (departure or arrival stations)
+    2. Finds nearby stations within max_distance_meters
+    3. Applies fuzzy name matching to verify they refer to the same location
+    4. Groups stations to merge together
+    5. Keeps the station with the shortest name
+    6. Updates all references (routes, trips, stoptimes) to point to the kept station
+    7. Deletes the merged stations
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def _get_default_max_distance() -> float:
+        """Get the default maximum distance in meters for considering stations as nearby."""
+        return 100.0
+
+    @staticmethod
+    def _get_default_match_percentage() -> float:
+        """Get the default fuzzy name matching percentage threshold."""
+        return 80.0
+
+    def document_params(self) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary documenting the parameters of this modifier.
+        """
+        return {
+            f"{self.__class__.__name__}.max_distance_meters": """
+Maximum distance in meters between two stations to consider them as potentially the same station.
+Stations beyond this distance will never be merged, regardless of name similarity.
+
+**Format:** `float` (distance in meters)
+
+**Default:** 100.0
+
+**Note:** This uses geospatial distance calculation (ST_Distance).
+            """.strip(),
+            f"{self.__class__.__name__}.match_percentage": """
+Minimum fuzzy name matching percentage required to merge two nearby stations.
+Uses the Levenshtein distance ratio (0-100) to compare station names.
+
+**Format:** `float` (percentage 0-100)
+
+**Default:** 80.0
+
+**Example:** "Berlin Hauptbahnhof" and "S+U Berlin Hauptbahnhof" would have a high match percentage.
+            """.strip(),
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Modify the database by merging nearby stations with similar names.
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database to modify
+        params : Dict[str, Any]
+            Pipeline parameters containing optional max_distance_meters and match_percentage
+
+        Returns:
+        --------
+        None
+            This modifier modifies the database in place and doesn't return a specific result
+        """
+        # Make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+
+        # Get parameters with defaults
+        param_key_distance = f"{self.__class__.__name__}.max_distance_meters"
+        param_key_match = f"{self.__class__.__name__}.match_percentage"
+
+        max_distance_meters: float = params.get(
+            param_key_distance, self._get_default_max_distance()
+        )
+        match_percentage: float = params.get(param_key_match, self._get_default_match_percentage())
+
+        # Validation
+        if max_distance_meters <= 0:
+            raise ValueError(f"max_distance_meters must be positive, got {max_distance_meters}")
+        if not 0 <= match_percentage <= 100:
+            raise ValueError(f"match_percentage must be between 0 and 100, got {match_percentage}")
+
+        # Identify all the station IDs where routes start or end
+        start_station_ids = session.query(Route.departure_station_id).distinct().all()
+        end_station_ids = session.query(Route.arrival_station_id).distinct().all()
+        station_ids_in_use = set(
+            [station_id for station_id, in start_station_ids]
+            + [station_id for station_id, in end_station_ids]
+        )
+
+        self.logger.info(f"Found {len(station_ids_in_use)} stations in use by routes")
+
+        to_merge: List[List[Station]] = []
+        stations_in_use = session.query(Station).filter(Station.id.in_(station_ids_in_use)).all()
+
+        for station in stations_in_use:
+            geom_wkb = to_shape(station.geom).wkb
+
+            # Do a fancy geospatial query to find all stations within the given distance
+            nearby_stations = (
+                session.query(Station)
+                .filter(Station.id != station.id)
+                .filter(Station.id.in_(station_ids_in_use))
+                .filter(
+                    func.ST_Distance(Station.geom, func.ST_GeomFromWKB(geom_wkb), 1)
+                    <= max_distance_meters
+                )
+                .all()
+            )
+
+            if len(nearby_stations) > 0:
+                # Also check if they're named similarly using fuzzy matching
+                for nearby_station in nearby_stations:
+                    orig_station_name = station.name
+                    nearby_station_name = nearby_station.name
+                    percentage = fuzz.ratio(orig_station_name, nearby_station_name)
+                    if percentage >= match_percentage:
+                        # See if one of the stations is already in the to_merge list
+                        found = False
+                        for merge_group in to_merge:
+                            if station in merge_group or nearby_station in merge_group:
+                                if station not in merge_group:
+                                    merge_group.append(station)
+                                if nearby_station not in merge_group:
+                                    merge_group.append(nearby_station)
+                                found = True
+                                break
+                        if not found:
+                            to_merge.append([station, nearby_station])
+                        self.logger.debug(
+                            f"Found nearby stations to merge: {station.name} and "
+                            f"{nearby_station.name} ({percentage}%)"
+                        )
+
+        self.logger.info(f"Found {len(to_merge)} groups of stations to merge")
+
+        stations_merged = 0
+        for merge_group in to_merge:
+            # Log the stations to merge
+            self.logger.debug(f"Merging stations: {[station.name for station in merge_group]}")
+            # Pick the station with the shortest name as the one to keep
+            station_to_keep = min(merge_group, key=lambda s: len(s.name))
+            self.logger.debug(f"Keeping station: {station_to_keep.name}")
+            stations_to_remove = [s for s in merge_group if s != station_to_keep]
+
+            for other_station in stations_to_remove:
+                other_station_geom = other_station.geom
+                with session.no_autoflush:
+                    # Update all routes, trips, and stoptimes containing the station
+                    # to point to the kept station instead
+                    session.query(Route).filter(
+                        Route.departure_station_id == other_station.id
+                    ).update({"departure_station_id": station_to_keep.id})
+
+                    session.query(Route).filter(
+                        Route.arrival_station_id == other_station.id
+                    ).update({"arrival_station_id": station_to_keep.id})
+
+                    session.query(AssocRouteStation).filter(
+                        AssocRouteStation.station_id == other_station.id
+                    ).update({"station_id": station_to_keep.id, "location": other_station_geom})
+
+                    session.query(StopTime).filter(StopTime.station_id == other_station.id).update(
+                        {"station_id": station_to_keep.id}
+                    )
+
+                session.flush()
+                session.delete(other_station)
+                stations_merged += 1
+
+        self.logger.info(f"Merged {stations_merged} stations into {len(to_merge)} groups")
+
+        return None
