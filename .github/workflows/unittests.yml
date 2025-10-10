@@ -22,8 +22,7 @@ jobs:
       - name: Install SpatiaLite
         if: matrix.DATABASE == 'sqlite'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libsqlite3-mod-spatialite
+          sudo apt install -y libsqlite3-mod-spatialite
 
       - name: Set up Python ${{ matrix.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -41,7 +40,7 @@ jobs:
 
       - name: Run Tests
         run:
-          poetry run pytest
+          SPATIALITE_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/mod_spatialite poetry run pytest
         env:
           PYTHONPATH: ${{ github.workspace }}
           # The DATABASE_URL is set conditionally above
