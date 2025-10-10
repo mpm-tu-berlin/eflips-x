@@ -8,15 +8,17 @@ electric vehicle types.
 
 import logging
 import warnings
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
 
 import eflips.model
-from eflips.model import Rotation, VehicleType, Station, Route, AssocRouteStation, StopTime
+from eflips.model import Rotation, VehicleType, Station, Route, AssocRouteStation, StopTime, Trip
 from fuzzywuzzy import fuzz
 from geoalchemy2.shape import to_shape
 from sqlalchemy import not_, func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
+from tqdm import tqdm
 
 from eflips.x.framework import Modifier
 
@@ -650,5 +652,219 @@ Uses the Levenshtein distance ratio (0-100) to compare station names.
                 stations_merged += 1
 
         self.logger.info(f"Merged {stations_merged} stations into {len(to_merge)} groups")
+
+        return None
+
+
+class ReduceToNDaysNDepots(Modifier):
+    """
+    Reduce a dataset to a configurable number of days and depots.
+
+    This modifier is useful for creating smaller test datasets from larger ones. It identifies
+    the days with the most trips and the depots with the fewest rotations, then removes all
+    rotations that don't match these criteria.
+
+    The modifier performs the following operations:
+    1. Identifies the N days with the most trips
+    2. Identifies the M depots (start/end stations) with the fewest rotations
+    3. Removes all rotations that don't start on one of the selected days
+    4. Removes all rotations that don't start at one of the selected depots
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def _get_default_num_days() -> int:
+        """Get the default number of days to keep."""
+        return 1
+
+    @staticmethod
+    def _get_default_num_depots() -> int:
+        """Get the default number of depots to keep."""
+        return 2
+
+    def document_params(self) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary documenting the parameters of this modifier.
+        """
+        return {
+            f"{self.__class__.__name__}.num_days": """
+Number of days with the most trips to keep in the dataset. The modifier will identify the days
+with the highest trip counts and remove all rotations that don't start on one of these days.
+
+**Format:** `int` (positive integer)
+
+**Default:** 1
+
+**Note:** Days with fewer trips (which might be just overflow into the wee hours of the following
+day) are intentionally avoided by selecting days with the MOST trips.
+            """.strip(),
+            f"{self.__class__.__name__}.num_depots": """
+Number of depots with the fewest rotations to keep in the dataset. The modifier will identify
+depot stations (where rotations start/end) with the fewest rotations and keep only those.
+
+**Format:** `int` (positive integer)
+
+**Default:** 2
+
+**Note:** Depots are identified by the stations where rotations start. The modifier keeps depots
+with the fewest rotations to create smaller, more manageable test datasets.
+            """.strip(),
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Modify the database by reducing it to N days and M depots.
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database to modify
+        params : Dict[str, Any]
+            Pipeline parameters containing optional num_days and num_depots
+
+        Returns:
+        --------
+        None
+            This modifier modifies the database in place and doesn't return a specific result
+        """
+        # Make sure there is just one scenario
+        scenarios = session.query(eflips.model.Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+        scenario_id = scenarios[0].id
+
+        # Get parameters with defaults
+        param_key_days = f"{self.__class__.__name__}.num_days"
+        param_key_depots = f"{self.__class__.__name__}.num_depots"
+
+        num_days: int = params.get(param_key_days, self._get_default_num_days())
+        num_depots: int = params.get(param_key_depots, self._get_default_num_depots())
+
+        # Validation
+        if num_days <= 0:
+            raise ValueError(f"num_days must be positive, got {num_days}")
+        if num_depots <= 0:
+            raise ValueError(f"num_depots must be positive, got {num_depots}")
+
+        # Find the days with the most trips
+        # We can't use the days with the fewest trips since those might be just overflow
+        # into the wee hours of the following day
+        # Count trips by date
+        from datetime import date
+
+        day_count_dict: Dict[date, int] = defaultdict(int)
+        all_trips = (
+            session.query(Trip)
+            .filter(Trip.rotation.has(Rotation.scenario_id == scenario_id))
+            .all()
+        )
+
+        for trip in all_trips:
+            trip_date = trip.departure_time.date()
+            day_count_dict[trip_date] += 1
+
+        if not day_count_dict:
+            self.logger.warning("No trips found in database, nothing to reduce")
+            return None
+
+        # Convert to list of tuples and sort by trip count descending
+        day_counts = [(day, count) for day, count in day_count_dict.items()]
+        days_sorted = sorted(day_counts, key=lambda x: x[1], reverse=True)
+        days_to_keep = [day for day, count in days_sorted[:num_days]]
+
+        self.logger.info(
+            f"Keeping {len(days_to_keep)} day(s) with most trips: "
+            f"{', '.join(f'{day} ({count} trips)' for day, count in days_sorted[:num_days])}"
+        )
+
+        # Identify all the places where rotations start or end and count them
+        all_start_end_stations: Dict[Station, int] = defaultdict(int)
+        all_rotations_on_kept_days = (
+            session.query(Rotation)
+            .join(Trip)
+            .filter(func.date(Trip.departure_time).in_(days_to_keep))
+            .filter(Rotation.scenario_id == scenario_id)
+            .options(joinedload(Rotation.trips).joinedload(Trip.route))
+            .all()
+        )
+
+        for rotation in all_rotations_on_kept_days:
+            if len(rotation.trips) == 0:
+                raise ValueError(f"Rotation {rotation.name} has no trips")
+            all_start_end_stations[rotation.trips[0].route.departure_station] += 1
+
+        # Keep only the N depots with the fewest rotations starting or ending there
+        if num_depots > len(all_start_end_stations):
+            self.logger.warning(
+                f"Requested {num_depots} depots but only {len(all_start_end_stations)} found. "
+                f"Keeping all {len(all_start_end_stations)} depots."
+            )
+            depots_to_keep = list(all_start_end_stations.items())
+        else:
+            depots_to_keep = sorted(all_start_end_stations.items(), key=lambda x: x[1])[
+                :num_depots
+            ]
+
+        depot_station_ids_to_keep = [depot[0].id for depot in depots_to_keep]
+
+        self.logger.info(
+            f"Keeping {len(depots_to_keep)} depot(s) with fewest rotations: "
+            f"{', '.join(f'{depot[0].name} ({depot[1]} rotations)' for depot in depots_to_keep)}"
+        )
+
+        # Process all rotations and remove those that don't meet the criteria
+        all_rotations_on_kept_days = (
+            session.query(Rotation)
+            .filter(Rotation.scenario_id == scenario_id)
+            .options(joinedload(Rotation.trips).joinedload(Trip.route))
+            .all()
+        )
+
+        to_delete: List[eflips.model.Base] = []
+        rotations_kept = 0
+
+        for rotation in tqdm(all_rotations_on_kept_days, desc="Processing rotations"):
+            if len(rotation.trips) == 0:
+                raise ValueError(f"Rotation {rotation.name} has no trips")
+
+            first_station_id = rotation.trips[0].route.departure_station_id
+            rotation_date = rotation.trips[0].departure_time.date()
+
+            # Remove rotation if it doesn't start at a depot we're keeping or on a day we're keeping
+            if (
+                first_station_id not in depot_station_ids_to_keep
+                or rotation_date not in days_to_keep
+            ):
+                self.logger.debug(
+                    f"Removing rotation {rotation.name}, "
+                    f"vehicle type {rotation.vehicle_type.name_short}, "
+                    f"start {rotation.trips[0].route.departure_station.name}, "
+                    f"end {rotation.trips[-1].route.arrival_station.name}, "
+                    f"date {rotation_date}"
+                )
+                for trip in rotation.trips:
+                    for stop_time in trip.stop_times:
+                        to_delete.append(stop_time)
+                    to_delete.append(trip)
+                to_delete.append(rotation)
+            else:
+                rotations_kept += 1
+
+        # Delete all marked objects
+        for obj in tqdm(to_delete, desc="Deleting objects"):
+            session.delete(obj)
+
+        self.logger.info(
+            f"Reduced dataset to {num_days} day(s) and {num_depots} depot(s). "
+            f"Kept {rotations_kept} rotations, removed {len([obj for obj in to_delete if isinstance(obj, Rotation)])} rotations."
+        )
 
         return None

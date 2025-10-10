@@ -25,6 +25,7 @@ from eflips.x.steps.modifiers.bvg_tools import (
     RemoveUnusedVehicleTypes,
     RemoveUnusedRotations,
     MergeStations,
+    ReduceToNDaysNDepots,
 )
 
 
@@ -1042,3 +1043,270 @@ class TestMergeStations:
         assert "float" in docs["MergeStations.max_distance_meters"]
         assert "100.0" in docs["MergeStations.max_distance_meters"]
         assert "80.0" in docs["MergeStations.match_percentage"]
+
+
+class TestReduceToNDaysNDepots:
+    """Test suite for ReduceToNDaysNDepots modifier."""
+
+    @pytest.fixture
+    def scenario_with_multiple_days_depots(self, db_session: Session) -> Scenario:
+        """Create a test scenario with rotations across multiple days and depots."""
+        scenario = Scenario(name="Test Scenario", name_short="TEST")
+        db_session.add(scenario)
+        db_session.flush()
+
+        # Create 3 depot stations
+        depot1 = Station(
+            name="Depot 1",
+            name_short="D1",
+            scenario_id=scenario.id,
+            geom=None,
+            is_electrified=False,
+        )
+        depot2 = Station(
+            name="Depot 2",
+            name_short="D2",
+            scenario_id=scenario.id,
+            geom=None,
+            is_electrified=False,
+        )
+        depot3 = Station(
+            name="Depot 3",
+            name_short="D3",
+            scenario_id=scenario.id,
+            geom=None,
+            is_electrified=False,
+        )
+        intermediate = Station(
+            name="Intermediate",
+            name_short="INT",
+            scenario_id=scenario.id,
+            geom=None,
+            is_electrified=False,
+        )
+        db_session.add_all([depot1, depot2, depot3, intermediate])
+        db_session.flush()
+
+        # Create a vehicle type
+        vt = VehicleType(
+            name="Test Bus",
+            scenario_id=scenario.id,
+            name_short="TB",
+            battery_capacity=400.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 300], [1, 300]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+        )
+        db_session.add(vt)
+        db_session.flush()
+
+        # Create routes for each depot
+        routes = {}
+        for depot in [depot1, depot2, depot3]:
+            routes[f"{depot.name_short}_out"] = Route(
+                name=f"Route from {depot.name_short}",
+                name_short=f"{depot.name_short}O",
+                scenario_id=scenario.id,
+                departure_station=depot,
+                arrival_station=intermediate,
+                distance=5000,
+            )
+            routes[f"{depot.name_short}_back"] = Route(
+                name=f"Route to {depot.name_short}",
+                name_short=f"{depot.name_short}B",
+                scenario_id=scenario.id,
+                departure_station=intermediate,
+                arrival_station=depot,
+                distance=5000,
+            )
+        db_session.add_all(routes.values())
+        db_session.flush()
+
+        # Create rotations across 3 days with different trip counts per day
+        # Day 1 (2024-01-01): 10 trips (most trips - should be kept by default)
+        # Day 2 (2024-01-02): 7 trips
+        # Day 3 (2024-01-03): 3 trips (fewest trips)
+
+        # Depot 1: 5 rotations (most rotations - should NOT be kept by default)
+        # Depot 2: 2 rotations (fewest - should be kept by default)
+        # Depot 3: 3 rotations (middle - should be kept by default)
+
+        rotation_configs = [
+            # (depot, day, num_rotations)
+            (depot1, datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC")), 3),  # 6 trips
+            (depot1, datetime(2024, 1, 2, tzinfo=ZoneInfo("UTC")), 2),  # 4 trips
+            (depot2, datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC")), 2),  # 4 trips
+            (depot2, datetime(2024, 1, 3, tzinfo=ZoneInfo("UTC")), 1),  # 2 trips
+            (depot3, datetime(2024, 1, 2, tzinfo=ZoneInfo("UTC")), 1),  # 2 trips
+            (depot3, datetime(2024, 1, 3, tzinfo=ZoneInfo("UTC")), 1),  # 2 trips
+        ]
+
+        rotation_counter = 0
+        for depot, base_date, num_trips in rotation_configs:
+            rotation = Rotation(
+                name=f"Rotation {rotation_counter}",
+                scenario_id=scenario.id,
+                vehicle_type=vt,
+                allow_opportunity_charging=False,
+            )
+            db_session.add(rotation)
+            db_session.flush()
+
+            # Add trips for this rotation
+            for trip_idx in range(num_trips):
+                trip_out = Trip(
+                    rotation=rotation,
+                    route=routes[f"{depot.name_short}_out"],
+                    scenario_id=scenario.id,
+                    trip_type=TripType.PASSENGER,
+                    departure_time=base_date.replace(hour=8 + trip_idx * 2),
+                    arrival_time=base_date.replace(hour=8 + trip_idx * 2, minute=30),
+                )
+                trip_back = Trip(
+                    rotation=rotation,
+                    route=routes[f"{depot.name_short}_back"],
+                    scenario_id=scenario.id,
+                    trip_type=TripType.PASSENGER,
+                    departure_time=base_date.replace(hour=8 + trip_idx * 2, minute=45),
+                    arrival_time=base_date.replace(hour=9 + trip_idx * 2),
+                )
+                db_session.add_all([trip_out, trip_back])
+
+            rotation_counter += 1
+
+        db_session.commit()
+        return scenario
+
+    def test_reduce_to_one_day_two_depots_defaults(
+        self, temp_db: Path, scenario_with_multiple_days_depots, db_session: Session
+    ):
+        """Test ReduceToNDaysNDepots modifier with default parameters (1 day, 2 depots)."""
+        modifier = ReduceToNDaysNDepots()
+
+        # Count initial rotations
+        initial_rotation_count = db_session.query(Rotation).count()
+        assert initial_rotation_count == 6
+
+        # Run modifier with defaults
+        modifier.modify(session=db_session, params={})
+        db_session.commit()
+
+        rotations = db_session.query(Rotation).all()
+        assert len(rotations) == 2
+
+        # Verify it's from the correct day and depot
+        kept_rotation = rotations[0]
+        first_trip = kept_rotation.trips[0]
+        assert first_trip.departure_time.date() == datetime(2024, 1, 1).date()
+        assert first_trip.route.departure_station.name_short in ["D1", "D2"]
+
+    def test_reduce_to_custom_days_depots(
+        self, temp_db: Path, scenario_with_multiple_days_depots, db_session: Session
+    ):
+        """Test ReduceToNDaysNDepots modifier with custom parameters."""
+        modifier = ReduceToNDaysNDepots()
+
+        # Keep 2 days and 3 depots (all depots)
+        params = {
+            "ReduceToNDaysNDepots.num_days": 2,
+            "ReduceToNDaysNDepots.num_depots": 3,
+        }
+
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        rotations = db_session.query(Rotation).all()
+        assert len(rotations) == 4
+
+    def test_reduce_to_single_depot(
+        self, temp_db: Path, scenario_with_multiple_days_depots, db_session: Session
+    ):
+        """Test reducing to a single depot."""
+        modifier = ReduceToNDaysNDepots()
+
+        params = {
+            "ReduceToNDaysNDepots.num_days": 3,  # Keep all days
+            "ReduceToNDaysNDepots.num_depots": 1,  # Keep only 1 depot (fewest rotations)
+        }
+
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Should keep only Depot 2 (2 rotations total) across all days
+        rotations = db_session.query(Rotation).all()
+        assert len(rotations) == 2
+
+        # Verify all rotations are from Depot 2
+        for rotation in rotations:
+            if rotation.trips:
+                assert rotation.trips[0].route.departure_station.name_short == "D1"
+
+    def test_validation_negative_days(
+        self, temp_db: Path, scenario_with_multiple_days_depots, db_session: Session
+    ):
+        """Test that negative num_days raises ValueError."""
+        modifier = ReduceToNDaysNDepots()
+
+        params = {"ReduceToNDaysNDepots.num_days": -1}
+
+        with pytest.raises(ValueError, match="num_days must be positive"):
+            modifier.modify(session=db_session, params=params)
+
+    def test_validation_negative_depots(
+        self, temp_db: Path, scenario_with_multiple_days_depots, db_session: Session
+    ):
+        """Test that negative num_depots raises ValueError."""
+        modifier = ReduceToNDaysNDepots()
+
+        params = {"ReduceToNDaysNDepots.num_depots": 0}
+
+        with pytest.raises(ValueError, match="num_depots must be positive"):
+            modifier.modify(session=db_session, params=params)
+
+    def test_reduce_more_depots_than_available(
+        self, temp_db: Path, scenario_with_multiple_days_depots, db_session: Session
+    ):
+        """Test requesting more depots than available."""
+        modifier = ReduceToNDaysNDepots()
+
+        params = {
+            "ReduceToNDaysNDepots.num_days": 3,
+            "ReduceToNDaysNDepots.num_depots": 10,  # More than the 3 available
+        }
+
+        # Should not raise error, just keep all depots
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # All 6 rotations should be kept
+        rotations = db_session.query(Rotation).all()
+        assert len(rotations) == 6
+
+    def test_empty_scenario(self, db_session: Session):
+        """Test behavior with a scenario that has no trips."""
+        scenario = Scenario(name="Empty Scenario", name_short="EMPTY")
+        db_session.add(scenario)
+        db_session.commit()
+
+        modifier = ReduceToNDaysNDepots()
+
+        # Should not raise error, just log warning
+        modifier.modify(session=db_session, params={})
+        db_session.commit()
+
+        # No rotations should exist
+        rotations = db_session.query(Rotation).count()
+        assert rotations == 0
+
+    def test_document_params(self):
+        """Test that document_params returns expected parameter documentation."""
+        modifier = ReduceToNDaysNDepots()
+        docs = modifier.document_params()
+
+        assert "ReduceToNDaysNDepots.num_days" in docs
+        assert "ReduceToNDaysNDepots.num_depots" in docs
+        assert "int" in docs["ReduceToNDaysNDepots.num_days"]
+        assert "int" in docs["ReduceToNDaysNDepots.num_depots"]
+        assert "1" in docs["ReduceToNDaysNDepots.num_days"]
+        assert "2" in docs["ReduceToNDaysNDepots.num_depots"]
