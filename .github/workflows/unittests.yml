@@ -1,0 +1,47 @@
+name: Unit Tests
+on: pull_request
+
+env:
+  POETRY_URL: https://install.python-poetry.org
+
+jobs:
+  # Label
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        PYTHON_VERSION: [ "3.12", "3.13", "3.14" ]
+        DATABASE: [ "sqlite" ]
+
+    steps:
+      # Downloads a copy of the code in your repository before running CI tests
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      # SQLite/SpatiaLite specific setup
+      - name: Install SpatiaLite
+        if: matrix.DATABASE == 'sqlite'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-mod-spatialite
+
+      - name: Set up Python ${{ matrix.PYTHON_VERSION }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.PYTHON_VERSION }}
+
+      - name: Install poetry
+        run: |
+          python -m pip install --upgrade pip
+          pip install poetry
+
+      - name: Install Dependencies
+        run: |
+          poetry install --no-root
+
+      - name: Run Tests
+        run:
+          poetry run pytest
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          # The DATABASE_URL is set conditionally above
