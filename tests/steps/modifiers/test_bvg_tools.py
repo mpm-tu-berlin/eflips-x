@@ -307,10 +307,13 @@ class TestRemoveUnusedVehicleTypes:
 
         # Create pipeline context
         context = PipelineContext(work_dir=temp_db.parent, current_db=temp_db)
+        path_to_this_file = Path(__file__).absolute()
+        project_root = path_to_this_file.parents[3]
+        consumption_lut_path = project_root / "data" / "input" / "consumption_lut_gn.xlsx"
 
         params = {
             "RemoveUnusedVehicleTypes.override_consumption_lut": {
-                "GN": Path("data/input/consumption_lut_gn.xlsx").absolute()
+                "GN": consumption_lut_path.as_posix(),
             }
         }
 
