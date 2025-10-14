@@ -361,6 +361,8 @@ class TestRemoveUnusedVehicleTypes:
             charging_curve=[[0, 400], [1, 400]],
             opportunity_charging_capable=True,
             minimum_charging_power=10,
+            empty_mass=1000,
+            allowed_mass=2000,
         )
         custom_vt2 = VehicleType(
             name="Custom Bus Type 2",
@@ -371,6 +373,8 @@ class TestRemoveUnusedVehicleTypes:
             charging_curve=[[0, 450], [1, 450]],
             opportunity_charging_capable=True,
             minimum_charging_power=10,
+            empty_mass=2000,
+            allowed_mass=4000,
         )
 
         # Custom conversion mapping
