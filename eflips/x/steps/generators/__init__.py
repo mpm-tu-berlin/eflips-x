@@ -24,7 +24,6 @@ from eflips.model import Scenario, Route, ConsistencyWarning, Station, AssocRout
 from geoalchemy2.functions import ST_Distance
 from prefect.artifacts import create_progress_artifact, update_progress_artifact
 from sqlalchemy import func, text
-from tqdm.auto import tqdm
 
 from eflips.x.framework import Generator
 
@@ -93,15 +92,10 @@ class BVGXMLIngester(Generator):
 
         if multithreading:
             with Pool() as pool:
-                for schedule in tqdm(
-                    pool.imap_unordered(load_and_validate_xml, self.input_files),
-                    total=len(self.input_files),
-                    desc=f"(1/{TOTAL_STEPS}) Loading XML files",
-                ):
-                    schedules.append(schedule)
+                schedules = pool.map(load_and_validate_xml, self.input_files)
         else:
             schedules = []
-            for path in tqdm(self.input_files, desc=f"(1/{TOTAL_STEPS}) Loading XML files"):
+            for path in self.input_files:
                 schedules.append(load_and_validate_xml(path))
 
         current_step += 1
@@ -123,7 +117,7 @@ class BVGXMLIngester(Generator):
         ### STEP 2: Create the stations
         # Now, we go through the schedules and create the stations
         # No multithreading, because that would just create duplicate stations
-        for schedule in tqdm(schedules, desc=f"(2/{TOTAL_STEPS}) Creating stations"):
+        for schedule in schedules:
             create_stations(schedule, scenario_id, session)
         current_step += 1
         update_progress_artifact(
@@ -142,7 +136,7 @@ class BVGXMLIngester(Generator):
                 Dict[int, None | Route],
             ]
         ] = []
-        for schedule in tqdm(schedules, desc=f"(3/{TOTAL_STEPS}) Creating routes"):
+        for schedule in schedules:
             trip_time_profiles, db_routes_by_lfd_nr = create_routes_and_time_profiles(
                 schedule, scenario_id, session
             )
@@ -158,9 +152,7 @@ class BVGXMLIngester(Generator):
         ### STEP 4: Create the trip prototypes
         # This can be done in parallel, but we don't need to do it, it's fast enough
         all_trip_protoypes: List[Dict[int, None | TimeProfile]] = []
-        for create_route_result in tqdm(
-            create_route_results, desc=f"(4/{TOTAL_STEPS}) Creating trip prototypes"
-        ):
+        for create_route_result in create_route_results:
             trip_prototypes = create_trip_prototypes(
                 create_route_result[0], create_route_result[1], create_route_result[2]
             )
@@ -186,9 +178,7 @@ class BVGXMLIngester(Generator):
         logger.info("Created trip prototypes")
 
         ### STEP 5: Create the trips and vehicle schedules
-        for schedule in tqdm(
-            schedules, desc=f"(5/{TOTAL_STEPS}) Creating trips and vehicle schedules"
-        ):
+        for schedule in schedules:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=ConsistencyWarning)
                 create_trips_and_vehicle_schedules(schedule, trip_prototypes, scenario_id, session)
@@ -208,11 +198,7 @@ class BVGXMLIngester(Generator):
             .filter(Station.scenario_id == scenario_id)
             .distinct(Station.id)
         )
-        for station in tqdm(
-            stations_without_geom_q,
-            desc=f"(6/{TOTAL_STEPS}) Setting station geom",
-            total=stations_without_geom_q.count(),
-        ):
+        for station in stations_without_geom_q:
             # Get the median of the assoc_route_stations
             recenter_station(station, session)
 
@@ -236,9 +222,7 @@ class BVGXMLIngester(Generator):
             .filter(Route.scenario_id == scenario_id)
             .filter(Route.distance >= 1e6 * 1000)
         )
-        for route in tqdm(
-            long_route_q, desc=f"(7/{TOTAL_STEPS}) Fixing long routes", total=long_route_q.count()
-        ):
+        for route in long_route_q:
             first_point = route.departure_station.geom
             last_point = route.arrival_station.geom
 
