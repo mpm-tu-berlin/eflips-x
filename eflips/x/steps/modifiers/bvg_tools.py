@@ -30,7 +30,6 @@ from fuzzywuzzy import fuzz
 from geoalchemy2.shape import to_shape
 from sqlalchemy import not_, func
 from sqlalchemy.orm import Session, joinedload
-from tqdm import tqdm
 
 from eflips.x.framework import Modifier
 
@@ -945,7 +944,7 @@ with the fewest rotations to create smaller, more manageable test datasets.
         to_delete: List[eflips.model.Base] = []
         rotations_kept = 0
 
-        for rotation in tqdm(all_rotations_on_kept_days, desc="Processing rotations"):
+        for rotation in all_rotations_on_kept_days:
             if len(rotation.trips) == 0:
                 raise ValueError(f"Rotation {rotation.name} has no trips")
 
@@ -973,7 +972,7 @@ with the fewest rotations to create smaller, more manageable test datasets.
                 rotations_kept += 1
 
         # Delete all marked objects
-        for obj in tqdm(to_delete, desc="Deleting objects"):
+        for obj in to_delete:
             session.delete(obj)
 
         self.logger.info(
