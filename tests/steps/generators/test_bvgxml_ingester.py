@@ -1,5 +1,6 @@
 """Tests for BVGXMLIngester generator step."""
 
+import sys
 from pathlib import Path
 from typing import List
 
@@ -85,6 +86,7 @@ class TestBVGXMLIngester:
         rotations = db_session.query(Rotation).all()
         assert len(rotations) > 0
 
+    @pytest.mark.skipif(sys.platform == "darwin", reason="Multiprocessing issues on macOS")
     def test_generate_with_multithreading(self, db_session: Session, ingester: BVGXMLIngester):
         """Test that generate() works with multithreading enabled."""
         params = {"log_level": "WARNING", f"{ingester.__class__.__name__}.multithreading": True}
