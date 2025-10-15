@@ -10,11 +10,12 @@ import logging
 import warnings
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple, Union
 
 import eflips.model
 import numpy as np
 import pandas as pd
+import sqlalchemy
 from eflips.model import (
     Rotation,
     VehicleType,
@@ -25,6 +26,7 @@ from eflips.model import (
     Trip,
     VehicleClass,
     ConsumptionLut,
+    Scenario,
 )
 from fuzzywuzzy import fuzz
 from geoalchemy2.shape import to_shape
@@ -32,6 +34,334 @@ from sqlalchemy import not_, func
 from sqlalchemy.orm import Session, joinedload
 
 from eflips.x.framework import Modifier
+
+
+def depots_for_bvg(
+    session: sqlalchemy.orm.session.Session,
+) -> List[Dict[str, Union[int, Tuple[float, float], List[int]]]]:
+    """
+    Get depot configuration for BVG (Berlin) scenarios.
+
+    This function returns a list of depot configurations specific to the BVG (Berlin public
+    transport company), including existing depot stations and planned new depots with their
+    capacities and allowed vehicle types.
+
+    Parameters:
+    -----------
+    scenario : Scenario
+        The scenario to get depot information for
+
+    Returns:
+    --------
+    List[Dict[str, Union[int, Tuple[float, float], List[int]]]]
+        List of depot configurations. Each dictionary contains:
+        - "depot_station": Either a station ID (int) or (lon, lat) tuple for new depots
+        - "capacity": Depot capacity in 12m bus equivalents
+        - "vehicle_type": List of vehicle type IDs allowed at this depot
+        - "name": Depot name (only for new depots that don't exist in database)
+
+    Notes:
+    ------
+    The depot capacities and vehicle type restrictions are based on BVG planning data:
+    - "Abstellfläche Mariendorf": No charging infrastructure (capacity 0)
+    - "Betriebshof Spandau": 240 capacity, all vehicle types (EN, GN, DD)
+    - "Betriebshof Indira-Gandhi-Straße": 320 capacity, all vehicle types
+    - "Betriebshof Britz": 160 capacity, all vehicle types
+    - "Betriebshof Cicerostraße": 229 capacity, all vehicle types
+    - "Betriebshof Müllerstraße": 175 capacity, all vehicle types
+    - "Betriebshof Lichtenberg": 140 capacity, only articulated buses (GN)
+    - "Betriebshof Köpenicker Landstraße": 220 capacity, EN and GN (new depot)
+    - "Betriebshof Rummelsburger Landstraße": 80 capacity, only GN (new depot)
+    - "Betriebshof Säntisstraße": 250 capacity, EN and GN (new depot)
+    - "Betriebshof Alt Friedrichsfelde": No charging infrastructure (capacity 0)
+    """
+    # Put the new capacities into a variable
+    #
+    # - "Abstellfläche Mariendorf" will not be equipped with charging infrastructure, therefore it cannot serve as a depot for electrified buses
+    # - There will be a new depot "Köpenicker Landstraße" at the coordinates 52.4654085,13.4964867 with a capacity of 200 12m buses
+    # - There will be a new depot "Rummelsburger Landstraße" at the coordinates "52.4714167,13.5053889" with a capacity of 60 12m buses
+    # - There will be a new depot "Säntisstraße" at the coordinates "52.416735,13.3844563" with a capacity of 230 12m buses
+    # - The capacity of the existing depot "Spandau" will be 220 12m buses
+    # - The capacity of the existing depot "Indira-Gandhi-Straße" will be 300 12m buses
+    # - The capacity of the existing depot "Britz" weill be 140 12m buses
+    # - The capacity of the existing depot "Cicerostraße" will be 209 12m buses
+    # - The capacity of the existing depot "Müllerstraße" will be 155 12m buses
+    # - The capacity of the existing depot "Lichtenberg" will be 120 12m buses
+    # - "Alt Friedrichsfelde" will not be equipped with charging infrastructure, therefore it cannot serve as a depot for electrified buses
+    #
+    # Allowed vehicle types are also specified for each depot. The are following vehicle types in total:
+    # - "EN" for 12m electric buses
+    # - "GN" for 18m articulated buses
+    # - "DD" for 12m double-decker buses
+    #
+    # And the vehicle types that can be used at each depot are as follows:
+    # - "Abstellfläche Mariendorf": None
+    # - "Betriebshof Spandau": EN, GN, DD
+    # - "Betriebshof Indira-Gandhi-Straße": EN, GN, DD
+    # - "Betriebshof Britz": EN, GN, DD
+    # - "Betriebshof Cicerostraße": EN, GN, DD
+    # - "Betriebshof Müllerstraße": EN, GN, DD
+    # - "Betriebshof Lichtenberg": GN
+    # - "Betriebshof Köpenicker Landstraße": EN, GN
+    # - "Betriebshof Rummelsburger Landstraße": GN
+    # - "Betriebshof Säntisstraße": EN, GN
+    # - "Betriebshof Alt Friedrichsfelde": None
+    #
+    # The new capacities should be specified as a dictionary containing the following keys:
+    # - "depot_station": Either the ID of the existing station or a (lon, lat) tuple for a depot that does not yet exist in the database
+    # - "capacity": The new capacity of the depot, in 12m buses
+    # - "vehicle_type": A list of vehicle type ids that can be used at this depot
+    # - "name": The name of the depot (only for new depots)
+
+    assert session.query(Scenario).count() == 1, "Expected exactly one scenario"
+
+    scenario = session.query(Scenario).one()
+
+    depot_list: List[Dict[str, Union[int, Tuple[float, float], List[int]]]] = []
+    all_vehicle_type_ids = (
+        session.query(VehicleType.id).filter(VehicleType.scenario == scenario).all()
+    )
+    all_vehicle_type_ids = [x[0] for x in all_vehicle_type_ids]
+
+    # "Abstellfläche Mariendorf" will have a capacity of zero
+    station_id = (
+        session.query(Station.id)
+        .filter(Station.name_short == "BF MDA")
+        .filter(Station.scenario == scenario)
+        .one()[0]
+    )
+
+    vehicle_types = ["EN", "GN", "DD"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+
+    depot_list.append(
+        {
+            "depot_station": station_id,
+            "capacity": 0,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Spandau will hava a capacity of 220
+    station_id = (
+        session.query(Station.id)
+        .filter(Station.name_short == "BF S")
+        .filter(Station.scenario == scenario)
+        .one()[0]
+    )
+    vehicle_types = ["EN", "GN", "DD"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+
+    depot_list.append(
+        {
+            "depot_station": station_id,
+            "capacity": 240,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Indira-Gandhi-Straße" will have a capacity of 300
+    station_id = (
+        session.query(Station.id)
+        .filter(Station.name_short == "BFI")
+        .filter(Station.scenario == scenario)
+        .one()[0]
+    )
+
+    vehicle_types = ["EN", "GN", "DD"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+
+    depot_list.append(
+        {
+            "depot_station": station_id,
+            "capacity": 320,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Britz" will have a capacity of 140
+    station_id = (
+        session.query(Station.id)
+        .filter(Station.name_short == "BTRB")
+        .filter(Station.scenario == scenario)
+        .one()[0]
+    )
+
+    vehicle_types = ["EN", "GN", "DD"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+
+    depot_list.append(
+        {
+            "depot_station": station_id,
+            "capacity": 160,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Cicerostraße" will have a capacity of 209
+    station_id = (
+        session.query(Station.id)
+        .filter(Station.name_short == "BF C")
+        .filter(Station.scenario == scenario)
+        .one()[0]
+    )
+
+    vehicle_types = ["EN", "GN", "DD"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+
+    depot_list.append(
+        {
+            "depot_station": station_id,
+            "capacity": 229,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Müllerstraße" will have a capacity of 155
+    station_id = (
+        session.query(Station.id)
+        .filter(Station.name_short == "BF M")
+        .filter(Station.scenario == scenario)
+        .one()[0]
+    )
+
+    vehicle_types = ["EN", "GN", "DD"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+
+    depot_list.append(
+        {
+            "depot_station": station_id,
+            "capacity": 175,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Lichtenberg" will have a capacity of 120
+    station_id = (
+        session.query(Station.id)
+        .filter(Station.name_short == "BHLI")
+        .filter(Station.scenario == scenario)
+        .one()[0]
+    )
+
+    vehicle_types = ["GN"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    depot_list.append(
+        {
+            "depot_station": station_id,
+            "capacity": 140,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Köpenicker Landstraße" will have a capacity of 200
+
+    vehicle_types = ["EN", "GN"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    depot_list.append(
+        {
+            "depot_station": (13.4964867, 52.4654085),
+            "name": "Betriebshof Köpenicker Landstraße",
+            "capacity": 220,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Rummelsburger Landstraße" will have a capacity of 60
+    vehicle_types = ["GN"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    depot_list.append(
+        {
+            "depot_station": (13.5053889, 52.4714167),
+            "name": "Betriebshof Rummelsburger Landstraße",
+            "capacity": 80,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Säntisstraße" will have a capacity of 230
+    vehicle_types = ["EN", "GN"]
+    vehicle_type_ids = (
+        session.query(VehicleType.id)
+        .filter(VehicleType.name_short.in_(vehicle_types))
+        .filter(VehicleType.scenario == scenario)
+        .all()
+    )
+    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    depot_list.append(
+        {
+            "depot_station": (13.3844563, 52.416735),
+            "name": "Betriebshof Säntisstraße",
+            "capacity": 250,
+            "vehicle_type": vehicle_type_ids,
+        }
+    )
+
+    # "Betriebshof Alt Friedrichsfelde" will have a capacity of 0
+    depot_list.append(
+        {
+            "depot_station": (13.5401389, 52.5123056),
+            "name": "Betriebshof Alt Friedrichsfelde",
+            "capacity": 0,
+            "vehicle_type": all_vehicle_type_ids,
+        }
+    )
+
+    return depot_list
 
 
 class RemoveUnusedVehicleTypes(Modifier):
