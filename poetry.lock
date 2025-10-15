@@ -941,20 +941,20 @@ simpy = ">=4.0.1,<5.0.0"
 
 [[package]]
 name = "eflips-depot"
-version = "4.15.1"
+version = "4.14.3"
 description = "Depot Simulation for eFLIPS"
 optional = false
 python-versions = "<3.14,>=3.11"
 groups = ["main"]
 files = [
-    { file = "eflips_depot-4.15.1-py3-none-any.whl", hash = "sha256:eb05302347d9b331555fc3092864c8a97cfd6537e2e2962d6790f9e34274d7d3" },
-    { file = "eflips_depot-4.15.1.tar.gz", hash = "sha256:70afccf0c146b53af3e3702f96ef40cd6132853e92987ed3d84a5671b94733c5" },
+    {file = "eflips_depot-4.14.3-py3-none-any.whl", hash = "sha256:f4cf3f9ba570493ee67b4850513c9882f0d7c6349e9b7f6c64524a2dd10be5be"},
+    {file = "eflips_depot-4.14.3.tar.gz", hash = "sha256:8d3200a8091b25cfb369de42a0314d354c759deb01da0998a41993565f6e7682"},
 ]
 
 [package.dependencies]
 eflips = ">=0.1.3,<0.2.0"
 eflips-model = ">=10.0.0,<11.0.0"
-eflips-opt = ">=0.3.6,<0.4.0"
+eflips-opt = ">=0.3.0,<0.4.0"
 pandas = ">=2.2.0,<3.0.0"
 scipy = ">=1.14.0,<2.0.0"
 simpy = ">=4.0.1,<5.0.0"
@@ -1006,14 +1006,14 @@ xsdata = {version = ">=24.1,<25.0", extras = ["cli", "lxml"]}
 
 [[package]]
 name = "eflips-model"
-version = "10.0.1"
+version = "10.0.3"
 description = "A common data model for the eflips family of electric vehicle simulation & optimization tools."
 optional = false
 python-versions = "<4.0,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_model-10.0.1-py3-none-any.whl", hash = "sha256:d51f776e5eacf3bc47d6fdf713b65279b7fe05910d0779d10e0a794ccf2b2066"},
-    {file = "eflips_model-10.0.1.tar.gz", hash = "sha256:871a61e83d0f1fffaf6a8a97b7b8f679d0319851af55f4ba1ac806b40d36fd16"},
+    {file = "eflips_model-10.0.3-py3-none-any.whl", hash = "sha256:1cfffe4d4810f6a464112a679ced807ff625e64ed33836bdc9e3d8c124a99fb4"},
+    {file = "eflips_model-10.0.3.tar.gz", hash = "sha256:ee4fb66cdfe6887d1c398223becabd3222afa5399fd27b100245373ddeeca7ca"},
 ]
 
 [package.dependencies]
@@ -1028,19 +1028,19 @@ sqlalchemy = ">=2.0.23,<3.0.0"
 
 [[package]]
 name = "eflips-opt"
-version = "0.3.6"
+version = "0.3.7"
 description = "A collection of pre-simulation optimization algorithms for eFLIPS."
 optional = false
 python-versions = "<3.14,>=3.10"
 groups = ["main"]
 files = [
-    { file = "eflips_opt-0.3.6-py3-none-any.whl", hash = "sha256:3a7e0caffc3174df1b2959ce219b2cc8d7156ecb6bc5c401125124366c6346e3" },
-    { file = "eflips_opt-0.3.6.tar.gz", hash = "sha256:7ad2861095b483393a8c7ab69aa680d3bf262949c45341e88eb89e2c4d56a9a1" },
+    {file = "eflips_opt-0.3.7-py3-none-any.whl", hash = "sha256:7add9f6f41f86cb2a1feab2acfef5c6737c28d927c53a8434f78c703acffc56c"},
+    {file = "eflips_opt-0.3.7.tar.gz", hash = "sha256:eab8132d58b0356716b894de2d2b15f1f58af270c8a610845363e625bcf22ec4"},
 ]
 
 [package.dependencies]
 dash-cytoscape = ">=1.0.2,<2.0"
-eflips-model = ">=3.0.0,<11.0.0"
+eflips-model = ">=10.0.3,<11.0.0"
 eflips-schedule-rust = ">=2.0.1,<3.0"
 gurobipy = ">=12.0.1,<13.0"
 kaleido = "0.2.1"
@@ -1049,6 +1049,7 @@ numpy = ">=1.26.4,<3.0"
 openrouteservice = ">=2.3.3,<3.0"
 pandas = ">=2.1,<3.0"
 plotly = ">=5.22.0,<6.0"
+polyline = ">=2.0.3,<3.0.0"
 pyomo = ">=6.7.1,<7.0"
 scipy = ">=1.14.0,<2.0"
 shapely = ">=2.0.3,<3.0"
@@ -3322,6 +3323,22 @@ files = [
     {file = "ply-3.11-py2.py3-none-any.whl", hash = "sha256:096f9b8350b65ebd2fd1346b12452efe5b9607f7482813ffca50c22722a807ce"},
     {file = "ply-3.11.tar.gz", hash = "sha256:00c7c1aaa88358b9c765b6d3000c6eec0ba42abca5351b095321aef446081da3"},
 ]
+
+[[package]]
+name = "polyline"
+version = "2.0.3"
+description = "A Python implementation of Google's Encoded Polyline Algorithm Format."
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "polyline-2.0.3-py3-none-any.whl", hash = "sha256:95ce411d1307e46ad5dcd8f9c8070d8fa8d9efabf072932582f788dd8a6bd8da"},
+    {file = "polyline-2.0.3.tar.gz", hash = "sha256:abc786b9332e84f27e6e59fd4fcbcb0c4b9af6a7f7b4175e2eb6c2786278deae"},
+]
+
+[package.extras]
+dev = ["pylint (>=3.0.3,<3.1.0)", "pytest (>=7.0,<8.0)", "pytest-cov (>=4.0,<5.0)", "sphinx (>=5.3.0,<5.4.0)", "sphinx-rtd-theme (>=1.2.0,<1.3.0)", "standard-imghdr ; python_version > \"3.12\"", "tomli ; python_version < \"3.11\""]
+publish = ["build (>=0.8,<1.0)", "twine (>=4.0,<5.0)"]
 
 [[package]]
 name = "prefect"

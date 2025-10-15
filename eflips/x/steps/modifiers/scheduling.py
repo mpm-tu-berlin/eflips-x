@@ -6,14 +6,17 @@ such as creating optimal rotation plans for different vehicle types.
 """
 
 import logging
+import os
+from collections import defaultdict
 from datetime import timedelta
 from typing import Any, Dict, List
 
 import eflips.model
 from eflips.depot.api import generate_consumption_result, ConsumptionResult
-from eflips.model import VehicleType, Trip, TripType, Rotation
+from eflips.model import VehicleType, Trip, TripType, Rotation, Scenario, Route, Station
+from eflips.opt.depot_rotation_matching import DepotRotationOptimizer
 from eflips.opt.scheduling import create_graph, solve, write_back_rotation_plan
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from eflips.x.framework import Modifier
 
@@ -272,3 +275,361 @@ class VehicleScheduling(Modifier):
         session.flush()
 
         return None
+
+
+class DepotAssignment(Modifier):
+    """
+    Optimize depot assignment for rotations in a scenario.
+
+    This modifier uses the eflips-opt depot rotation matching optimizer to assign rotations
+    to depots optimally. It considers depot capacities, vehicle type constraints, and travel
+    distances when making assignments.
+
+    The optimization process:
+    1. Loads depot configuration (capacities and vehicle type constraints)
+    2. Iteratively reduces depot capacity usage to find minimal feasible assignment
+    3. Writes optimized depot assignments back to the database
+    4. Logs comparison of before/after assignments
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def _get_default_depot_usage() -> float:
+        """Get the default depot usage factor."""
+        return 1.0
+
+    @staticmethod
+    def _get_default_step_size() -> float:
+        """Get the default step size for capacity reduction."""
+        return 0.1
+
+    @staticmethod
+    def _get_default_max_iterations() -> int:
+        """Get the default maximum number of optimization iterations."""
+        return 5
+
+    def document_params(self) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary describing the configurable parameters:
+            - DepotAssignment.depot_config: List of depot configuration dicts
+            - DepotAssignment.base_url: Base URL for routing service (ORS)
+            - DepotAssignment.depot_usage: Initial depot capacity usage factor (0.0-1.0)
+            - DepotAssignment.step_size: Capacity reduction step size per iteration
+            - DepotAssignment.max_iterations: Maximum optimization iterations
+        """
+        return {
+            f"{self.__class__.__name__}.depot_config": """
+            A list of depot configurations. Each configuration is a dict with:
+            - "depot_station": Station ID or (lon, lat) tuple
+            - "capacity": Depot capacity in 12m bus equivalents
+            - "vehicle_type": List of allowed vehicle type IDs
+            - "name": Depot name (for new depots only)
+
+            Required: True
+            Type: List[Dict]
+            Example: depots_for_bvg(db_session) from eflips.x.steps.modifiers.bvg_tools
+            """,
+            f"{self.__class__.__name__}.base_url": """
+            Base URL for the OpenRouteService (ORS) routing API.
+            Used to calculate travel distances between depots and rotation start/end points.
+
+            Required: True
+            Type: str
+            Example: "http://mpm-v-ors.mpm.tu-berlin.de:8080/ors/"
+            """,
+            f"{self.__class__.__name__}.depot_usage": """
+            Initial depot capacity usage factor (0.0 to 1.0).
+            The optimizer starts with this fraction of nominal depot capacity and
+            iteratively reduces it to find the minimal feasible assignment.
+            For example, 1.0 means 100% of depot capacity is available initially.
+
+            Default: 1.0 (100% capacity)
+            Type: float
+            Example: 0.9 (90% capacity)
+            """,
+            f"{self.__class__.__name__}.step_size": """
+            Capacity reduction step size per iteration (0.0 to 1.0).
+            After each successful optimization, depot capacities are reduced by this factor.
+            Smaller step sizes find tighter capacity bounds but take more iterations.
+
+            Default: 0.1 (reduce by 10% each iteration)
+            Type: float
+            Example: 0.05 (reduce by 5% each iteration)
+            """,
+            f"{self.__class__.__name__}.max_iterations": """
+            Maximum number of optimization iterations to attempt.
+            The optimizer stops after this many iterations or when a solution becomes infeasible.
+
+            Default: 5
+            Type: int
+            Example: 10
+            """,
+        }
+
+    def _get_depot_rotation_assignments(self, session: Session) -> Dict[Station, List[Rotation]]:
+        """
+        Retrieve current depot assignments for all rotations.
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database
+
+        Returns:
+        --------
+        Dict[Station, List[Rotation]]
+            Dictionary mapping rotation IDs to assigned depot IDs.
+        """
+        assignments = defaultdict(list)
+
+        assert session.query(Scenario).count() == 1, "Expected exactly one scenario"
+
+        rotations = (
+            session.query(Rotation)
+            .options(
+                joinedload(Rotation.trips).joinedload(Trip.route).joinedload(Route.arrival_station)
+            )
+            .options(
+                joinedload(Rotation.trips)
+                .joinedload(Trip.route)
+                .joinedload(Route.departure_station)
+            )
+            .all()
+        )
+        for rotation in rotations:
+            if (
+                rotation.trips[0].route.departure_station_id
+                != rotation.trips[-1].route.arrival_station_id
+            ):
+                self.logger.warning(
+                    f"Rotation {rotation.id} does not start and end at the same station. "
+                    "Using the start station as 'the depot' for this rotation."
+                )
+            assignments[rotation].append(rotation.trips[0].route.departure_station)
+        return assignments
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Optimize depot assignments for rotations in the scenario.
+
+        This method:
+        1. Validates that exactly one scenario exists
+        2. Loads depot configuration via provided function
+        3. Initializes the DepotRotationOptimizer
+        4. Iteratively optimizes depot assignments with decreasing capacity
+        5. Writes optimized assignments back to database
+        6. Logs comparison of before/after assignments
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database to modify
+        params : Dict[str, Any]
+            Pipeline parameters:
+            - DepotAssignment.depot_config (required): List of depot configuration dicts
+            - DepotAssignment.base_url (required): ORS routing service URL
+            - DepotAssignment.depot_usage (optional): Initial depot capacity usage
+            - DepotAssignment.step_size (optional): Capacity reduction step per iteration
+            - DepotAssignment.max_iterations (optional): Max optimization iterations
+
+        Returns:
+        --------
+        None
+            This modifier modifies the database in place by updating rotation depot assignments
+
+        Raises:
+        -------
+        ValueError
+            If required parameters are not provided or if scenario count != 1
+        """
+
+        # Get parameters
+        depot_config_key = f"{self.__class__.__name__}.depot_config"
+        base_url_key = f"{self.__class__.__name__}.base_url"
+        depot_usage_key = f"{self.__class__.__name__}.depot_usage"
+        step_size_key = f"{self.__class__.__name__}.step_size"
+        max_iter_key = f"{self.__class__.__name__}.max_iterations"
+
+        # Validate required parameters
+        if depot_config_key not in params:
+            raise ValueError(
+                f"Required parameter '{depot_config_key}' not provided. "
+                "Please specify a depot configuration."
+            )
+        if base_url_key in params:
+            base_url = params[base_url_key]
+        else:
+            # Check if instead theenvironment variable OPENROUTESERVICE_BASE_URL
+            base_url = os.environ.get("OPENROUTESERVICE_BASE_URL")
+            if not base_url:
+                raise ValueError(
+                    f"Required parameter '{base_url_key}' not provided. "
+                    "Also, environment variable 'OPENROUTESERVICE_BASE_URL' is not set. "
+                    "Please specify the base URL for the routing service."
+                )
+            self.logger.debug(
+                "Taking base_url from environment variable OPENROUTESERVICE_BASE_URL"
+            )
+
+        depot_config = params[depot_config_key]
+        depot_usage = params.get(depot_usage_key, self._get_default_depot_usage())
+        step_size = params.get(step_size_key, self._get_default_step_size())
+        max_iterations = params.get(max_iter_key, self._get_default_max_iterations())
+
+        # Validate parameters
+        if not isinstance(depot_config, list):
+            raise ValueError(
+                f"depot_config must be a list of depot configurations, got {type(depot_config).__name__}"
+            )
+            for depot in depot_config:
+                if not isinstance(depot, dict):
+                    raise ValueError(
+                        f"Each depot configuration must be a dict, got {type(depot).__name__}"
+                    )
+        if not isinstance(base_url, str):
+            raise ValueError(f"base_url must be a string, got {type(base_url).__name__}")
+        if not isinstance(depot_usage, (int, float)):
+            raise ValueError(f"depot_usage must be a number, got {type(depot_usage).__name__}")
+        if not (0.0 < depot_usage <= 1.0):
+            raise ValueError(f"depot_usage must be between 0.0 and 1.0, got {depot_usage}")
+        if not isinstance(step_size, (int, float)):
+            raise ValueError(f"step_size must be a number, got {type(step_size).__name__}")
+        if not (0.0 < step_size < 1.0):
+            raise ValueError(f"step_size must be between 0.0 and 1.0, got {step_size}")
+        if not isinstance(max_iterations, int):
+            raise ValueError(
+                f"max_iterations must be an integer, got {type(max_iterations).__name__}"
+            )
+        if max_iterations <= 0:
+            raise ValueError(f"max_iterations must be positive, got {max_iterations}")
+
+        # Make sure there is just one scenario
+        scenario_q = session.query(eflips.model.Scenario)
+        if scenario_q.count() != 1:
+            raise ValueError(f"Expected exactly one scenario, found {scenario_q.count()}")
+        scenario = scenario_q.one()
+
+        self.logger.info(
+            f"Depot assignment parameters: "
+            f"depot_usage={depot_usage}, "
+            f"step_size={step_size}, "
+            f"max_iterations={max_iterations}, "
+            f"base_url={base_url}"
+        )
+
+        # Get the pre-optimization depot assignments for logging
+        pre_optimization_assignments = self._get_depot_rotation_assignments(session)
+
+        self._log_assignments(pre_optimization_assignments)
+        self.logger.info("Completed logging pre-optimization depot assignments")
+
+        # Get depot configuration from the provided function
+        self.logger.info(f"Loaded {len(depot_config)} depot configurations")
+
+        # Set the base URL for routing service
+        os.environ["BASE_URL"] = base_url
+
+        # Initialize the Optimizer
+        optimizer = DepotRotationOptimizer(session, scenario.id)
+        original_capacities = [depot["capacity"] for depot in depot_config]
+
+        # Using the optimizer iteratively to reach a lower depot capacity until the solution is not feasible
+        DEPOT_USAGE = depot_usage
+        STEP_SIZE = step_size
+        ITER = max_iterations
+
+        self.logger.info(f"Starting iterative optimization with {ITER} max iterations")
+
+        while ITER > 0:
+            self.logger.info(
+                f"Optimization iteration {max_iterations - ITER + 1}/{max_iterations}, "
+                f"depot usage: {DEPOT_USAGE:.1%}"
+            )
+
+            for depot, orig_cap in zip(depot_config, original_capacities):
+                depot["capacity"] = int(orig_cap * DEPOT_USAGE)
+
+            optimizer.get_depot_from_input(depot_config)
+            optimizer.data_preparation()
+
+            try:
+                optimizer.optimize(time_report=True)
+                self.logger.info(f"Optimization successful at {DEPOT_USAGE:.1%} capacity")
+            except ValueError as e:
+                self.logger.info(
+                    f"Cannot decrease depot capacity any further at {DEPOT_USAGE:.1%}. "
+                    f"Stopping optimization."
+                )
+                break
+
+            DEPOT_USAGE -= STEP_SIZE
+            ITER -= 1
+
+        if ITER == 0:
+            self.logger.info(
+                f"Reached maximum iterations ({max_iterations}). "
+                f"Final depot usage: {DEPOT_USAGE + STEP_SIZE:.1%}"
+            )
+
+        # Write optimization results back to the database
+        optimizer.write_optimization_results(delete_original_data=True)
+
+        assert optimizer.data["result"] is not None
+        assert optimizer.data["result"].shape[0] == optimizer.data["rotation"].shape[0]
+
+        self.logger.info("Wrote optimization results to database")
+
+        # Generate post-optimization depot assignments for logging
+        # We need to flush and expunge the session for geom to be converted to binary
+        session.flush()
+        session.expunge_all()
+        post_optimization_assignments = self._get_depot_rotation_assignments(session)
+
+        # Log the assignments before and after optimization
+        self._log_assignments(post_optimization_assignments)
+        self.logger.info("Completed logging post-optimization depot assignments")
+
+        # Go through all depots (union of pre and post optimization keys) in alphabetical order and list the changes
+        all_stations = set(pre_optimization_assignments.keys()).union(
+            post_optimization_assignments.keys()
+        )
+        for station in sorted(all_stations, key=lambda s: s.name):
+            pre_rotations = pre_optimization_assignments.get(station, [])
+            post_rotations = post_optimization_assignments.get(station, [])
+
+            pre_count = len(pre_rotations)
+            post_count = len(post_rotations)
+
+            self.logger.info(f"Depot '{station.name}' (ID {station.id}): ")
+            if pre_count == post_count and set(r.id for r in pre_rotations) == set(
+                r.id for r in post_rotations
+            ):
+                self.logger.info(f"\tNo change in assignments ({pre_count} rotations)")
+            else:
+                self.logger.info(f"\tChanged from {pre_count} to {post_count} rotations")
+
+        self.logger.info("Depot assignment optimization completed successfully")
+
+        return None
+
+    def _log_assignments(self, pre_optimization_assignments: dict[Station, list[Rotation]]):
+        self.logger.info(
+            f"Total of {len(pre_optimization_assignments)} depots with "
+            f"{sum([len(v) for v in pre_optimization_assignments.values()])}"
+            f" rotations"
+        )
+
+        # Iterate over the stations (eys of the dict) in alphabetical order
+        for station in sorted(pre_optimization_assignments.keys(), key=lambda s: s.name):
+            rotations = pre_optimization_assignments[station]
+            self.logger.info(
+                f"\tDepot '{station.name}' (ID {station.id}) has {len(rotations)} rotations assigned before optimization"
+            )

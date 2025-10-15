@@ -88,7 +88,6 @@ class BVGXMLIngester(Generator):
         # First, we go through all the files and load them into memory
         multithreading = params[f"{self.__class__.__name__}.multithreading"]
         logger.info(f"Using multithreading: {multithreading}")
-        schedules = []
 
         if multithreading:
             with Pool() as pool:
