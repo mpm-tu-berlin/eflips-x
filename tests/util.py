@@ -53,7 +53,7 @@ def route(start_lat: float, start_lon: float, end_lat: float, end_lon: float) ->
 
     Environment Variables:
         OPENROUTESERVICE_API_KEY: Required API key for ORS access
-        ORS_BASE_URL: Optional custom ORS server URL (e.g., "http://localhost:8080/ors").
+        OPENROUTESERVICE_BASE_URL: Optional custom ORS server URL (e.g., "http://localhost:8080/ors").
                      If not set, uses official API (https://api.openrouteservice.org)
                      with a warning about potential rate limits.
 
@@ -97,11 +97,12 @@ def route(start_lat: float, start_lon: float, end_lat: float, end_lon: float) ->
     api_key = os.environ.get("OPENROUTESERVICE_API_KEY")
     if not api_key:
         # If no API key, return None for geometry (will fall back to straight line)
-        warnings.warn("No OpenRouteService API key provided. Routing cannot happen.")
-        return None, None
+        warnings.warn(
+            "No OpenRouteService API key provided. Make sure your server does not need an API key."
+        )
 
     # Get base URL from environment, or use official API
-    base_url = os.environ.get("ORS_BASE_URL")
+    base_url = os.environ.get("OPENROUTESERVICE_BASE_URL")
     if base_url:
         # Use custom ORS server
         url = f"{base_url.rstrip('/')}/v2/directions/driving-car"
@@ -109,7 +110,7 @@ def route(start_lat: float, start_lon: float, end_lat: float, end_lon: float) ->
         # Use official API and warn about rate limits
         warnings.warn(
             "Using official OpenRouteService API. This may hit rate limits. "
-            "Consider setting ORS_BASE_URL environment variable to use a custom ORS server.",
+            "Consider setting OPENROUTESERVICE_BASE_URL environment variable to use a custom ORS server.",
             UserWarning,
         )
         url = "https://api.openrouteservice.org/v2/directions/driving-car"
@@ -169,7 +170,7 @@ def snap_to_road(lat: float, lon: float) -> tuple[str | None, tuple[float, float
 
     Environment Variables:
         OPENROUTESERVICE_API_KEY: Required API key for ORS access
-        ORS_BASE_URL: Optional custom ORS server URL (e.g., "http://localhost:8080/ors").
+        OPENROUTESERVICE_BASE_URL: Optional custom ORS server URL (e.g., "http://localhost:8080/ors").
                      If not set, uses official API (https://api.openrouteservice.org)
                      with a warning about potential rate limits.
 
@@ -201,15 +202,16 @@ def snap_to_road(lat: float, lon: float) -> tuple[str | None, tuple[float, float
         cached = cache[cache_key]
         return cached.get("name"), tuple(cached["location"])
 
-    # Get API key from environment
+    # Get API key from environment, if it exists
     api_key = os.environ.get("OPENROUTESERVICE_API_KEY")
     if not api_key:
         # If no API key, return original coordinates with no name
-        warnings.warn("No OpenRouteService API key provided. Snapping cannot happen.")
-        return None, (lat, lon)
+        warnings.warn(
+            "No OpenRouteService API key provided. Make sure your server does not need an API key."
+        )
 
     # Get base URL from environment, or use official API
-    base_url = os.environ.get("ORS_BASE_URL")
+    base_url = os.environ.get("OPENROUTESERVICE_BASE_URL")
     if base_url:
         # Use custom ORS server
         url = f"{base_url.rstrip('/')}/v2/snap/driving-car"
@@ -217,7 +219,7 @@ def snap_to_road(lat: float, lon: float) -> tuple[str | None, tuple[float, float
         # Use official API and warn about rate limits
         warnings.warn(
             "Using official OpenRouteService API. This may hit rate limits. "
-            "Consider setting ORS_BASE_URL environment variable to use a custom ORS server.",
+            "Consider setting OPENROUTESERVICE_BASE_URL environment variable to use a custom ORS server.",
             UserWarning,
         )
         url = "https://api.openrouteservice.org/v2/snap/driving-car"
@@ -1142,10 +1144,8 @@ if __name__ == "__main__":
                 ).add_to(layer)
         else:
             # Fall back to straight line between stations
-            dep_station = (
-                db_session.query(Station).filter_by(id=route.departure_station_id).first()
-            )
-            arr_station = db_session.query(Station).filter_by(id=route.arrival_station_id).first()
+            dep_station = session.query(Station).filter_by(id=route.departure_station_id).first()
+            arr_station = session.query(Station).filter_by(id=route.arrival_station_id).first()
 
             dep_point = to_shape(dep_station.geom)
             arr_point = to_shape(arr_station.geom)
