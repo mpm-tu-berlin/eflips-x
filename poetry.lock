@@ -941,20 +941,20 @@ simpy = ">=4.0.1,<5.0.0"
 
 [[package]]
 name = "eflips-depot"
-version = "4.14.3"
+version = "4.15.1"
 description = "Depot Simulation for eFLIPS"
 optional = false
 python-versions = "<3.14,>=3.11"
 groups = ["main"]
 files = [
-    {file = "eflips_depot-4.14.3-py3-none-any.whl", hash = "sha256:f4cf3f9ba570493ee67b4850513c9882f0d7c6349e9b7f6c64524a2dd10be5be"},
-    {file = "eflips_depot-4.14.3.tar.gz", hash = "sha256:8d3200a8091b25cfb369de42a0314d354c759deb01da0998a41993565f6e7682"},
+    {file = "eflips_depot-4.15.1-py3-none-any.whl", hash = "sha256:eb05302347d9b331555fc3092864c8a97cfd6537e2e2962d6790f9e34274d7d3"},
+    {file = "eflips_depot-4.15.1.tar.gz", hash = "sha256:70afccf0c146b53af3e3702f96ef40cd6132853e92987ed3d84a5671b94733c5"},
 ]
 
 [package.dependencies]
 eflips = ">=0.1.3,<0.2.0"
 eflips-model = ">=10.0.0,<11.0.0"
-eflips-opt = ">=0.3.0,<0.4.0"
+eflips-opt = ">=0.3.6,<0.4.0"
 pandas = ">=2.2.0,<3.0.0"
 scipy = ">=1.14.0,<2.0.0"
 simpy = ">=4.0.1,<5.0.0"
