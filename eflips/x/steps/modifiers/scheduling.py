@@ -7,18 +7,35 @@ such as creating optimal rotation plans for different vehicle types.
 
 import logging
 import os
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from datetime import timedelta
 from typing import Any, Dict, List
 
 import eflips.model
-from eflips.depot.api import generate_consumption_result, ConsumptionResult
-from eflips.model import VehicleType, Trip, TripType, Rotation, Scenario, Route, Station
+import sqlalchemy.orm.session
+from eflips.depot.api import (
+    generate_consumption_result,
+    simple_consumption_simulation,
+    ConsumptionResult,
+)
+from eflips.model import ChargeType
+from eflips.model import (
+    VehicleType,
+    Trip,
+    TripType,
+    Rotation,
+    Scenario,
+    Route,
+    Station,
+    Event,
+    EventType,
+    VoltageLevel,
+)
 from eflips.opt.depot_rotation_matching import DepotRotationOptimizer
 from eflips.opt.scheduling import create_graph, solve, write_back_rotation_plan
 from sqlalchemy.orm import Session, joinedload
 
-from eflips.x.framework import Modifier
+from eflips.x.framework import Modifier, Analyzer
 
 
 class VehicleScheduling(Modifier):
@@ -65,6 +82,11 @@ class VehicleScheduling(Modifier):
         """Get the default additional break time duration."""
         return timedelta(minutes=5)
 
+    @staticmethod
+    def _get_default_charge_type() -> ChargeType:
+        """Get the default charge type."""
+        return ChargeType.DEPOT
+
     def document_params(self) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
@@ -87,7 +109,7 @@ class VehicleScheduling(Modifier):
             Default: timedelta(seconds=0)
             Type: timedelta
             Example: timedelta(minutes=15)
-            """,
+            """.strip(),
             f"{self.__class__.__name__}.maximum_schedule_duration": """
             Maximum duration of a vehicle schedule.
             This limits how long a single vehicle can operate before returning to depot.
@@ -95,7 +117,7 @@ class VehicleScheduling(Modifier):
             Default: timedelta(hours=24)
             Type: timedelta
             Example: timedelta(hours=12, minutes=30)
-            """,
+            """.strip(),
             f"{self.__class__.__name__}.battery_margin": """
             Battery safety margin as a fraction (0.0 to 1.0).
             This reduces the effective battery capacity to ensure vehicles don't fully deplete.
@@ -104,7 +126,7 @@ class VehicleScheduling(Modifier):
             Default: 0.1 (10%)
             Type: float
             Example: 0.15 (15% margin)
-            """,
+            """.strip(),
             f"{self.__class__.__name__}.longer_break_time_trips": """
             List of trip IDs that require a longer break time after completion.
             This can be used to specify trips that require additional rest or preparation time.
@@ -112,7 +134,7 @@ class VehicleScheduling(Modifier):
             Default: [] (empty list)
             Type: List[int]
             Example: [123, 456, 789]
-            """,
+            """.strip(),
             f"{self.__class__.__name__}.longer_break_time_duration": """
             Additional break time duration for trips specified in longer_break_time_trips.
             This duration is added on top of the minimum_break_time.
@@ -120,7 +142,18 @@ class VehicleScheduling(Modifier):
             Default: timedelta(minutes=5)
             Type: timedelta
             Example: timedelta(minutes=10)
-            """,
+            """.strip(),
+            f"{self.__class__.__name__}.charge_type": """
+            The charge type to consider for scheduling optimization. When in ChargeType.DEPOT mode, the schedule is
+            created in a way that respects battery constraints, making the trip sequences (blocks) only as long as
+            the battery allows. In ChargeType.OPPORTUNITY mode, the optimizer assumes that vehicles can charge
+            opportunistically at termini, allowing for longer trip sequences. Therefore, ChargeType.OPPORTUNITY
+            does not limit the length of blocks based on battery constraints, potentially resulting in more efficient
+            schedules.
+            Default: ChargeType.DEPOT
+            Type: ChargeType
+            Example: ChargeType.OPPORTUNITY
+            """.strip(),
         }
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
@@ -168,6 +201,9 @@ class VehicleScheduling(Modifier):
         longer_break_time_duration = params.get(
             longer_break_duration_key, self._get_default_longer_break_time_duration()
         )
+        charge_type = params.get(
+            f"{self.__class__.__name__}.charge_type", self._get_default_charge_type()
+        )
 
         # Validate parameters
         if not isinstance(minimum_break_time, timedelta):
@@ -194,6 +230,8 @@ class VehicleScheduling(Modifier):
             raise ValueError(
                 f"longer_break_time_duration must be a timedelta, got {type(longer_break_time_duration).__name__}"
             )
+        if not isinstance(charge_type, ChargeType):
+            raise ValueError(f"charge_type must be a ChargeType, got {type(charge_type).__name__}")
 
         # Make sure there is just one scenario
         scenario_q = session.query(eflips.model.Scenario)
@@ -211,14 +249,21 @@ class VehicleScheduling(Modifier):
             f"longer_break_time_duration={longer_break_time_duration}"
         )
 
-        # Create a dictionary of the energy consumption for each rotation
-        consumption: Dict[int, ConsumptionResult] = generate_consumption_result(scenario)
+        # If we are in DEPOT charge type, calculate consumption results, they will be fed into the optimizer
+        delta_socs: Dict[int, float] | None
+        if charge_type == ChargeType.DEPOT:
+            self.logger.info("Calculating consumption results for DEPOT charge type")
+            # Create a dictionary of the energy consumption for each rotation
+            consumption: Dict[int, ConsumptionResult] = generate_consumption_result(scenario)
 
-        # Convert to the format eflips-opt expects: {trip_id: delta_soc, ...}
-        # Also turn the delta_soc into a positive number
-        delta_socs: Dict[int, float] = {}
-        for trip_id, result in consumption.items():
-            delta_socs[trip_id] = -1 * result.delta_soc_total / (1 - battery_margin)
+            # Convert to the format eflips-opt expects: {trip_id: delta_soc, ...}
+            # Also turn the delta_soc into a positive number
+            delta_socs: Dict[int, float] = {}
+            for trip_id, result in consumption.items():
+                delta_socs[trip_id] = -1 * result.delta_soc_total / (1 - battery_margin)
+        else:
+            self.logger.info("Skipping consumption calculation for OPPORTUNITY charge type")
+            delta_socs = None
 
         self.logger.info("Generated consumption results")
 

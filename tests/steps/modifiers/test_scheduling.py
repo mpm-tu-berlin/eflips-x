@@ -13,6 +13,7 @@ from eflips.model import (
     TripType,
     VehicleClass,
     Depot,
+    ChargeType,
 )
 from geoalchemy2.shape import from_shape
 from shapely import Point
@@ -366,6 +367,161 @@ class TestVehicleScheduling:
                     "VehicleScheduling.longer_break_time_duration": 300
                 },  # Should be timedelta
             )
+
+    def test_vehicle_scheduling_opportunity_vs_depot_mode(
+        self,
+        temp_db: Path,
+        scenario_with_vehicle_types: Scenario,
+        db_session: Session,
+    ):
+        """Test that opportunity mode creates longer rotations than depot mode with small batteries."""
+        # Modify vehicle type to have very small battery capacity
+        vehicle_types = (
+            db_session.query(VehicleType)
+            .filter(VehicleType.scenario_id == scenario_with_vehicle_types.id)
+            .all()
+        )
+
+        for vt in vehicle_types:
+            vt.battery_capacity = 50.0  # Very small battery - 50 kWh
+            vt.consumption = 1.5  # Higher consumption to stress the battery
+
+        db_session.commit()
+
+        # Create a savepoint before running DEPOT mode
+        savepoint = db_session.begin_nested()
+
+        # Run scheduler in DEPOT mode
+        modifier_depot = VehicleScheduling()
+        params_depot = {
+            "VehicleScheduling.charge_type": ChargeType.DEPOT,
+            "VehicleScheduling.battery_margin": 0.1,
+        }
+        modifier_depot.modify(session=db_session, params=params_depot)
+        db_session.flush()
+
+        # Measure rotations in DEPOT mode
+        depot_rotations = (
+            db_session.query(Rotation)
+            .filter(Rotation.scenario_id == scenario_with_vehicle_types.id)
+            .all()
+        )
+        depot_rotation_count = len(depot_rotations)
+
+        # Calculate average trips per rotation and total duration per rotation
+        depot_trips_per_rotation = []
+        depot_duration_per_rotation = []
+
+        for rotation in depot_rotations:
+            trips = (
+                db_session.query(Trip)
+                .filter(Trip.rotation_id == rotation.id)
+                .filter(Trip.trip_type == TripType.PASSENGER)
+                .all()
+            )
+            if trips:
+                depot_trips_per_rotation.append(len(trips))
+                # Calculate total duration
+                min_departure = min(trip.departure_time for trip in trips)
+                max_arrival = max(trip.arrival_time for trip in trips)
+                duration = (max_arrival - min_departure).total_seconds() / 3600  # in hours
+                depot_duration_per_rotation.append(duration)
+
+        depot_avg_trips = (
+            sum(depot_trips_per_rotation) / len(depot_trips_per_rotation)
+            if depot_trips_per_rotation
+            else 0
+        )
+        depot_avg_duration = (
+            sum(depot_duration_per_rotation) / len(depot_duration_per_rotation)
+            if depot_duration_per_rotation
+            else 0
+        )
+
+        print(f"\nDEPOT mode results:")
+        print(f"  Number of rotations: {depot_rotation_count}")
+        print(f"  Average trips per rotation: {depot_avg_trips:.2f}")
+        print(f"  Average duration per rotation: {depot_avg_duration:.2f} hours")
+
+        # Rollback to savepoint to restore original state
+        savepoint.rollback()
+        db_session.expire_all()
+
+        # Run scheduler in OPPORTUNITY mode
+        modifier_opportunity = VehicleScheduling()
+        params_opportunity = {
+            "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
+            "VehicleScheduling.battery_margin": 0.1,  # Same margin for fair comparison
+        }
+        modifier_opportunity.modify(session=db_session, params=params_opportunity)
+        db_session.commit()
+
+        # Measure rotations in OPPORTUNITY mode
+        opportunity_rotations = (
+            db_session.query(Rotation)
+            .filter(Rotation.scenario_id == scenario_with_vehicle_types.id)
+            .all()
+        )
+        opportunity_rotation_count = len(opportunity_rotations)
+
+        # Calculate average trips per rotation and total duration per rotation
+        opportunity_trips_per_rotation = []
+        opportunity_duration_per_rotation = []
+
+        for rotation in opportunity_rotations:
+            trips = (
+                db_session.query(Trip)
+                .filter(Trip.rotation_id == rotation.id)
+                .filter(Trip.trip_type == TripType.PASSENGER)
+                .all()
+            )
+            if trips:
+                opportunity_trips_per_rotation.append(len(trips))
+                # Calculate total duration
+                min_departure = min(trip.departure_time for trip in trips)
+                max_arrival = max(trip.arrival_time for trip in trips)
+                duration = (max_arrival - min_departure).total_seconds() / 3600  # in hours
+                opportunity_duration_per_rotation.append(duration)
+
+        opportunity_avg_trips = (
+            sum(opportunity_trips_per_rotation) / len(opportunity_trips_per_rotation)
+            if opportunity_trips_per_rotation
+            else 0
+        )
+        opportunity_avg_duration = (
+            sum(opportunity_duration_per_rotation) / len(opportunity_duration_per_rotation)
+            if opportunity_duration_per_rotation
+            else 0
+        )
+
+        print(f"\nOPPORTUNITY mode results:")
+        print(f"  Number of rotations: {opportunity_rotation_count}")
+        print(f"  Average trips per rotation: {opportunity_avg_trips:.2f}")
+        print(f"  Average duration per rotation: {opportunity_avg_duration:.2f} hours")
+
+        # Verify that opportunity mode has fewer rotations (meaning longer rotations)
+        # OR higher average trips per rotation
+        # With small batteries, DEPOT mode should need more rotations (shorter each)
+        # while OPPORTUNITY mode can have fewer, longer rotations
+
+        assert opportunity_rotation_count > 0, "Should have rotations in opportunity mode"
+        assert depot_rotation_count > 0, "Should have rotations in depot mode"
+
+        # The key assertion: opportunity mode should create fewer rotations (longer each)
+        # OR opportunity mode should have more trips per rotation on average
+        fewer_rotations = opportunity_rotation_count < depot_rotation_count
+        more_trips_per_rotation = opportunity_avg_trips > depot_avg_trips
+        longer_duration = opportunity_avg_duration > depot_avg_duration
+
+        print(f"\nComparison:")
+        print(f"  OPPORTUNITY has fewer rotations: {fewer_rotations}")
+        print(f"  OPPORTUNITY has more trips per rotation: {more_trips_per_rotation}")
+        print(f"  OPPORTUNITY has longer duration per rotation: {longer_duration}")
+
+        # At least one of these should be true with small batteries
+        assert (
+            fewer_rotations or more_trips_per_rotation or longer_duration
+        ), "Opportunity mode should create longer rotations (fewer total, more trips per rotation, or longer duration) than depot mode with small batteries"
 
     def test_document_params(self):
         """Test that document_params returns expected parameters."""
