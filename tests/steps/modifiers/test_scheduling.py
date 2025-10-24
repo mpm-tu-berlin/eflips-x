@@ -368,12 +368,13 @@ class TestVehicleScheduling:
         docs = modifier.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 5
+        assert len(docs) == 6
         assert "VehicleScheduling.minimum_break_time" in docs
         assert "VehicleScheduling.maximum_schedule_duration" in docs
         assert "VehicleScheduling.battery_margin" in docs
         assert "VehicleScheduling.longer_break_time_trips" in docs
         assert "VehicleScheduling.longer_break_time_duration" in docs
+        assert "VehicleScheduling.charge_type" in docs
 
 
 class TestDepotAssignment:
