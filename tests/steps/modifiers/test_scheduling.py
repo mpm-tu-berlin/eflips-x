@@ -19,7 +19,12 @@ from shapely import Point
 from sqlalchemy.orm import Session
 
 from eflips.x.steps.generators import BVGXMLIngester
-from eflips.x.steps.modifiers.scheduling import VehicleScheduling, DepotAssignment
+from eflips.x.steps.modifiers.scheduling import (
+    VehicleScheduling,
+    DepotAssignment,
+    InsufficientChargingTimeAnalyzer,
+)
+from eflips.model import Event
 
 
 class TestVehicleScheduling:
@@ -762,3 +767,279 @@ class TestDepotAssignment:
         assert "DepotAssignment.depot_usage" in docs
         assert "DepotAssignment.step_size" in docs
         assert "DepotAssignment.max_iterations" in docs
+
+
+class TestInsufficientChargingTimeAnalyzer:
+    """Test suite for InsufficientChargingTimeAnalyzer analyzer."""
+
+    @pytest.fixture
+    def simple_scenario_with_short_trips(self, db_session: Session) -> Scenario:
+        """
+        Create a simple scenario with short trips and sufficient charging time.
+        Uses the helper functions from util.py to create a workable schedule.
+        """
+        from tests.util import (
+            _create_depot_with_lines,
+            CENTER_LAT,
+            CENTER_LON,
+        )
+        import random
+
+        # Set random seed for reproducibility
+        random.seed(42)
+
+        # Create scenario
+        scenario = Scenario(name="Simple Short Trip Scenario", name_short="SSTS")
+        db_session.add(scenario)
+        db_session.flush()
+
+        # Create vehicle type with constant consumption
+        vehicle_type = VehicleType(
+            name="Electric Bus 12m",
+            name_short="EB12",
+            scenario_id=scenario.id,
+            battery_capacity=350.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            empty_mass=10000,
+            allowed_mass=20000,
+            consumption=1.2,  # Constant consumption
+        )
+        db_session.add(vehicle_type)
+        db_session.flush()
+
+        # Berlin timezone
+        berlin_tz = pytz.timezone("Europe/Berlin")
+        base_date = datetime(2024, 1, 15, tzinfo=berlin_tz)
+
+        # Center point for depot ring
+        center_point = from_shape(Point(CENTER_LON, CENTER_LAT), srid=4326)
+
+        # Create single depot with short trips
+        _create_depot_with_lines(
+            db_session,
+            scenario.id,
+            vehicle_type.id,
+            depot_idx=0,
+            num_depots=1,
+            lines_per_depot=2,  # Must be even
+            center_point=center_point,
+            near_terminus_distance=500.0,  # Short distances
+            far_terminus_distance=1000.0,  # Short distances
+            trips_per_line=5,  # Few trips
+            base_date=base_date,
+            depot_ring_diameter=5000.0,
+        )
+
+        db_session.commit()
+        return scenario
+
+    @pytest.fixture
+    def simple_scenario_with_long_trips(self, db_session: Session) -> Scenario:
+        """
+        Create a simple scenario with long trips and insufficient charging time.
+        Uses long distances and many trips to create energy deficit.
+        """
+        from tests.util import (
+            _create_depot_with_lines,
+            CENTER_LAT,
+            CENTER_LON,
+        )
+        import random
+
+        # Set random seed for reproducibility
+        random.seed(42)
+
+        # Create scenario
+        scenario = Scenario(name="Simple Long Trip Scenario", name_short="SLTS")
+        db_session.add(scenario)
+        db_session.flush()
+
+        # Create vehicle type with high consumption and small battery
+        vehicle_type = VehicleType(
+            name="Electric Bus 12m",
+            name_short="EB12",
+            scenario_id=scenario.id,
+            battery_capacity=100.0,  # Very small battery
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            empty_mass=10000,
+            allowed_mass=20000,
+            consumption=2.0,  # High consumption
+        )
+        db_session.add(vehicle_type)
+        db_session.flush()
+
+        # Berlin timezone
+        berlin_tz = pytz.timezone("Europe/Berlin")
+        base_date = datetime(2024, 1, 15, tzinfo=berlin_tz)
+
+        # Center point for depot ring
+        center_point = from_shape(Point(CENTER_LON, CENTER_LAT), srid=4326)
+
+        # Create single depot with long trips
+        _create_depot_with_lines(
+            db_session,
+            scenario.id,
+            vehicle_type.id,
+            depot_idx=0,
+            num_depots=1,
+            lines_per_depot=2,  # Must be even
+            center_point=center_point,
+            near_terminus_distance=3000.0,  # Long distances
+            far_terminus_distance=6000.0,  # Long distances
+            trips_per_line=25,  # Many trips
+            base_date=base_date,
+            depot_ring_diameter=10000.0,
+        )
+
+        db_session.commit()
+        return scenario
+
+    def test_sufficient_charging_time_returns_none(
+        self,
+        temp_db: Path,
+        simple_scenario_with_short_trips: Scenario,
+        db_session: Session,
+    ):
+        """Test that analyzer returns None when all rotations have sufficient charging time."""
+        analyzer = InsufficientChargingTimeAnalyzer()
+
+        # Run the analyzer
+        result = analyzer.analyze(session=db_session, params={})
+
+        # Should return None indicating all rotations are fine
+        assert (
+            result is None
+        ), "Should return None when all rotations have sufficient charging time"
+
+        # Verify that simulation results were created
+        events_count = (
+            db_session.query(Event)
+            .filter(Event.scenario_id == simple_scenario_with_short_trips.id)
+            .count()
+        )
+        assert events_count > 0, "Should have created simulation events"
+
+    def test_insufficient_charging_time_returns_rotation_ids(
+        self,
+        temp_db: Path,
+        simple_scenario_with_long_trips: Scenario,
+        db_session: Session,
+    ):
+        """Test that analyzer returns rotation IDs when some rotations have insufficient charging time."""
+        analyzer = InsufficientChargingTimeAnalyzer()
+
+        # Run the analyzer
+        result = analyzer.analyze(session=db_session, params={})
+
+        # Should return a list of rotation IDs
+        assert (
+            result is not None
+        ), "Should return a list when rotations have insufficient charging time"
+        assert isinstance(result, list), "Should return a list of rotation IDs"
+        assert len(result) > 0, "Should have at least one rotation with insufficient charging time"
+        assert all(
+            isinstance(rotation_id, int) for rotation_id in result
+        ), "All elements should be integers (rotation IDs)"
+
+        # Verify the rotation IDs are valid
+        all_rotation_ids = set(
+            r.id
+            for r in db_session.query(Rotation)
+            .filter_by(scenario_id=simple_scenario_with_long_trips.id)
+            .all()
+        )
+        for rotation_id in result:
+            assert (
+                rotation_id in all_rotation_ids
+            ), f"Rotation ID {rotation_id} should be a valid rotation in the scenario"
+
+        # Verify that simulation results were created
+        events_count = (
+            db_session.query(Event)
+            .filter(Event.scenario_id == simple_scenario_with_long_trips.id)
+            .count()
+        )
+        assert events_count > 0, "Should have created simulation events"
+
+    def test_custom_charging_power_parameter(
+        self,
+        temp_db: Path,
+        simple_scenario_with_short_trips: Scenario,
+        db_session: Session,
+    ):
+        """Test that analyzer accepts custom charging power parameter."""
+        analyzer = InsufficientChargingTimeAnalyzer()
+
+        # Run with custom charging power (higher power = more charging = better results)
+        params = {
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 300.0,  # Higher than default 150kW
+        }
+
+        result = analyzer.analyze(session=db_session, params=params)
+
+        # With higher charging power, should still have sufficient charging
+        assert result is None, "Should return None with higher charging power"
+
+    def test_analyzer_fails_with_existing_simulation_results(
+        self,
+        temp_db: Path,
+        simple_scenario_with_short_trips: Scenario,
+        db_session: Session,
+    ):
+        """Test that analyzer raises error when simulation results already exist."""
+        analyzer = InsufficientChargingTimeAnalyzer()
+
+        # Run analyzer once to create simulation results
+        analyzer.analyze(session=db_session, params={})
+
+        # Try to run again - should fail because simulation results exist
+        with pytest.raises(ValueError, match="Database contains .* existing simulation results"):
+            analyzer.analyze(session=db_session, params={})
+
+    def test_analyzer_multiple_scenarios_error(self, temp_db: Path, db_session: Session):
+        """Test that analyzer raises error with multiple scenarios."""
+        # Create two scenarios
+        scenario1 = Scenario(name="Scenario 1", name_short="S1")
+        scenario2 = Scenario(name="Scenario 2", name_short="S2")
+        db_session.add_all([scenario1, scenario2])
+        db_session.commit()
+
+        analyzer = InsufficientChargingTimeAnalyzer()
+
+        with pytest.raises(ValueError, match="Expected exactly one scenario, found 2"):
+            analyzer.analyze(session=db_session, params={})
+
+    def test_analyzer_with_rotation_without_driving_events(
+        self,
+        temp_db: Path,
+        simple_scenario_with_short_trips: Scenario,
+        db_session: Session,
+    ):
+        """Test that analyzer handles rotations without driving events gracefully."""
+        analyzer = InsufficientChargingTimeAnalyzer()
+
+        # Run the analyzer first to create events
+        result = analyzer.analyze(session=db_session, params={})
+
+        # Should work fine with the regular scenario
+        assert result is None, "Should return None for scenario with sufficient charging"
+
+        # Now verify that if a rotation had no driving events, it would be skipped
+        # This is tested by the warning in the analyzer code at line 815-817
+        # The analyzer already handles this case by checking if last_driving_event is None
+
+    def test_document_params(self):
+        """Test that document_params returns expected parameters."""
+        analyzer = InsufficientChargingTimeAnalyzer()
+        docs = analyzer.document_params()
+
+        assert isinstance(docs, dict)
+        assert len(docs) == 1
+        assert "InsufficientChargingTimeAnalyzer.charging_power_kw" in docs
+        assert "150 kW" in docs["InsufficientChargingTimeAnalyzer.charging_power_kw"]

@@ -639,3 +639,187 @@ class DepotAssignment(Modifier):
             self.logger.info(
                 f"\tDepot '{station.name}' (ID {station.id}) has {len(rotations)} rotations assigned before optimization"
             )
+
+
+class InsufficientChargingTimeAnalyzer(Analyzer):
+    """
+    Analyze whether rotations have sufficient charging time throughout the day.
+
+    This analyzer checks if the schedule has enough charging time so that buses do not
+    lose more energy driving than they ever regain from charging throughout the day.
+    If rotations end with negative SOC, it indicates that the schedule needs more slack
+    time for charging, and a new schedule with more break time should be created.
+
+    Returns None if all rotations have sufficient charging time (SOC >= 0 at end of day),
+    or a list of rotation IDs that end with SOC below zero.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    def document_params(self) -> Dict[str, str]:
+        """
+        Document the parameters of this analyzer.
+
+        Returns:
+        --------
+        Dict[str, str]
+            This analyzer does not use any configurable parameters.
+        """
+        return {
+            self.__class__.__name__
+            + ".charging_power_kw": """
+            The charging power in kW to assume for all charging stations during the analysis. Default is 150 kW.
+            """.strip()
+        }
+
+    def _get_default_charging_power_kw(self) -> float:
+        """Get the default charging power in kW."""
+        return 150.0
+
+    def analyze(self, session: Session, params: Dict[str, Any]) -> List[int] | None:
+        """
+        Check if rotations have sufficient charging time throughout the day.
+
+        This method:
+        1. Validates that exactly one scenario exists
+        2. Validates that no simulation results exist yet (fails if they do)
+        3. Runs a consumption simulation to calculate energy usage
+        4. Checks which rotations end with SOC below zero at the end of their last trip
+        5. Returns None if all rotations are fine, or a list of problematic rotation IDs
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database
+        params : Dict[str, Any]
+            Pipeline parameters (none required for this analyzer)
+
+        Returns:
+        --------
+        List[int] | None
+            - None if all rotations have sufficient charging time (SOC >= 0)
+            - List[int] of rotation IDs that end with SOC < 0, indicating insufficient
+              charging time and the need for a new schedule with more slack
+
+        Raises:
+        -------
+        ValueError
+            If simulation results already exist in the database
+        """
+        # Make sure there is just one scenario
+        scenario_q = session.query(Scenario)
+        if scenario_q.count() != 1:
+            raise ValueError(f"Expected exactly one scenario, found {scenario_q.count()}")
+        scenario = scenario_q.one()
+
+        # Check that no simulation results exist yet
+        existing_events = session.query(Event).filter(Event.scenario_id == scenario.id).count()
+        if existing_events > 0:
+            raise ValueError(
+                f"Database contains {existing_events} existing simulation results. "
+                "Please clear previous simulation results before running this analyzer."
+            )
+
+        self.logger.info("Running consumption simulation to check for insufficient charging time")
+
+        # Electrify all charging stations with the given power
+        charging_power = params.get(
+            f"{self.__class__.__name__}.charging_power_kw", self._get_default_charging_power_kw()
+        )
+
+        # Electrify Depots
+        depot_q = (
+            session.query(Station)
+            .filter(Station.scenario_id == scenario.id)
+            .filter(Station.charge_type == ChargeType.DEPOT)
+        )
+        depot_q.update(
+            {
+                "is_electrified": True,
+                "amount_charging_places": 1000,
+                "power_per_charger": charging_power,
+                "power_total": 1000 * charging_power,
+                "charge_type": ChargeType.DEPOT,
+                "voltage_level": VoltageLevel.MV,
+            }
+        )
+
+        # Electrify All termini
+        station_q = (
+            session.query(Station)
+            .filter(Station.scenario_id == scenario.id)
+            .filter(Station.charge_type != ChargeType.DEPOT)
+        )
+        station_q.update(
+            {
+                "is_electrified": True,
+                "amount_charging_places": 1000,
+                "power_per_charger": charging_power,
+                "power_total": 1000 * charging_power,
+                "charge_type": ChargeType.OPPORTUNITY,
+                "voltage_level": VoltageLevel.MV,
+            }
+        )
+
+        # Generate consumption results
+        consumption_results = generate_consumption_result(scenario)
+
+        # Run consumption simulation
+        simple_consumption_simulation(
+            scenario=scenario, initialize_vehicles=True, consumption_result=consumption_results
+        )
+
+        # Load all rotations with their trips eagerly to avoid N+1 queries
+        all_rotations = (
+            session.query(Rotation)
+            .filter(Rotation.scenario_id == scenario.id)
+            .options(joinedload(Rotation.trips))
+            .all()
+        )
+
+        # For each rotation, find the last trip and check its final SOC
+        rotations_with_low_soc = []
+
+        for rotation in all_rotations:
+            if not rotation.trips:
+                self.logger.warning(f"Rotation {rotation.id} has no trips, skipping")
+                continue
+
+            # Get the last trip
+            last_trip = rotation.trips[-1]
+
+            # Find the last driving event for this trip
+            last_driving_event = (
+                session.query(Event)
+                .filter(Event.trip_id == last_trip.id)
+                .filter(Event.event_type == EventType.DRIVING)
+                .order_by(Event.time_end.desc())
+                .first()
+            )
+
+            if last_driving_event is None:
+                self.logger.warning(
+                    f"Rotation {rotation.id}, last trip {last_trip.id} has no driving events, skipping"
+                )
+                continue
+
+            # Check if the final SOC is below zero
+            if last_driving_event.soc_end < 0:
+                rotations_with_low_soc.append(rotation.id)
+                self.logger.debug(
+                    f"Rotation {rotation.id} ends with SOC {last_driving_event.soc_end:.2%} < 0"
+                )
+
+        if rotations_with_low_soc:
+            self.logger.warning(
+                f"Found {len(rotations_with_low_soc)} rotation(s) with insufficient charging time "
+                f"(ending with SOC < 0): {rotations_with_low_soc}"
+            )
+            return rotations_with_low_soc
+        else:
+            self.logger.info(
+                "All rotations have sufficient charging time (SOC >= 0 at end of day)"
+            )
+            return None
