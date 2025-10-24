@@ -9,7 +9,7 @@ import logging
 import os
 from collections import defaultdict, OrderedDict
 from datetime import timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple, Counter
 
 import eflips.model
 import sqlalchemy.orm.session
@@ -17,6 +17,7 @@ from eflips.depot.api import (
     generate_consumption_result,
     simple_consumption_simulation,
     ConsumptionResult,
+    group_rotations_by_start_end_stop,
 )
 from eflips.model import ChargeType
 from eflips.model import (
@@ -33,6 +34,7 @@ from eflips.model import (
 )
 from eflips.opt.depot_rotation_matching import DepotRotationOptimizer
 from eflips.opt.scheduling import create_graph, solve, write_back_rotation_plan
+from sqlalchemy import func, not_
 from sqlalchemy.orm import Session, joinedload
 
 from eflips.x.framework import Modifier, Analyzer
@@ -1109,3 +1111,487 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
                 "All rotations have sufficient charging time (SOC >= 0 at end of day)"
             )
             return None
+
+
+class StationElectrification(Modifier):
+    """
+    Electrify stations to ensure rotations have sufficient charging opportunities.
+
+    This modifier iteratively adds charging infrastructure at strategic termini until all
+    rotations can complete their schedules without running below 0% SOC. It uses a heuristic
+    approach to select stations where rotations with low SOC spend the most time.
+
+    The modifier incorporates the logic from the original do_station_electrification() function
+    and the utility functions from util_station_electrification module.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def _get_default_charging_power_kw() -> float:
+        """Get the default charging power in kW."""
+        return 450.0
+
+    def _get_default_max_stations(self, session: Session) -> int:
+        """Get the default maximum number of stations to electrify (25% of termini)."""
+        termini_count = len(self._get_all_termini(session))
+        return max(1, int(termini_count * 0.25))
+
+    def document_params(self) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary describing the configurable parameters:
+            - StationElectrification.charging_power_kw: Charging power in kW
+            - StationElectrification.max_stations_to_electrify: Maximum number of stations to electrify
+        """
+        return {
+            f"{self.__class__.__name__}.charging_power_kw": """
+            The charging power in kW for opportunity charging stations added during
+            station electrification. This parameter determines how quickly vehicles can
+            charge at termini. Higher power means faster charging but may require more
+            expensive infrastructure.
+
+            Default: 450.0 kW
+            Type: float
+            Example: 300.0
+            """.strip(),
+            f"{self.__class__.__name__}.max_stations_to_electrify": """
+            Maximum number of terminus stations to electrify before giving up. This prevents
+            the algorithm from attempting to electrify the entire network if the schedule is
+            fundamentally infeasible. If this limit is reached, an exception is raised.
+
+            Default: 25% of all termini in the network (minimum 1)
+            Type: int
+            Example: 50
+            """.strip(),
+        }
+
+    def _get_all_termini(self, session: Session) -> List[int]:
+        """
+        Get all terminus station IDs (non-depot stations where routes arrive/depart).
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database
+
+        Returns:
+        --------
+        List[int]
+            List of station IDs that are termini (excluding depots)
+        """
+        # Get all stations that are arrival or departure points for routes
+        # but are not depot stations
+
+        scenario_q = session.query(Scenario)
+        if scenario_q.count() != 1:
+            raise ValueError(f"Expected exactly one scenario, found {scenario_q.count()}")
+        scenario = scenario_q.one()
+
+        arrival_station_ids = (
+            session.query(Route.arrival_station_id)
+            .join(Station, Route.arrival_station_id == Station.id)
+            .filter(Station.scenario_id == scenario.id)
+            .filter(Station.charge_type != ChargeType.DEPOT)
+            .distinct()
+            .all()
+        )
+
+        departure_station_ids = (
+            session.query(Route.departure_station_id)
+            .join(Station, Route.departure_station_id == Station.id)
+            .filter(Station.scenario_id == scenario.id)
+            .filter(Station.charge_type != ChargeType.DEPOT)
+            .distinct()
+        )
+
+        # Combine and deduplicate
+        terminus_ids = set(
+            [sid for (sid,) in arrival_station_ids] + [sid for (sid,) in departure_station_ids]
+        )
+
+        return list(terminus_ids)
+
+    @staticmethod
+    def _make_depot_stations_electrified(scenario: Scenario, session: Session):
+        """
+        Before running SimBA for the first time, we need to make sure that the depot stations (The ones where rotations
+        start and end) are electrified.
+        :param scenario: The scenario to electrify.
+        :param session: An open database session.
+        :return: Nothing. The function modifies the database.
+        """
+        rotations_by_start_end_stop: Dict[
+            Tuple[Station, Station], Dict[VehicleType, List[Rotation]]
+        ] = group_rotations_by_start_end_stop(scenario.id, session)
+        for (start, end), _ in rotations_by_start_end_stop.items():
+            if start != end:
+                raise ValueError(f"Start and end station are not the same: {start} != {end}")
+            if not start.is_electrified:
+                start.is_electrified = True
+                start.amount_charging_places = 100
+                start.power_per_charger = 300
+                start.power_total = start.amount_charging_places * start.power_per_charger
+                start.charge_type = ChargeType.DEPOT
+                start.voltage_level = VoltageLevel.MV
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Electrify stations iteratively until all rotations are feasible.
+
+        This method:
+        1. Validates that exactly one scenario exists
+        2. Sets up initial depot electrification
+        3. Removes terminus charging from rotations that don't need it
+        4. Iteratively adds charging stations at strategic termini until no rotations
+           end with SOC below 0%
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database to modify
+        params : Dict[str, Any]
+            Pipeline parameters:
+            - StationElectrification.charging_power_kw (optional): Charging power in kW
+            - StationElectrification.max_stations_to_electrify (optional): Max stations to electrify
+
+        Returns:
+        --------
+        None
+            This modifier modifies the database in place by electrifying stations
+
+        Raises:
+        -------
+        ValueError
+            If charging power differs from InsufficientChargingTimeAnalyzer setting
+            If maximum stations limit is reached without achieving feasibility
+        """
+        # Get parameters
+        charging_power_key = f"{self.__class__.__name__}.charging_power_kw"
+        max_stations_key = f"{self.__class__.__name__}.max_stations_to_electrify"
+
+        charging_power = params.get(charging_power_key, self._get_default_charging_power_kw())
+        max_stations = params.get(max_stations_key, self._get_default_max_stations(session))
+
+        # Validate charging power
+        if not isinstance(charging_power, (int, float)):
+            raise ValueError(
+                f"charging_power_kw must be a number, got {type(charging_power).__name__}"
+            )
+        if charging_power <= 0:
+            raise ValueError(f"charging_power_kw must be positive, got {charging_power}")
+
+        # Validate max_stations
+        if not isinstance(max_stations, int):
+            raise ValueError(
+                f"max_stations_to_electrify must be an integer, got {type(max_stations).__name__}"
+            )
+        if max_stations <= 0:
+            raise ValueError(f"max_stations_to_electrify must be positive, got {max_stations}")
+
+        # Check for power mismatch with InsufficientChargingTimeAnalyzer
+        analyzer_power_key = f"{InsufficientChargingTimeAnalyzer.__name__}.charging_power_kw"
+        if analyzer_power_key in params:
+            analyzer_power = params[analyzer_power_key]
+            if analyzer_power != charging_power:
+                raise ValueError(
+                    f"Charging power mismatch: {self.__class__.__name__} has {charging_power} kW "
+                    f"but {InsufficientChargingTimeAnalyzer.__name__} has {analyzer_power} kW. "
+                    "Both must use the same charging power."
+                )
+
+        # Make sure there is just one scenario
+        scenario_q = session.query(Scenario)
+        if scenario_q.count() != 1:
+            raise ValueError(f"Expected exactly one scenario, found {scenario_q.count()}")
+        scenario = scenario_q.one()
+
+        termini_count = len(self._get_all_termini(session))
+        self.logger.info(
+            f"Starting station electrification with charging power {charging_power} kW, "
+            f"max stations to electrify: {max_stations} (total termini: {termini_count})"
+        )
+
+        # Make the depots electrified
+        self._make_depot_stations_electrified(scenario, session)
+
+        # Remove terminus charging from rotations that don't need it
+        self._remove_terminus_charging_from_okay_rotations(scenario, session)
+
+        # Track number of stations electrified
+        stations_electrified = 0
+
+        # Iteratively add charging stations until all rotations are feasible or limit reached
+        while True:
+            # Check if we've exceeded the limit
+            if stations_electrified >= max_stations:
+                num_rotations_failing = self._number_of_rotations_below_zero(scenario, session)
+                raise ValueError(
+                    f"Station electrification failed: electrified {stations_electrified} stations "
+                    f"(limit: {max_stations}) but {num_rotations_failing} rotation(s) still have "
+                    f"SOC below 0%.\n\n"
+                    f"Possible solutions:\n"
+                    f"1. Increase the 'max_stations_to_electrify' parameter (currently {max_stations})\n"
+                    f"2. Check if the schedule is feasible - have you run InsufficientChargingTimeAnalyzer?\n"
+                    f"3. Consider using IntegratedScheduling which adds charging breaks to the schedule\n"
+                    f"4. Review network design - the scenario may require more charging opportunities or "
+                    f"higher charging power (currently {charging_power} kW)\n"
+                    f"5. Check vehicle battery capacity and consumption models for unrealistic values"
+                )
+
+            savepoint = session.begin_nested()
+            # Run the consumption model to assess current SOC levels
+            try:
+                consumption_results = generate_consumption_result(scenario)
+                simple_consumption_simulation(
+                    scenario, initialize_vehicles=True, consumption_result=consumption_results
+                )
+
+                if self.logger.isEnabledFor(logging.INFO):
+                    min_soc_end = (
+                        session.query(func.min(Event.soc_end))
+                        .filter(Event.scenario_id == scenario.id)
+                        .first()[0]
+                    )
+                    count_of_electrified_termini = (
+                        session.query(Station)
+                        .filter(Station.scenario_id == scenario.id, Station.is_electrified == True)
+                        .count()
+                    )
+                    self.logger.info(
+                        f"Minimum SOC at end of day: {min_soc_end}, Electrified termini: {count_of_electrified_termini}"
+                    )
+
+                    # Log the current state
+                    number_of_electrified_termini = (
+                        session.query(Station)
+                        .filter(Station.scenario_id == scenario.id)
+                        .filter(Station.is_electrified == True)
+                        .count()
+                    )
+                    self.logger.info(
+                        f"Number of rotations with SOC below 0%: {self._number_of_rotations_below_zero(scenario, session)}, "
+                        f"Number of electrified termini: {number_of_electrified_termini}, "
+                        f"Stations electrified in this run: {stations_electrified}/{max_stations}"
+                    )
+
+                if self._number_of_rotations_below_zero(scenario, session) == 0:
+                    # All rotations are feasible now
+                    break
+
+                electrified_station_id = self._identify_charging_station_to_add(scenario, session)
+
+                if electrified_station_id is None:
+                    num_rotations_failing = self._number_of_rotations_below_zero(scenario, session)
+                    raise ValueError(
+                        f"Station electrification failed: cannot add more charging stations "
+                        f"(all candidate stations have zero score), but {num_rotations_failing} "
+                        f"rotation(s) still have SOC below 0%.\n\n"
+                        f"This indicates a fundamental issue with the schedule or network design:\n"
+                        f"1. Have you run InsufficientChargingTimeAnalyzer before scheduling?\n"
+                        f"2. Consider using IntegratedScheduling instead of plain VehicleScheduling\n"
+                        f"3. Some rotations may not have any suitable terminus for charging\n"
+                        f"4. Check vehicle battery capacity and consumption models"
+                    )
+
+            finally:
+                savepoint.rollback()  # Remove simulation results to keep DB clean
+
+            # Actually electrify the selected station
+            station_to_electrify = (
+                session.query(Station).filter(Station.id == electrified_station_id).one()
+            )
+            station_to_electrify.is_electrified = True
+            station_to_electrify.amount_charging_places = 100
+            station_to_electrify.power_per_charger = charging_power
+            station_to_electrify.power_total = (
+                station_to_electrify.amount_charging_places
+                * station_to_electrify.power_per_charger
+            )
+            station_to_electrify.charge_type = ChargeType.OPPORTUNITY
+            station_to_electrify.voltage_level = VoltageLevel.MV
+
+            self.logger.info(
+                f"Added charging station {session.query(Station).filter(Station.id == electrified_station_id).one().name} "
+                f"({electrified_station_id}) to scenario"
+            )
+            stations_electrified += 1
+
+        session.flush()
+        self.logger.info(
+            f"Station electrification completed successfully after electrifying {stations_electrified} stations"
+        )
+
+        return None
+
+    def _remove_terminus_charging_from_okay_rotations(
+        self,
+        scenario: Scenario,
+        session: Session,
+    ) -> None:
+        """
+        Run the consumption model and remove terminus charging from rotations that don't need it.
+
+        Parameters:
+        -----------
+        scenario : Scenario
+            The scenario to process
+        session : Session
+            An open database session
+        """
+
+        self.logger.info("Removing terminus charging from rotations that don't need it")
+
+        savepoint = session.begin_nested()
+        try:
+            # Run the consumption model
+            consumption_results = generate_consumption_result(scenario)
+
+            # `create_consumption_results` may have detached our scenario object from the session
+            session.add(scenario)
+            session.flush()
+
+            simple_consumption_simulation(
+                initialize_vehicles=True,
+                scenario=scenario,
+                consumption_result=consumption_results,
+            )
+
+            # Get the rotations with low SoC
+            low_soc_rot_q = (
+                session.query(Rotation.id)
+                .join(Trip)
+                .join(Event)
+                .filter(Rotation.scenario_id == scenario.id)
+                .filter(Event.event_type == EventType.DRIVING)
+                .filter(Event.soc_end < 0)
+                .distinct()
+            )
+            high_soc_rot_q = (
+                session.query(Rotation)
+                .filter(Rotation.scenario_id == scenario.id)
+                .filter(not_(Rotation.id.in_(low_soc_rot_q)))
+            )
+
+            self.logger.info(
+                f"{low_soc_rot_q.count()} rotations with low SoC, {high_soc_rot_q.count()} with high SoC, "
+                f"{session.query(Rotation).filter(Rotation.scenario_id == scenario.id).count()} total rotations"
+            )
+
+            # Put the IDs of all high SoC rotations into a list to have them available after we're rolling back the
+            # simulation results
+            high_soc_rot_ids = [rotation.id for rotation in high_soc_rot_q]
+        finally:
+            savepoint.rollback()  # Remove simulation results to keep DB clean
+
+        # For the rotations with high SoC, remove the ability to charge at the terminus
+        session.query(Rotation).filter(Rotation.id.in_(high_soc_rot_ids)).update(
+            {"allow_opportunity_charging": False}
+        )
+        session.flush()
+
+    def _number_of_rotations_below_zero(self, scenario: Scenario, session: Session) -> int:
+        """
+        Count the number of rotations with SOC below 0%.
+
+        Parameters:
+        -----------
+        scenario : Scenario
+            The scenario to check
+        session : Session
+            The database session
+
+        Returns:
+        --------
+        int
+            The number of rotations with SOC below 0%
+        """
+        rotations_q = (
+            session.query(Rotation)
+            .join(Trip)
+            .join(Event)
+            .filter(Rotation.scenario_id == scenario.id)
+            .filter(Event.event_type == EventType.DRIVING)
+            .filter(Event.soc_end < 0)
+        )
+        return rotations_q.count()
+
+    def _identify_charging_station_to_add(
+        self,
+        scenario: Scenario,
+        session: Session,
+    ) -> int | None:
+        """
+        Identify a charging station to add based on heuristic.
+
+        The heuristic selects the station where rotations with negative SoC spend the most time.
+        If the selected station is already electrified, the next best station is selected.
+
+        Parameters:
+        -----------
+        scenario : Scenario
+            The scenario to add the charging station to
+        session : Session
+            An open database session
+        power : float
+            The power of the charging station in kW
+
+        Returns:
+        --------
+        int | None
+            The ID of the charging station that was added, or None if no station could be added
+        """
+
+        # Identify all rotations with SOC < 0
+        rotations_with_low_soc = (
+            session.query(Rotation)
+            .join(Trip)
+            .join(Event)
+            .filter(Event.soc_end < 0)
+            .filter(Event.event_type == EventType.DRIVING)
+            .filter(Event.scenario == scenario)
+            .options(sqlalchemy.orm.joinedload(Rotation.trips).joinedload(Trip.route))
+            .distinct()
+            .all()
+        )
+
+        # For these rotations, find all arrival stations except the last one (depot)
+        # Sum up the time spent at each station
+        total_break_time_by_station = Counter()
+        for rotation in rotations_with_low_soc:
+            for i in range(len(rotation.trips) - 1):
+                trip = rotation.trips[i]
+                total_break_time_by_station[trip.route.arrival_station_id] += int(
+                    (rotation.trips[i + 1].departure_time - trip.arrival_time).total_seconds()
+                )
+
+        # If all stations have a score of 0, we can't add any more stations
+        if all(v == 0 for v in total_break_time_by_station.values()):
+            return None
+
+        # Select the station with the highest score that isn't already electrified
+        for most_popular_station_id, _ in total_break_time_by_station.most_common():
+            station: Station = (
+                session.query(Station).filter(Station.id == most_popular_station_id).one()
+            )
+            if station.is_electrified:
+                self.logger.warning(
+                    f"Station {station.name} is already electrified. Choosing the next best station."
+                )
+                continue
+
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(
+                    f"Station {most_popular_station_id} ({station.name}) was selected as the station "
+                    "where the most time is spent."
+                )
+
+            return most_popular_station_id
+
+        return None

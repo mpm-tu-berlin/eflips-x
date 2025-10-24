@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 import pytz
-from eflips.model import Event
+from eflips.depot.api import generate_consumption_result, simple_consumption_simulation
+from eflips.model import Event, EventType
 from eflips.model import (
     Scenario,
     VehicleType,
@@ -15,6 +16,7 @@ from eflips.model import (
     VehicleClass,
     Depot,
     ChargeType,
+    Station,
 )
 from geoalchemy2.shape import from_shape
 from shapely import Point
@@ -26,6 +28,7 @@ from eflips.x.steps.modifiers.scheduling import (
     DepotAssignment,
     InsufficientChargingTimeAnalyzer,
     IntegratedScheduling,
+    StationElectrification,
 )
 
 
@@ -1602,3 +1605,355 @@ class TestIntegratedScheduling:
         assert len(docs) == 1
         assert "IntegratedScheduling.max_iterations" in docs
         assert "Maximum number of iterations" in docs["IntegratedScheduling.max_iterations"]
+
+
+class TestStationElectrification:
+    """Test suite for StationElectrification modifier."""
+
+    def _increase_time_between_trips(self, scenario: Scenario, db_session: Session) -> None:
+        """
+        Helper to add some time for opportunity charging between trips.
+        :param scenario: A scenario with trips
+        :param db_session: An open database session
+        :return: None
+        """
+        break_duration = timedelta(minutes=2)
+        all_rotations = db_session.query(Rotation).filter_by(scenario_id=scenario.id).all()
+        for rotation in all_rotations:
+            for i, trip in enumerate(rotation.trips):
+                for subsequent_trip in rotation.trips[i + 1 :]:
+                    subsequent_trip.departure_time += break_duration
+                    subsequent_trip.arrival_time += break_duration
+
+    @pytest.fixture
+    def infeasible_scenario_without_opportunity_charging(self, db_session: Session) -> Scenario:
+        """
+        Create a scenario that is infeasible without opportunity charging.
+        Uses small battery capacity and high consumption to force need for station electrification.
+        """
+        from tests.util import (
+            _create_depot_with_lines,
+            CENTER_LAT,
+            CENTER_LON,
+        )
+        import random
+
+        # Set random seed for reproducibility
+        random.seed(42)
+
+        # Create scenario
+        scenario = Scenario(name="Infeasible Scenario", name_short="INFEAS")
+        db_session.add(scenario)
+        db_session.flush()
+
+        # Create vehicle type with parameters similar to TestIntegratedScheduling
+        # but with higher charging power to match StationElectrification defaults
+        vehicle_type = VehicleType(
+            name="Electric Bus 12m",
+            name_short="EB12",
+            scenario_id=scenario.id,
+            battery_capacity=200.0,  # Moderate battery - same as IntegratedScheduling
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 450], [1, 450]],  # Match default StationElectrification power
+            opportunity_charging_capable=True,  # Enable opportunity charging
+            minimum_charging_power=10,
+            empty_mass=10000,
+            allowed_mass=20000,
+            consumption=1.8,  # Higher consumption - same as IntegratedScheduling
+        )
+        db_session.add(vehicle_type)
+        db_session.flush()
+
+        # Berlin timezone
+        berlin_tz = pytz.timezone("Europe/Berlin")
+        base_date = datetime(2024, 1, 15, tzinfo=berlin_tz)
+
+        # Center point for depot ring
+        center_point = from_shape(Point(CENTER_LON, CENTER_LAT), srid=4326)
+
+        # Create single depot with parameters matching TestIntegratedScheduling
+        _create_depot_with_lines(
+            db_session,
+            scenario.id,
+            vehicle_type.id,
+            depot_idx=0,
+            num_depots=1,
+            lines_per_depot=2,  # Must be even
+            center_point=center_point,
+            near_terminus_distance=2000.0,  # Same as IntegratedScheduling
+            far_terminus_distance=4000.0,  # Same as IntegratedScheduling
+            trips_per_line=15,  # Same as IntegratedScheduling
+            base_date=base_date,
+            depot_ring_diameter=8000.0,
+        )
+
+        # Make sure rotations allow opportunity charging
+        rotations = db_session.query(Rotation).filter_by(scenario_id=scenario.id).all()
+        for rotation in rotations:
+            rotation.allow_opportunity_charging = True
+
+        return scenario
+
+    def test_station_electrification_basic(
+        self,
+        temp_db: Path,
+        infeasible_scenario_without_opportunity_charging: Scenario,
+        db_session: Session,
+    ):
+        """Test StationElectrification with basic parameters."""
+        # Run vehicle scheduling and depot assignment first
+        self._increase_time_between_trips(
+            infeasible_scenario_without_opportunity_charging, db_session
+        )
+
+        # Count initial electrified stations (should only be the depot)
+        initial_electrified = (
+            db_session.query(Station)
+            .filter(Station.scenario_id == infeasible_scenario_without_opportunity_charging.id)
+            .filter(Station.is_electrified == True)
+            .count()
+        )
+        assert initial_electrified == 1, "Should have 1 electrified station (the depot)"
+
+        # Step 3: Now run station electrification
+        modifier = StationElectrification()
+        params = {
+            "StationElectrification.max_stations_to_electrify": 10,
+        }
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Check that more stations were electrified
+        final_electrified = (
+            db_session.query(Station)
+            .filter(Station.scenario_id == infeasible_scenario_without_opportunity_charging.id)
+            .filter(Station.is_electrified == True)
+            .count()
+        )
+        assert final_electrified > initial_electrified, "Should have electrified more stations"
+
+        # Verify that all rotations now have SOC >= 0
+        scenario = infeasible_scenario_without_opportunity_charging
+        consumption_results = generate_consumption_result(scenario)
+        simple_consumption_simulation(
+            scenario, initialize_vehicles=True, consumption_result=consumption_results
+        )
+
+        # Check that no rotations have negative SOC
+        rotations_with_negative_soc = (
+            db_session.query(Rotation)
+            .join(Trip)
+            .join(Event)
+            .filter(Rotation.scenario_id == scenario.id)
+            .filter(Event.event_type == EventType.DRIVING)
+            .filter(Event.soc_end < 0)
+            .distinct()
+            .count()
+        )
+        assert (
+            rotations_with_negative_soc == 0
+        ), "Should have no rotations with negative SOC after electrification"
+
+    def test_station_electrification_with_custom_power(
+        self,
+        temp_db: Path,
+        infeasible_scenario_without_opportunity_charging: Scenario,
+        db_session: Session,
+    ):
+        """Test StationElectrification with custom charging power."""
+        # Run vehicle scheduling and depot assignment first
+        self._increase_time_between_trips(
+            infeasible_scenario_without_opportunity_charging, db_session
+        )
+
+        modifier = StationElectrification()
+
+        # Use lower charging power - this might require more stations
+        params = {
+            "StationElectrification.charging_power_kw": 300.0,  # Lower than default 450kW
+            "StationElectrification.max_stations_to_electrify": 10,
+        }
+
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Verify that electrified stations have the correct power
+        electrified_opportunity_stations = (
+            db_session.query(Station)
+            .filter(Station.scenario_id == infeasible_scenario_without_opportunity_charging.id)
+            .filter(Station.is_electrified == True)
+            .filter(Station.charge_type == ChargeType.OPPORTUNITY)
+            .all()
+        )
+
+        for station in electrified_opportunity_stations:
+            assert (
+                station.power_per_charger == 300.0
+            ), f"Station {station.name} should have 300kW charging power"
+
+    def test_station_electrification_max_stations_limit(
+        self,
+        temp_db: Path,
+        infeasible_scenario_without_opportunity_charging: Scenario,
+        db_session: Session,
+    ):
+        """Test that StationElectrification respects max_stations_to_electrify limit."""
+        # Run vehicle scheduling and depot assignment first
+        self._increase_time_between_trips(
+            infeasible_scenario_without_opportunity_charging, db_session
+        )
+
+        # Halve the battery capacity to make it more challenging
+        vehicle_types = (
+            db_session.query(VehicleType)
+            .filter(VehicleType.scenario_id == infeasible_scenario_without_opportunity_charging.id)
+            .all()
+        )
+        for vt in vehicle_types:
+            vt.battery_capacity *= 0.5  # Reduce battery capacity by half
+
+        modifier = StationElectrification()
+
+        # Set a very low limit to force failure
+        params = {
+            "StationElectrification.charging_power_kw": 1,
+            "StationElectrification.max_stations_to_electrify": 1,  # Very low limit
+        }
+
+        # Should raise ValueError when limit is exceeded
+        with pytest.raises(
+            ValueError,
+            match=r"Station electrification failed: electrified .* stations \(limit: .*\) .*",
+        ):
+            modifier.modify(session=db_session, params=params)
+
+    def test_station_electrification_power_mismatch_validation(
+        self,
+        temp_db: Path,
+        infeasible_scenario_without_opportunity_charging: Scenario,
+        db_session: Session,
+    ):
+        """Test that StationElectrification validates power mismatch with InsufficientChargingTimeAnalyzer."""
+        modifier = StationElectrification()
+
+        # Set mismatched charging powers
+        params = {
+            "StationElectrification.charging_power_kw": 450.0,
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 300.0,  # Different!
+        }
+
+        # Should raise ValueError about power mismatch
+        with pytest.raises(ValueError, match="Charging power mismatch"):
+            modifier.modify(session=db_session, params=params)
+
+    def test_station_electrification_parameter_validation(
+        self,
+        temp_db: Path,
+        infeasible_scenario_without_opportunity_charging: Scenario,
+        db_session: Session,
+    ):
+        """Test that StationElectrification validates parameters correctly."""
+        modifier = StationElectrification()
+
+        # Test invalid charging_power_kw type
+        with pytest.raises(ValueError, match="charging_power_kw must be a number"):
+            modifier.modify(
+                session=db_session,
+                params={"StationElectrification.charging_power_kw": "450"},
+            )
+
+        # Test negative charging_power_kw
+        with pytest.raises(ValueError, match="charging_power_kw must be positive"):
+            modifier.modify(
+                session=db_session,
+                params={"StationElectrification.charging_power_kw": -100.0},
+            )
+
+        # Test zero charging_power_kw
+        with pytest.raises(ValueError, match="charging_power_kw must be positive"):
+            modifier.modify(
+                session=db_session,
+                params={"StationElectrification.charging_power_kw": 0.0},
+            )
+
+        # Test invalid max_stations_to_electrify type
+        with pytest.raises(ValueError, match="max_stations_to_electrify must be an integer"):
+            modifier.modify(
+                session=db_session,
+                params={"StationElectrification.max_stations_to_electrify": "10"},
+            )
+
+        # Test negative max_stations_to_electrify
+        with pytest.raises(ValueError, match="max_stations_to_electrify must be positive"):
+            modifier.modify(
+                session=db_session,
+                params={"StationElectrification.max_stations_to_electrify": -5},
+            )
+
+        # Test zero max_stations_to_electrify
+        with pytest.raises(ValueError, match="max_stations_to_electrify must be positive"):
+            modifier.modify(
+                session=db_session,
+                params={"StationElectrification.max_stations_to_electrify": 0},
+            )
+
+    def test_station_electrification_multiple_scenarios_error(
+        self, temp_db: Path, db_session: Session
+    ):
+        """Test that StationElectrification raises error with multiple scenarios."""
+        # Create two scenarios
+        scenario1 = Scenario(name="Scenario 1", name_short="S1")
+        scenario2 = Scenario(name="Scenario 2", name_short="S2")
+        db_session.add_all([scenario1, scenario2])
+        db_session.commit()
+
+        modifier = StationElectrification()
+
+        with pytest.raises(ValueError, match="Expected exactly one scenario, found 2"):
+            modifier.modify(session=db_session, params={})
+
+    def test_station_electrification_with_matching_analyzer_power(
+        self,
+        temp_db: Path,
+        infeasible_scenario_without_opportunity_charging: Scenario,
+        db_session: Session,
+    ):
+        """Test that StationElectrification works when power matches InsufficientChargingTimeAnalyzer."""
+        # Run vehicle scheduling and depot assignment first
+        self._increase_time_between_trips(
+            infeasible_scenario_without_opportunity_charging, db_session
+        )
+
+        modifier = StationElectrification()
+
+        # Set matching charging powers - should work fine
+        params = {
+            "StationElectrification.charging_power_kw": 350.0,
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 350.0,  # Same!
+            "StationElectrification.max_stations_to_electrify": 10,
+        }
+
+        # Should work without errors
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Verify success
+        electrified_count = (
+            db_session.query(Station)
+            .filter(Station.scenario_id == infeasible_scenario_without_opportunity_charging.id)
+            .filter(Station.is_electrified == True)
+            .count()
+        )
+        assert electrified_count > 1, "Should have electrified multiple stations"
+
+    def test_document_params(self):
+        """Test that document_params returns expected parameters."""
+        modifier = StationElectrification()
+        docs = modifier.document_params()
+
+        assert isinstance(docs, dict)
+        assert len(docs) == 2
+        assert "StationElectrification.charging_power_kw" in docs
+        assert "StationElectrification.max_stations_to_electrify" in docs
+        assert "450.0 kW" in docs["StationElectrification.charging_power_kw"]
+        assert "25% of all termini" in docs["StationElectrification.max_stations_to_electrify"]
