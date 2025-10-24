@@ -3,25 +3,18 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
-from typing import Tuple, Dict, List
+from typing import Tuple
 from urllib.parse import urlparse
 
 import eflips.model
 import pytz
 from alembic import command
 from alembic.config import Config
-from eflips.depot.api import (
-    group_rotations_by_start_end_stop,
-)
 from eflips.model import (
     Event,
     Rotation,
     Scenario,
     Vehicle,
-    Station,
-    VehicleType,
-    ChargeType,
-    VoltageLevel,
     Trip,
 )
 from sqlalchemy.orm import Session
@@ -46,37 +39,6 @@ def database_url_components(database_url: str) -> Tuple[str, str, str, str, str,
     else:
         port = str(o.port)
     return o.scheme, o.username, o.password, o.hostname, port, o.path[1:]
-
-
-def clear_previous_simulation_results(scenario: Scenario, session: Session) -> None:
-    session.query(Rotation).filter(Rotation.scenario_id == scenario.id).update(
-        {"vehicle_id": None}
-    )
-    session.query(Event).filter(Event.scenario_id == scenario.id).delete()
-    session.query(Vehicle).filter(Vehicle.scenario_id == scenario.id).delete()
-
-
-def make_depot_stations_electrified(scenario: Scenario, session: Session):
-    """
-    Before runing SimBA for the first time, we need to make sure that the depot stations (The ones where rotations
-    start and end) are electrified.
-    :param scenario: The scenario to electrify.
-    :param session: An open database session.
-    :return: Nothing. The function modifies the database.
-    """
-    rotations_by_start_end_stop: Dict[
-        Tuple[Station, Station], Dict[VehicleType, List[Rotation]]
-    ] = group_rotations_by_start_end_stop(scenario.id, session)
-    for (start, end), _ in rotations_by_start_end_stop.items():
-        if start != end:
-            raise ValueError(f"Start and end station are not the same: {start} != {end}")
-        if not start.is_electrified:
-            start.is_electrified = True
-            start.amount_charging_places = 100
-            start.power_per_charger = 300
-            start.power_total = start.amount_charging_places * start.power_per_charger
-            start.charge_type = ChargeType.DEPOT
-            start.voltage_level = VoltageLevel.MV
 
 
 def get_alembic_ini_path() -> str:
