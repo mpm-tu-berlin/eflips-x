@@ -346,6 +346,8 @@ class Analyzer(PipelineStep):
         try:
             result = self.analyze(context.current_db, context.params)
         finally:
+            # Explicitly rollback any uncommitted transactions
+            session.rollback()
             session.close()
             engine.dispose()
 
