@@ -374,7 +374,7 @@ class DepotAssignment(Modifier):
             """,
         }
 
-    def _get_depot_rotation_assignments(self, session: Session) -> Dict[Station, List[Rotation]]:
+    def _get_depot_rotation_assignments(self, session: Session) -> Dict[int, List[Rotation]]:
         """
         Retrieve current depot assignments for all rotations.
 
@@ -385,8 +385,8 @@ class DepotAssignment(Modifier):
 
         Returns:
         --------
-        Dict[Station, List[Rotation]]
-            Dictionary mapping rotation IDs to assigned depot IDs.
+        Dict[int, List[Rotation]]
+            Dictionary mapping depot station IDs to lists of assigned Rotations
         """
         assignments = defaultdict(list)
 
@@ -413,7 +413,7 @@ class DepotAssignment(Modifier):
                     f"Rotation {rotation.id} does not start and end at the same station. "
                     "Using the start station as 'the depot' for this rotation."
                 )
-            assignments[rotation].append(rotation.trips[0].route.departure_station)
+            assignments[rotation.trips[0].route.departure_station_id].append(rotation)
         return assignments
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
@@ -528,7 +528,7 @@ class DepotAssignment(Modifier):
         # Get the pre-optimization depot assignments for logging
         pre_optimization_assignments = self._get_depot_rotation_assignments(session)
 
-        self._log_assignments(pre_optimization_assignments)
+        self._log_assignments(pre_optimization_assignments, session)
         self.logger.info("Completed logging pre-optimization depot assignments")
 
         # Get depot configuration from the provided function
@@ -594,21 +594,22 @@ class DepotAssignment(Modifier):
         post_optimization_assignments = self._get_depot_rotation_assignments(session)
 
         # Log the assignments before and after optimization
-        self._log_assignments(post_optimization_assignments)
+        self._log_assignments(post_optimization_assignments, session)
         self.logger.info("Completed logging post-optimization depot assignments")
 
         # Go through all depots (union of pre and post optimization keys) in alphabetical order and list the changes
         all_stations = set(pre_optimization_assignments.keys()).union(
             post_optimization_assignments.keys()
         )
-        for station in sorted(all_stations, key=lambda s: s.name):
-            pre_rotations = pre_optimization_assignments.get(station, [])
-            post_rotations = post_optimization_assignments.get(station, [])
+        for station_id in sorted(all_stations):
+            station = session.query(Station).filter(Station.id == station_id).one()
+            pre_rotations = pre_optimization_assignments.get(station.id, [])
+            post_rotations = post_optimization_assignments.get(station.id, [])
 
             pre_count = len(pre_rotations)
             post_count = len(post_rotations)
 
-            self.logger.info(f"Depot '{station.name}' (ID {station.id}): ")
+            self.logger.info(f"Depot '{station.name}' (ID {station_id}): ")
             if pre_count == post_count and set(r.id for r in pre_rotations) == set(
                 r.id for r in post_rotations
             ):
@@ -620,16 +621,21 @@ class DepotAssignment(Modifier):
 
         return None
 
-    def _log_assignments(self, pre_optimization_assignments: dict[Station, list[Rotation]]):
+    def _log_assignments(
+        self,
+        pre_optimization_assignments: dict[int, list[Rotation]],
+        session: sqlalchemy.orm.session.Session,
+    ):
         self.logger.info(
             f"Total of {len(pre_optimization_assignments)} depots with "
             f"{sum([len(v) for v in pre_optimization_assignments.values()])}"
             f" rotations"
         )
 
-        # Iterate over the stations (eys of the dict) in alphabetical order
-        for station in sorted(pre_optimization_assignments.keys(), key=lambda s: s.name):
-            rotations = pre_optimization_assignments[station]
+        # Iterate over the stations (eys of the dict) in ID order
+        for station_id in sorted(pre_optimization_assignments.keys()):
+            rotations = pre_optimization_assignments[station_id]
+            station = session.query(Station).filter(Station.id == station_id).one()
             self.logger.info(
                 f"\tDepot '{station.name}' (ID {station.id}) has {len(rotations)} rotations assigned before optimization"
             )
