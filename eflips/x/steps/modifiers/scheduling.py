@@ -38,6 +38,247 @@ from sqlalchemy.orm import Session, joinedload
 from eflips.x.framework import Modifier, Analyzer
 
 
+class IntegratedScheduling(Modifier):
+    """
+    Generate feasible vehicle schedules using an integrated approach. If just using `VehicleScheduling` in opportunity
+    charge mode, the resulting schedules may not be feasible. This happens when the energy consumption of the trips
+    is so high that even with opportunity charging at every terminal, the vehicle cannot complete the schedule without
+    running out of battery. And since we usually have a clear order (Vehicle Scheduling, Depot Assignment, Terminus
+    placement), we cannot go back and change the vehicle scheduling after depot assignment and terminus placement. This
+    modifier does exactly that: It runs Vehicle Scheduling depot assignment and then terminus placement in a loop until
+    a feasible schedule is found. It adds longer breaks to trips that need them until the schedule is feasible.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    def document_params(self) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary describing the configurable parameters:
+            - IntegratedScheduling.max_iterations: Maximum number of iterations to attempt
+        """
+        return {
+            f"{self.__class__.__name__}.max_iterations": """
+            Maximum number of iterations to attempt for integrated scheduling.
+            The modifier will try to create feasible schedules by adjusting break times
+            and re-running vehicle scheduling, depot assignment, and terminus placement.
+
+            Note: The heuristic is designed in a way that it should always find a feasible solution in 2 iterations.
+            If you need more, this may hint at a deper design issue in the scenario or this could be a bug. Please 
+            contact the developers.
+
+            Default: 2
+            Type: int
+            Example: 10
+            """.strip(),
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        This method runs the vehicle scheduling in a loop. It does
+        1) Vehicle Scheduling
+        2) Depot Assignment
+        3) Electrifying *all* trips with opportunity charging at termini
+        and then verifies if the resulting schedule is feasible using a consumption simulation.
+        If not, it adds longer breaks to trips that need them and repeats the process until a feasible schedule is
+        found.
+
+        The database we return will be in the "just after vehicle scheduling" state, as if only VehicleScheduling
+        had been run. Therefore, we use nested sessions to run depot assignment and terminus placement without
+        modifying the outer session.
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database to modify
+        params : Dict[str, Any]
+            Pipeline parameters:
+            - IntegratedScheduling.max_iterations (optional): Maximum number of iterations to attempt
+        Returns:
+        --------
+        None
+            This modifier modifies the database in place by updating rotation plans
+        """
+        max_iterations_key = f"{self.__class__.__name__}.max_iterations"
+        max_iterations = params.get(max_iterations_key, 2)
+
+        if not isinstance(max_iterations, int):
+            raise ValueError(
+                f"max_iterations must be an integer, got {type(max_iterations).__name__}"
+            )
+        if max_iterations <= 0:
+            raise ValueError(f"max_iterations must be positive, got {max_iterations}")
+        if max_iterations > 2:
+            self.logger.warning(
+                "The code is designed to find a feasible solution in 2 iterations."
+            )
+
+        self.logger.info(f"Starting integrated scheduling with max_iterations={max_iterations}")
+
+        if (
+            "VehicleScheduling.charge_type" not in params
+            or params["VehicleScheduling.charge_type"] == ChargeType.DEPOT
+        ):
+            raise ValueError(
+                "IntegratedScheduling only makes sense when VehicleScheduling is run in OPPORTUNITY charge type. "
+                "If you are in DEPOT mode, just ise VehicleScheduling alone."
+            )
+
+        iteration = 0
+        ids_of_trips_to_add_longer_breaks = set()
+        while True:
+            iteration += 1
+            if iteration > max_iterations:
+                raise ValueError(
+                    f"Reached maximum number of iterations ({max_iterations}) without finding a feasible schedule."
+                )
+            self.logger.info(f"Integrated scheduling iteration {iteration}")
+
+            params[f"{VehicleScheduling.__name__}.longer_break_time_trips"] = list(
+                ids_of_trips_to_add_longer_breaks
+            )
+
+            vehicle_scheduling = VehicleScheduling()
+            vehicle_scheduling.modify(session, params)
+
+            # Now, we begin a nested session in order to run depot assignment and terminus placement without
+            # modifying the outer session
+            savepoint = session.begin_nested()
+            try:
+                depot_assignment = DepotAssignment()
+                depot_assignment.modify(session, params)
+
+                insufficient_charging_analyzer = InsufficientChargingTimeAnalyzer()
+                insufficient_charging_analyzer_result = insufficient_charging_analyzer.analyze(
+                    session, params
+                )
+                if insufficient_charging_analyzer_result is None:
+                    self.logger.info(
+                        "Found feasible schedule with sufficient charging time for all rotations."
+                    )
+                    break
+                else:
+                    self.logger.info(
+                        f"Schedule is not feasible, {len(insufficient_charging_analyzer_result)} rotations "
+                        "have insufficient charging time. Adding longer breaks and retrying."
+                    )
+                    # Now, we will need to identify which trips are in the problematic rotations and which of these
+                    # should have longer breaks added.
+                    new_trips_to_add_longer_breaks = self.find_trips_to_add_longer_breaks(
+                        insufficient_charging_analyzer_result, session, params
+                    )
+                    ids_of_trips_to_add_longer_breaks.update(new_trips_to_add_longer_breaks)
+                    self.logger.info(
+                        f"Trying scheudling again, adding longer breaks to {len(new_trips_to_add_longer_breaks)} trips."
+                    )
+                    # Rollback the nested session to discard changes
+            finally:
+                savepoint.rollback()
+
+    def find_trips_to_add_longer_breaks(
+        self,
+        rotation_ids: List[int],
+        session: sqlalchemy.orm.session.Session,
+        params: Dict[str, Any],
+    ) -> set[int]:
+        """
+        Identify trips within the given rotations that should have longer breaks added. We have conflicting goals of
+        1) Minizing the number of trips that need longer breaks added and
+        2) Putting the longer breaks at useful locations (i.e., where the vehicle can charge).
+
+        The heuristic approach does the following:
+        1) It looks (globally) at the palces where *all* vehicles spend the longest time anyway
+        2) It looks (for each rotation) at the termini, taking the ones the vehicle visits on at least 33% of its trips (or the top five, if there are no such termini)
+        3) from the possible termini from 2) it selects the one that is closest to the global top locations from 1)
+
+        Parameters:
+        rotation_ids : List[int]
+            List of rotation IDs that have insufficient charging time
+        nested_session : Session
+            SQLAlchemy session connected to the database
+        params : Dict[str, Any]
+        Returns:
+        set[int]
+            Set of trip IDs that should have longer breaks added
+        """
+        # 1) Create the global list of top locations where vehicles spend the most time
+        total_length_of_stay_per_station: Dict[int, timedelta] = defaultdict(
+            timedelta
+        )  # station_id -> total length of stay
+        all_rotations = (
+            session.query(Rotation)
+            .options(joinedload(Rotation.trips).joinedload(Trip.route))
+            .all()
+        )
+        for rotation in all_rotations:
+            # We are looking at the break time form an "after trip" perspective, so we skip the first trip
+            for i, trip in enumerate(rotation.trips[:-1]):
+                arrival_station_id = trip.route.arrival_station_id
+                cur_trip_end = trip.arrival_time
+                next_trip_start = rotation.trips[i + 1].departure_time
+                length_of_stay = next_trip_start - cur_trip_end
+                total_length_of_stay_per_station[arrival_station_id] += length_of_stay
+
+        # Sort stations by total length of stay descending
+        total_length_of_stay_per_station = OrderedDict(
+            sorted(
+                total_length_of_stay_per_station.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        )
+
+        # 2) For each rotation with insufficient charging time, find candidate termini for longer breaks
+        trip_ids_to_add_longer_breaks = set()
+        for rotation_id in rotation_ids:
+            rotation = (
+                session.query(Rotation)
+                .filter(Rotation.id == rotation_id)
+                .options(joinedload(Rotation.trips))
+                .one()
+            )
+            candidate_termini_station_ids = defaultdict(int)  # station_id -> count of visits
+            for trip in rotation.trips[:-1]:  # Skip last trip, as no break after it
+                arrival_station_id = trip.route.arrival_station_id
+                candidate_termini_station_ids[arrival_station_id] += 1
+
+            # Filter termini that are visited on at least 33% of trips
+            total_trips = len(rotation.trips)
+            filtered_candidate_termini = {
+                station_id: count
+                for station_id, count in candidate_termini_station_ids.items()
+                if count >= total_trips / 3
+            }
+            # If no termini pass the filter, take the top five most visited termini
+            if len(filtered_candidate_termini) < 1:
+                filtered_candidate_termini = dict(
+                    sorted(
+                        candidate_termini_station_ids.items(),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )[:5]
+                )
+            # 3) From the filtered candidate termini, select the one closest to the global top locations
+            for station_id in total_length_of_stay_per_station.keys():
+                if station_id in filtered_candidate_termini:
+                    # Find the trips that arrive at this station and add them to the list
+                    for trip in rotation.trips:
+                        if trip.route.arrival_station_id == station_id:
+                            trip_ids_to_add_longer_breaks.add(trip.id)
+                            self.logger.info(
+                                f"Adding longer break to trip {trip.id} in rotation {rotation.id} "
+                                f"at station {station_id}"
+                            )
+                    break  # Found the best candidate, move to next rotation
+
+        return trip_ids_to_add_longer_breaks
+
+
 class VehicleScheduling(Modifier):
     """
     Generate vehicle schedules by optimizing rotation plans.
