@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import pytz
+from eflips.model import Event
 from eflips.model import (
     Scenario,
     VehicleType,
@@ -24,8 +25,8 @@ from eflips.x.steps.modifiers.scheduling import (
     VehicleScheduling,
     DepotAssignment,
     InsufficientChargingTimeAnalyzer,
+    IntegratedScheduling,
 )
-from eflips.model import Event
 
 
 class TestVehicleScheduling:
@@ -1199,3 +1200,405 @@ class TestInsufficientChargingTimeAnalyzer:
         assert len(docs) == 1
         assert "InsufficientChargingTimeAnalyzer.charging_power_kw" in docs
         assert "150 kW" in docs["InsufficientChargingTimeAnalyzer.charging_power_kw"]
+
+
+class TestIntegratedScheduling:
+    """Test suite for IntegratedScheduling modifier."""
+
+    @pytest.fixture
+    def challenging_scenario_for_integrated_scheduling(self, db_session: Session) -> Scenario:
+        """
+        Create a challenging scenario that will require multiple iterations
+        of integrated scheduling to find a feasible solution.
+        Uses long trips, high consumption, and moderate battery capacity.
+        """
+        from tests.util import (
+            _create_depot_with_lines,
+            CENTER_LAT,
+            CENTER_LON,
+        )
+        import random
+
+        # Set random seed for reproducibility
+        random.seed(42)
+
+        # Create scenario
+        scenario = Scenario(name="Challenging Integrated Scheduling Scenario", name_short="CISS")
+        db_session.add(scenario)
+        db_session.flush()
+
+        # Create vehicle type with moderate battery and consumption
+        # This will be challenging when combined with low charging power
+        vehicle_type = VehicleType(
+            name="Electric Bus 12m",
+            name_short="EB12",
+            scenario_id=scenario.id,
+            battery_capacity=200.0,  # Moderate battery
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            empty_mass=10000,
+            allowed_mass=20000,
+            consumption=1.8,  # Higher consumption
+        )
+        db_session.add(vehicle_type)
+        db_session.flush()
+
+        # Berlin timezone
+        berlin_tz = pytz.timezone("Europe/Berlin")
+        base_date = datetime(2024, 1, 15, tzinfo=berlin_tz)
+
+        # Center point for depot ring
+        center_point = from_shape(Point(CENTER_LON, CENTER_LAT), srid=4326)
+
+        # Create single depot with moderate-length trips
+        _create_depot_with_lines(
+            db_session,
+            scenario.id,
+            vehicle_type.id,
+            depot_idx=0,
+            num_depots=1,
+            lines_per_depot=2,  # Must be even
+            center_point=center_point,
+            near_terminus_distance=2000.0,  # Moderate distances
+            far_terminus_distance=4000.0,  # Moderate distances
+            trips_per_line=15,  # Moderate number of trips
+            base_date=base_date,
+            depot_ring_diameter=8000.0,
+        )
+
+        db_session.commit()
+        return scenario
+
+    def test_integrated_scheduling_basic(
+        self,
+        temp_db: Path,
+        challenging_scenario_for_integrated_scheduling: Scenario,
+        db_session: Session,
+    ):
+        """Test IntegratedScheduling with basic parameters and very low charging power to force iterations."""
+        # Create depot config
+        depots = (
+            db_session.query(Depot)
+            .filter_by(scenario_id=challenging_scenario_for_integrated_scheduling.id)
+            .all()
+        )
+        depot_config = []
+        for depot in depots:
+            depot_config.append(
+                {
+                    "depot_station": depot.station_id,
+                    "capacity": 100,  # Large capacity
+                    "vehicle_type": [vt.id for vt in db_session.query(VehicleType).all()],
+                    "name": depot.name,
+                }
+            )
+
+        modifier = IntegratedScheduling()
+
+        # Use very low charging power to ensure we need multiple iterations
+        params = {
+            "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
+            "VehicleScheduling.battery_margin": 0.1,
+            "DepotAssignment.depot_config": depot_config,
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 20.0,  # Very low charging power!
+            "IntegratedScheduling.max_iterations": 5,  # Allow more iterations
+        }
+
+        # Count initial rotations
+        initial_rotations = (
+            db_session.query(Rotation)
+            .filter(Rotation.scenario_id == challenging_scenario_for_integrated_scheduling.id)
+            .count()
+        )
+        assert initial_rotations > 0, "Should have rotations from fixture"
+
+        # Run the integrated scheduling
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Verify that rotations still exist and were modified
+        final_rotations = (
+            db_session.query(Rotation)
+            .filter(Rotation.scenario_id == challenging_scenario_for_integrated_scheduling.id)
+            .count()
+        )
+        assert final_rotations > 0, "Should have rotations after integrated scheduling"
+
+        # Verify that no simulation events exist (they should be rolled back)
+        events_count = (
+            db_session.query(Event)
+            .filter(Event.scenario_id == challenging_scenario_for_integrated_scheduling.id)
+            .count()
+        )
+        assert (
+            events_count == 0
+        ), "Should not have simulation events (rolled back in nested sessions)"
+
+    def test_integrated_scheduling_with_default_iterations(
+        self,
+        temp_db: Path,
+        challenging_scenario_for_integrated_scheduling: Scenario,
+        db_session: Session,
+    ):
+        """Test IntegratedScheduling with default max_iterations (2)."""
+        # Create depot config
+        depots = (
+            db_session.query(Depot)
+            .filter_by(scenario_id=challenging_scenario_for_integrated_scheduling.id)
+            .all()
+        )
+        depot_config = []
+        for depot in depots:
+            depot_config.append(
+                {
+                    "depot_station": depot.station_id,
+                    "capacity": 100,
+                    "vehicle_type": [vt.id for vt in db_session.query(VehicleType).all()],
+                    "name": depot.name,
+                }
+            )
+
+        modifier = IntegratedScheduling()
+
+        # Use moderate charging power so we can converge in 2 iterations
+        params = {
+            "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
+            "VehicleScheduling.battery_margin": 0.1,
+            "DepotAssignment.depot_config": depot_config,
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 50.0,  # Low but not too low
+            # Default max_iterations = 2
+        }
+
+        # Run the integrated scheduling
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Verify that rotations were created
+        final_rotations = (
+            db_session.query(Rotation)
+            .filter(Rotation.scenario_id == challenging_scenario_for_integrated_scheduling.id)
+            .count()
+        )
+        assert final_rotations > 0, "Should have rotations after integrated scheduling"
+
+    def test_integrated_scheduling_max_iterations_exceeded(
+        self,
+        temp_db: Path,
+        challenging_scenario_for_integrated_scheduling: Scenario,
+        db_session: Session,
+    ):
+        """Test that IntegratedScheduling raises error when max_iterations is exceeded."""
+        # Create depot config
+        depots = (
+            db_session.query(Depot)
+            .filter_by(scenario_id=challenging_scenario_for_integrated_scheduling.id)
+            .all()
+        )
+        depot_config = []
+        for depot in depots:
+            depot_config.append(
+                {
+                    "depot_station": depot.station_id,
+                    "capacity": 100,
+                    "vehicle_type": [vt.id for vt in db_session.query(VehicleType).all()],
+                    "name": depot.name,
+                }
+            )
+
+        modifier = IntegratedScheduling()
+
+        # Use extremely low charging power and max_iterations=1 to ensure failure
+        params = {
+            "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
+            "VehicleScheduling.battery_margin": 0.1,
+            "DepotAssignment.depot_config": depot_config,
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 5.0,  # Extremely low!
+            "IntegratedScheduling.max_iterations": 1,  # Only 1 iteration allowed
+        }
+
+        # Should raise ValueError when max iterations exceeded
+        with pytest.raises(
+            ValueError,
+            match="Reached maximum number of iterations .* without finding a feasible schedule",
+        ):
+            modifier.modify(session=db_session, params=params)
+
+    def test_integrated_scheduling_requires_opportunity_mode(
+        self,
+        temp_db: Path,
+        challenging_scenario_for_integrated_scheduling: Scenario,
+        db_session: Session,
+    ):
+        """Test that IntegratedScheduling requires OPPORTUNITY charge type."""
+        # Create depot config
+        depots = (
+            db_session.query(Depot)
+            .filter_by(scenario_id=challenging_scenario_for_integrated_scheduling.id)
+            .all()
+        )
+        depot_config = []
+        for depot in depots:
+            depot_config.append(
+                {
+                    "depot_station": depot.station_id,
+                    "capacity": 100,
+                    "vehicle_type": [vt.id for vt in db_session.query(VehicleType).all()],
+                    "name": depot.name,
+                }
+            )
+
+        modifier = IntegratedScheduling()
+
+        # Try to use DEPOT mode - should fail
+        params = {
+            "VehicleScheduling.charge_type": ChargeType.DEPOT,  # Wrong mode!
+            "DepotAssignment.depot_config": depot_config,
+            "IntegratedScheduling.max_iterations": 2,
+        }
+
+        with pytest.raises(
+            ValueError,
+            match="IntegratedScheduling only makes sense when VehicleScheduling is run in OPPORTUNITY charge type",
+        ):
+            modifier.modify(session=db_session, params=params)
+
+    def test_integrated_scheduling_parameter_validation(
+        self,
+        temp_db: Path,
+        challenging_scenario_for_integrated_scheduling: Scenario,
+        db_session: Session,
+    ):
+        """Test that IntegratedScheduling validates parameters correctly."""
+        # Create depot config
+        depots = (
+            db_session.query(Depot)
+            .filter_by(scenario_id=challenging_scenario_for_integrated_scheduling.id)
+            .all()
+        )
+        depot_config = []
+        for depot in depots:
+            depot_config.append(
+                {
+                    "depot_station": depot.station_id,
+                    "capacity": 100,
+                    "vehicle_type": [vt.id for vt in db_session.query(VehicleType).all()],
+                    "name": depot.name,
+                }
+            )
+
+        modifier = IntegratedScheduling()
+
+        base_params = {
+            "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
+            "DepotAssignment.depot_config": depot_config,
+        }
+
+        # Test invalid max_iterations type
+        with pytest.raises(ValueError, match="max_iterations must be an integer"):
+            params = base_params.copy()
+            params["IntegratedScheduling.max_iterations"] = "2"  # Should be int
+            modifier.modify(session=db_session, params=params)
+
+        # Test max_iterations <= 0
+        with pytest.raises(ValueError, match="max_iterations must be positive"):
+            params = base_params.copy()
+            params["IntegratedScheduling.max_iterations"] = 0
+            modifier.modify(session=db_session, params=params)
+
+        # Test max_iterations <= 0 (negative)
+        with pytest.raises(ValueError, match="max_iterations must be positive"):
+            params = base_params.copy()
+            params["IntegratedScheduling.max_iterations"] = -1
+            modifier.modify(session=db_session, params=params)
+
+    def test_integrated_scheduling_multiple_scenarios_error(
+        self, temp_db: Path, db_session: Session, monkeypatch
+    ):
+        """Test that IntegratedScheduling raises error with multiple scenarios."""
+        # Create two scenarios
+        scenario1 = Scenario(name="Scenario 1", name_short="S1")
+        scenario2 = Scenario(name="Scenario 2", name_short="S2")
+        db_session.add_all([scenario1, scenario2])
+        db_session.commit()
+
+        # Mock the ORS base URL
+        monkeypatch.setenv("OPENROUTESERVICE_BASE_URL", "http://mock-ors:8080/ors/")
+
+        modifier = IntegratedScheduling()
+
+        params = {
+            "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
+            "DepotAssignment.depot_config": [],  # Empty config, won't get that far
+            "IntegratedScheduling.max_iterations": 2,
+        }
+
+        # Should raise error about multiple scenarios
+        # The error will come from VehicleScheduling which is called first
+        with pytest.raises(ValueError, match="Expected exactly one scenario, found 2"):
+            modifier.modify(session=db_session, params=params)
+
+    def test_integrated_scheduling_warns_about_high_iterations(
+        self,
+        temp_db: Path,
+        challenging_scenario_for_integrated_scheduling: Scenario,
+        db_session: Session,
+        monkeypatch,
+        caplog,
+    ):
+        """Test that IntegratedScheduling warns when max_iterations > 2."""
+        import logging
+
+        # Set logging level to capture warnings
+        caplog.set_level(logging.WARNING)
+
+        # Mock the ORS base URL
+        monkeypatch.setenv("OPENROUTESERVICE_BASE_URL", "http://mock-ors:8080/ors/")
+
+        # Create depot config
+        depots = (
+            db_session.query(Depot)
+            .filter_by(scenario_id=challenging_scenario_for_integrated_scheduling.id)
+            .all()
+        )
+        depot_config = []
+        for depot in depots:
+            depot_config.append(
+                {
+                    "depot_station": depot.station_id,
+                    "capacity": 100,
+                    "vehicle_type": [vt.id for vt in db_session.query(VehicleType).all()],
+                    "name": depot.name,
+                }
+            )
+
+        modifier = IntegratedScheduling()
+
+        params = {
+            "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
+            "VehicleScheduling.battery_margin": 0.1,
+            "DepotAssignment.depot_config": depot_config,
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 100.0,
+            "IntegratedScheduling.max_iterations": 10,  # High value should trigger warning
+        }
+
+        # Run the integrated scheduling
+        modifier.modify(session=db_session, params=params)
+        db_session.commit()
+
+        # Check that warning was logged
+        assert any(
+            "designed to find a feasible solution in 2 iterations" in record.message
+            for record in caplog.records
+        ), "Should warn about high max_iterations"
+
+    def test_document_params(self):
+        """Test that document_params returns expected parameters."""
+        modifier = IntegratedScheduling()
+        docs = modifier.document_params()
+
+        assert isinstance(docs, dict)
+        assert len(docs) == 1
+        assert "IntegratedScheduling.max_iterations" in docs
+        assert "Maximum number of iterations" in docs["IntegratedScheduling.max_iterations"]
