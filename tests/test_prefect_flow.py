@@ -10,6 +10,7 @@ from prefect import flow
 from eflips.x.framework import PipelineContext
 from eflips.x.steps.generators import BVGXMLIngester
 from tests.steps.analyzers.test_dummy_analyzer import TripDistanceAnalyzer
+from eflips.x.steps.modifiers.simulation import DepotGenerator
 
 
 class TestPrefectFlow:
@@ -200,3 +201,79 @@ class TestPrefectFlow:
         # Both analyzers should return the same result
         assert distance1 == distance2
         assert distance1 > 0
+
+    def test_full_simulation_flow(self, work_dir: Path, pipeline_params: dict, db_session):
+        """Test a complete flow: Vehicle Scheduling -> Depot Assignment -> Simulation."""
+        from tests.util import multi_depot_scenario
+        from eflips.x.steps.modifiers.scheduling import VehicleScheduling, DepotAssignment
+        from eflips.x.steps.modifiers.simulation import Simulation
+        from eflips.model import ChargeType, Depot, VehicleType, Event
+
+        @flow(name="test-full-simulation-flow")
+        def test_flow():
+            # Create pipeline context
+            context = PipelineContext(work_dir=work_dir, params=pipeline_params)
+
+            # Create a multi-depot scenario using the fixture function
+            # Use higher trips_per_line to force rotation splitting
+            scenario = multi_depot_scenario(
+                db_session,
+                num_depots=2,
+                lines_per_depot=4,
+                trips_per_line=30,  # High number to force rotation splitting
+            )
+
+            # Step 1: Run Vehicle Scheduling in DEPOT mode
+            vehicle_scheduler = VehicleScheduling()
+            vs_params = {
+                "VehicleScheduling.charge_type": ChargeType.DEPOT,
+                "VehicleScheduling.battery_margin": 0.1,
+            }
+            vehicle_scheduler.modify(session=db_session, params=vs_params)
+
+            # Step 2: Run Depot Assignment
+            # Get all depots for configuration
+            all_depots = db_session.query(Depot).filter_by(scenario_id=scenario.id).all()
+            all_vehicle_types = (
+                db_session.query(VehicleType).filter_by(scenario_id=scenario.id).all()
+            )
+
+            depot_config = []
+            for depot in all_depots:
+                depot_config.append(
+                    {
+                        "depot_station": depot.station_id,
+                        "capacity": 100,  # Large capacity to accept all rotations
+                        "vehicle_type": [vt.id for vt in all_vehicle_types],
+                        "name": depot.name,
+                    }
+                )
+
+            depot_assigner = DepotAssignment()
+            da_params = {
+                "DepotAssignment.depot_config": depot_config,
+                "DepotAssignment.depot_usage": 0.9,
+                "DepotAssignment.step_size": 0.2,
+                "DepotAssignment.max_iterations": 1,
+            }
+            depot_assigner.modify(session=db_session, params=da_params)
+
+            # Step 3: Add Depots
+            depot_creator = DepotGenerator()
+            depot_creator.modify(session=db_session, params={})
+
+            # Step 4: Run Simulation
+            simulator = Simulation()
+            sim_params = {}
+            simulator.modify(session=db_session, params=sim_params)
+
+            db_session.commit()
+
+            return scenario
+
+        # Run the flow
+        scenario = test_flow()
+
+        # Verify that simulation events were created
+        events_count = db_session.query(Event).filter(Event.scenario_id == scenario.id).count()
+        assert events_count > 0, "Should have created simulation events"

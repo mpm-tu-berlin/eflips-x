@@ -745,7 +745,6 @@ def _create_depot_with_lines(
         )
 
 
-@pytest.fixture
 def multi_depot_scenario(
     db_session: Session,
     num_depots: int = NUM_DEPOTS,
