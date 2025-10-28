@@ -1,0 +1,288 @@
+"""
+Analyzers for input evaluation using eflips-eval.
+
+These analyzers wrap the eflips.eval.input module's prepare/visualize functions
+to make them usable within the eflips-x pipeline framework.
+"""
+
+from pathlib import Path
+from typing import Any, Dict
+from zoneinfo import ZoneInfo
+
+import dash_cytoscape as cyto  # type: ignore
+import eflips.model
+import folium  # type: ignore
+import pandas as pd
+import plotly.graph_objs as go  # type: ignore
+from eflips.eval.input import prepare as eval_input_prepare
+from eflips.eval.input import visualize as eval_input_visualize
+from eflips.model import Scenario
+from sqlalchemy.orm import Session
+
+from eflips.x.framework import Analyzer
+
+
+class RotationInfoAnalyzer(Analyzer):
+    """
+    This Analyzer provides information about the rotations in a scenario. This information can be provided even before
+    the simulation has been run. It creates a dataframe with the following columns:
+
+    - rotation_id: the id of the rotation
+    - rotation_name: the name of the rotation
+    - vehicle_type_id: the id of the vehicle type
+    - vehicle_type_name: the name of the vehicle type
+    - total_distance: the total distance of the rotation
+    - time_start: the departure of the first trip
+    - time_end: the arrival of the last trip
+    - line_name: the name of the line, which is the first part of the rotation name. Used for sorting
+    - line_is_unified: True if the rotation only contains one line
+    - start_station: the name of the departure station
+    - end_station: the name of the arrival station
+
+    This information is available before simulation has been run.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    def document_params(self) -> Dict[str, str]:
+        return {
+            "RotationInfoAnalyzer.rotation_ids": """
+Optional parameter to filter rotations. Can be:
+- A single rotation ID (int)
+- A list of rotation IDs (List[int])
+- None to include all rotations (default)
+
+Example: `params["RotationInfoAnalyzer.rotation_ids"] = [1, 2, 3]`
+            """.strip()
+        }
+
+    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+        """
+        This function provides information about the rotations in a scenario. This information can be provided even before
+        the simulation has been run. It creates a dataframe with the following columns:
+
+        - rotation_id: the id of the rotation
+        - rotation_name: the name of the rotation
+        - vehicle_type_id: the id of the vehicle type
+        - vehicle_type_name: the name of the vehicle type
+        - total_distance: the total distance of the rotation
+        - time_start: the departure of the first trip
+        - time_end: the arrival of the last trip
+        - line_name: the name of the line, which is the first part of the rotation name. Used for sorting
+        - line_is_unified: True if the rotation only contains one line
+        - start_station: the name of the departure station
+        - end_station: the name of the arrival station
+
+        :return: a pandas DataFrame
+        """
+        db_url = f"sqlite:///{db.absolute().as_posix()}"
+        engine = eflips.model.create_engine(db_url)
+        session = Session(engine)
+
+        try:
+            # Auto-detect scenario_id
+            scenario = session.query(Scenario).one()
+            scenario_id = scenario.id
+
+            # Extract parameters
+            rotation_ids = params.get(f"{self.__class__.__name__}.rotation_ids", None)
+
+            # Call eflips-eval prepare function
+            result = eval_input_prepare.rotation_info(scenario_id, session, rotation_ids)
+
+            return result
+        finally:
+            session.close()
+            engine.dispose()
+
+    @staticmethod
+    def visualize(
+        prepared_data: pd.DataFrame, timezone: ZoneInfo = ZoneInfo("Europe/Berlin")
+    ) -> go.Figure:
+        """
+        Visualize rotation information as a timeline using plotly.
+
+        Args:
+            prepared_data: Result from analyze() method
+            timezone: Timezone for display (default: Europe/Berlin)
+
+        Returns:
+            Plotly figure object
+        """
+        return eval_input_visualize.rotation_info(prepared_data, timezone)
+
+
+class GeographicTripPlotAnalyzer(Analyzer):
+    """
+    This Analyzer creates a dataframe that can be used to visualize the geographic distribution of rotations. It creates
+    a dataframe with one row for each trip and the following columns:
+
+    - rotation_id: the id of the rotation
+    - rotation_name: the name of the rotation
+    - vehicle_type_id: the id of the vehicle type
+    - vehicle_type_name: the name of the vehicle type
+    - originating_depot_id: the id of the originating depot
+    - originating_depot_name: the name of the originating depot
+    - distance: the distance of the route
+    - coordinates: An array of (lat, lon) tuples with the coordinates of the route - the shape if set, otherwise the stops
+    - line_name: the name of the line, which is the first part of the rotation name. Used for sorting
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    def document_params(self) -> Dict[str, str]:
+        return {
+            "GeographicTripPlotAnalyzer.rotation_ids": """
+Optional parameter to filter rotations. Can be:
+- A single rotation ID (int)
+- A list of rotation IDs (List[int])
+- None to include all rotations (default)
+
+Example: `params["GeographicTripPlotAnalyzer.rotation_ids"] = [1, 2, 3]`
+            """.strip()
+        }
+
+    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+        """
+        This function creates a dataframe that can be used to visualize the geographic distribution of rotations. It creates
+        a dataframe with one row for each trip and the following columns:
+
+        - rotation_id: the id of the rotation
+        - rotation_name: the name of the rotation
+        - vehicle_type_id: the id of the vehicle type
+        - vehicle_type_name: the name of the vehicle type
+        - originating_depot_id: the id of the originating depot
+        - originating_depot_name: the name of the originating depot
+        - distance: the distance of the route
+        - coordinates: An array of (lat, lon) tuples with the coordinates of the route - the shape if set, otherwise the stops
+        - line_name: the name of the line, which is the first part of the rotation name. Used for sorting
+
+        :return: a pandas DataFrame
+        """
+        db_url = f"sqlite:///{db.absolute().as_posix()}"
+        engine = eflips.model.create_engine(db_url)
+        session = Session(engine)
+
+        try:
+            # Auto-detect scenario_id
+            scenario = session.query(Scenario).one()
+            scenario_id = scenario.id
+
+            # Extract parameters
+            rotation_ids = params.get(f"{self.__class__.__name__}.rotation_ids", None)
+
+            # Call eflips-eval prepare function
+            result = eval_input_prepare.geographic_trip_plot(scenario_id, session, rotation_ids)
+
+            return result
+        finally:
+            session.close()
+            engine.dispose()
+
+    @staticmethod
+    def visualize(prepared_data: pd.DataFrame) -> folium.Map:
+        """
+        Visualize trips on a map using folium.
+
+        Args:
+            prepared_data: Result from analyze() method
+
+        Returns:
+            Folium map object
+        """
+        return eval_input_visualize.geographic_trip_plot(prepared_data)
+
+
+class SingleRotationInfoAnalyzer(Analyzer):
+    """
+    This Analyzer provides information over the trips in a single rotation and returns a pandas DataFrame with the
+    following columns:
+
+    - trip_id: the id of the trip
+    - trip_type: the type of the trip
+    - line_name: the name of the line
+    - route_name: the name of the route
+    - distance: the distance of the route
+    - departure_time: the departure time of the trip
+    - arrival_time: the arrival time of the trip
+    - departure_station_name: the name of the departure station
+    - departure_station_id: the id of the departure station
+    - arrival_station_name: the name of the arrival station
+    - arrival_station_id: the id of the arrival station
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    def document_params(self) -> Dict[str, str]:
+        return {
+            "SingleRotationInfoAnalyzer.rotation_id": """
+**Required** parameter specifying the rotation ID to analyze.
+
+Example: `params["SingleRotationInfoAnalyzer.rotation_id"] = 1`
+            """.strip()
+        }
+
+    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+        """
+        This Analyzer provides information over the trips in a single rotation and returns a pandas DataFrame with the
+        following columns:
+
+        - trip_id: the id of the trip
+        - trip_type: the type of the trip
+        - line_name: the name of the line
+        - route_name: the name of the route
+        - distance: the distance of the route
+        - departure_time: the departure time of the trip
+        - arrival_time: the arrival time of the trip
+        - departure_station_name: the name of the departure station
+        - departure_station_id: the id of the departure station
+        - arrival_station_name: the name of the arrival station
+        - arrival_station_id: the id of the arrival station
+
+        Args:
+            db: Path to the database file
+            params: Analysis parameters (must include rotation_id)
+
+        Returns:
+            DataFrame with trip information for the rotation
+
+        Raises:
+            ValueError: If rotation_id parameter is not provided
+        """
+        db_url = f"sqlite:///{db.absolute().as_posix()}"
+        engine = eflips.model.create_engine(db_url)
+        session = Session(engine)
+
+        try:
+            # Extract required parameter
+            rotation_id = params.get(f"{self.__class__.__name__}.rotation_id")
+            if rotation_id is None:
+                raise ValueError(
+                    f"Required parameter '{self.__class__.__name__}.rotation_id' not provided"
+                )
+
+            # Call eflips-eval prepare function
+            result = eval_input_prepare.single_rotation_info(rotation_id, session)
+
+            return result
+        finally:
+            session.close()
+            engine.dispose()
+
+    @staticmethod
+    def visualize(prepared_data: pd.DataFrame) -> cyto.Cytoscape:
+        """
+        Visualize a single rotation as a network graph using Dash Cytoscape.
+
+        Nodes represent stops and edges represent trips between stops.
+
+        Args:
+            prepared_data: Result from analyze() method
+
+        Returns:
+            Dash Cytoscape object (can be added to a Dash layout)
+        """
+        return eval_input_visualize.single_rotation_info(prepared_data)
