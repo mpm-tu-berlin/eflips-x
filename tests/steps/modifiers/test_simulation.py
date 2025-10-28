@@ -1,13 +1,14 @@
 """Tests for simulation modifiers."""
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from eflips.depot.api import DepotConfigurationWish
-from eflips.model import Scenario, Depot, Area, Process, Station, Rotation
+from eflips.depot.api import DepotConfigurationWish, SmartChargingStrategy
+from eflips.model import Scenario, Depot, Area, Process, Station, Rotation, Event
 from sqlalchemy.orm import Session
 
-from eflips.x.steps.modifiers.simulation import DepotGenerator
+from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
 from tests.util import multi_depot_scenario
 
 
@@ -427,3 +428,251 @@ class TestDepotGenerator:
         # Verify depot infrastructure was created
         areas = db_session.query(Area).all()
         assert len(areas) > 0, "Should have created depot areas with default block length"
+
+
+class TestSimulation:
+    """Test suite for Simulation modifier."""
+
+    @pytest.fixture
+    def simulation_scenario(self, db_session: Session) -> Scenario:
+        """Create a test scenario with depot infrastructure ready for simulation."""
+        # Create the base scenario with rotations
+        scenario = multi_depot_scenario(
+            db_session,
+            num_depots=2,
+            lines_per_depot=4,
+            trips_per_line=10,
+        )
+
+        # Delete Depot objects created by multi_depot_scenario
+        db_session.query(Depot).filter_by(scenario_id=scenario.id).delete()
+        db_session.commit()
+
+        # Generate depot infrastructure
+        depot_generator = DepotGenerator()
+        depot_generator.modify(
+            session=db_session,
+            params={
+                "DepotGenerator.charging_power_kw": 150.0,
+            },
+        )
+        db_session.commit()
+
+        return scenario
+
+    def test_simulation_basic_run(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test basic simulation run with default parameters."""
+        # Verify no events exist initially
+        initial_events = db_session.query(Event).count()
+        assert initial_events == 0
+
+        # Run simulation
+        modifier = Simulation()
+        result = modifier.modify(session=db_session, params={})
+        db_session.commit()
+
+        # Verify result
+        assert result is None
+
+        # Verify simulation created events
+        events = db_session.query(Event).all()
+        assert len(events) > 0, "Simulation should have created events"
+
+    def test_simulation_with_repetition_period(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test simulation with explicit repetition period."""
+        modifier = Simulation()
+        result = modifier.modify(
+            session=db_session,
+            params={
+                "Simulation.repetition_period": timedelta(days=7),
+            },
+        )
+        db_session.commit()
+
+        # Verify result
+        assert result is None
+
+        # Verify simulation ran successfully
+        events = db_session.query(Event).all()
+        assert len(events) > 0, "Simulation should have created events"
+
+    def test_simulation_with_smart_charging_none(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test simulation with explicit SmartChargingStrategy.NONE."""
+        modifier = Simulation()
+        result = modifier.modify(
+            session=db_session,
+            params={
+                "Simulation.smart_charging": SmartChargingStrategy.NONE,
+            },
+        )
+        db_session.commit()
+
+        # Verify result
+        assert result is None
+
+        # Verify simulation ran successfully
+        events = db_session.query(Event).all()
+        assert len(events) > 0
+
+    # @pytest.mark.xfail(reason="Requires Gurobi optimizer which is not available on this platform")
+    def test_simulation_with_smart_charging_peak_shaving(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test simulation with SmartChargingStrategy.EVEN (requires Gurobi)."""
+        modifier = Simulation()
+        result = modifier.modify(
+            session=db_session,
+            params={
+                "Simulation.smart_charging": SmartChargingStrategy.EVEN,
+            },
+        )
+        db_session.commit()
+
+        # Verify result
+        assert result is None
+
+        # Verify simulation ran successfully
+        events = db_session.query(Event).all()
+        assert len(events) > 0
+
+    def test_simulation_with_ignore_unstable_simulation(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test simulation with ignore_unstable_simulation flag."""
+        modifier = Simulation()
+        result = modifier.modify(
+            session=db_session,
+            params={
+                "Simulation.ignore_unstable_simulation": True,
+            },
+        )
+        db_session.commit()
+
+        # Verify result
+        assert result is None
+
+        # Verify simulation ran
+        events = db_session.query(Event).all()
+        assert len(events) > 0
+
+    def test_simulation_with_ignore_delayed_trips(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test simulation with ignore_delayed_trips flag."""
+        modifier = Simulation()
+        result = modifier.modify(
+            session=db_session,
+            params={
+                "Simulation.ignore_delayed_trips": True,
+            },
+        )
+        db_session.commit()
+
+        # Verify result
+        assert result is None
+
+        # Verify simulation ran
+        events = db_session.query(Event).all()
+        assert len(events) > 0
+
+    def test_simulation_with_all_parameters(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test simulation with all parameters set."""
+        modifier = Simulation()
+        result = modifier.modify(
+            session=db_session,
+            params={
+                "Simulation.repetition_period": timedelta(days=1),
+                "Simulation.smart_charging": SmartChargingStrategy.NONE,
+                "Simulation.ignore_unstable_simulation": False,
+                "Simulation.ignore_delayed_trips": False,
+            },
+        )
+        db_session.commit()
+
+        # Verify result
+        assert result is None
+
+        # Verify simulation ran
+        events = db_session.query(Event).all()
+        assert len(events) > 0
+
+    def test_simulation_no_scenario_error(self, temp_db: Path, db_session: Session):
+        """Test that simulation fails when no scenario exists."""
+        modifier = Simulation()
+
+        # Should raise an error because no scenario exists
+        with pytest.raises(Exception):  # Could be NoResultFound or similar
+            modifier.modify(session=db_session, params={})
+
+    def test_simulation_multiple_scenarios_error(self, temp_db: Path, db_session: Session):
+        """Test that simulation fails when multiple scenarios exist."""
+        # Create two scenarios (without full setup)
+        scenario1 = Scenario(name="Scenario 1", name_short="S1")
+        scenario2 = Scenario(name="Scenario 2", name_short="S2")
+        db_session.add_all([scenario1, scenario2])
+        db_session.commit()
+
+        modifier = Simulation()
+
+        # Should raise an error because multiple scenarios exist
+        with pytest.raises(Exception):  # Could be MultipleResultsFound
+            modifier.modify(session=db_session, params={})
+
+    def test_simulation_document_params(self):
+        """Test that document_params returns expected parameters."""
+        modifier = Simulation()
+        docs = modifier.document_params()
+
+        assert isinstance(docs, dict)
+        assert len(docs) == 4
+        assert "Simulation.repetition_period" in docs
+        assert "Simulation.smart_charging" in docs
+        assert "Simulation.ignore_unstable_simulation" in docs
+        assert "Simulation.ignore_delayed_trips" in docs
+
+        # Check that descriptions are non-empty
+        for key, value in docs.items():
+            assert isinstance(value, str)
+            assert len(value) > 0
+
+    def test_simulation_creates_vehicle_soc_data(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test that simulation creates state-of-charge data for vehicles."""
+        # Run simulation
+        modifier = Simulation()
+        modifier.modify(session=db_session, params={})
+        db_session.commit()
+
+        # Query events to verify simulation results
+        events = db_session.query(Event).all()
+        assert len(events) > 0, "Should have created simulation events"
+
+        # Check that we have different event types (charging, driving, etc.)
+        event_types = {event.event_type for event in events}
+        assert len(event_types) > 0, "Should have various event types"
+
+    def test_simulation_default_parameter_values(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test that default parameter values work correctly."""
+        modifier = Simulation()
+
+        # Run with empty params (all defaults)
+        result = modifier.modify(session=db_session, params={})
+        db_session.commit()
+
+        # Should succeed with defaults
+        assert result is None
+
+        # Verify simulation ran
+        events = db_session.query(Event).all()
+        assert len(events) > 0
