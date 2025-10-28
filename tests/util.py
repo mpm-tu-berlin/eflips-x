@@ -798,6 +798,9 @@ def multi_depot_scenario(
         empty_mass=10000,
         allowed_mass=20000,
         consumption=1.2,
+        length=12.0,
+        width=2.5,
+        height=3.5,
     )
     db_session.add(vehicle_type)
     db_session.flush()
@@ -1015,6 +1018,9 @@ if __name__ == "__main__":
         empty_mass=10000,
         allowed_mass=20000,
         consumption=1.2,
+        length=12.0,
+        width=2.5,
+        height=3.5,
     )
     session.add(vehicle_type)
     session.flush()
