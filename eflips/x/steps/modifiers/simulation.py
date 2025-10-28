@@ -30,6 +30,24 @@ from eflips.x.framework import Modifier
 
 
 class DepotGenerator(Modifier):
+    """
+    Generates depot infrastructure (Depot objects, Areas, and Processes) for a scenario.
+
+    This modifier identifies depot stations (stations where vehicle rotations start or end) and
+    creates the necessary depot infrastructure for each one. It supports three modes of operation:
+
+    1. **Simple Layout (default)**: Fast generation using an all-direct layout (larger depots).
+    2. **Optimal Layout**: Slower optimization-based generation that minimizes depot size.
+    3. **Custom Configuration**: User-defined depot layouts via DepotConfigurationWish objects.
+
+    The modifier will delete any existing depot infrastructure before creating new depots.
+
+    Requirements:
+    - Exactly one Scenario must exist in the database
+    - Vehicle rotations must already be defined
+    - For optimal layout mode: VehicleType objects must have dimensions (length, width, height)
+    """
+
     def __init__(self, code_version: str = "v1.0.0", **kwargs):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
@@ -45,39 +63,152 @@ class DepotGenerator(Modifier):
     def document_params(self) -> Dict[str, str]:
         return {
             f"{self.__class__.__name__}.depot_wishes": """
-A list of `DepotConfigurationWish` objects defining the desired depots to be generated. If set, it must
-contain one object for each depot (station where rotations start or end) in the scenario. If not set,
-depot generation will be done automatically based on existing stations.
+**MODE 3: Custom Configuration**
 
-Default: None
+A list of `DepotConfigurationWish` objects from eflips.depot.api, one for each depot station
+in the scenario. A depot station is any station where at least one vehicle rotation starts or ends.
+
+When set, this parameter takes precedence over all other parameters (generate_optimal_depots,
+charging_power_kw, and standard_block_length will be ignored).
+
+**Requirements:**
+- Must be a list (not a single object)
+- Must contain exactly one DepotConfigurationWish per depot station
+- Each DepotConfigurationWish must reference a valid depot station by station_id
+- Cannot include stations that are not depot stations
+
+**DepotConfigurationWish structure:**
+- station_id: int - ID of the depot station
+- auto_generate: bool - If True, depot layout is auto-generated; if False, must provide explicit areas
+- default_power: float - Default charging power (required if auto_generate=True)
+- standard_block_length: int - Block length for parking rows (required if auto_generate=True)
+- areas: list[AreaInformation] - Explicit area definitions (required if auto_generate=False)
+- cleaning_slots, cleaning_duration, shunting_slots, shunting_duration: Optional parameters
+
+**Example:**
+```python
+from eflips.depot.api import DepotConfigurationWish
+
+depot_wishes = [
+    DepotConfigurationWish(
+        station_id=1,
+        auto_generate=True,
+        default_power=120.0,
+        standard_block_length=6
+    ),
+    DepotConfigurationWish(
+        station_id=5,
+        auto_generate=True,
+        default_power=150.0,
+        standard_block_length=8
+    )
+]
+```
+
+Default: None (uses automatic generation instead)
             """.strip(),
             f"{self.__class__.__name__}.generate_optimal_depots": """
-*Only used if `depot_wishes` is not set.* If true, depots will be generated automatically based on an 
-optimization procedure that tries to minimize the depot size. If False, depots will be generated using
-an all-direct layout and much larger than needed (however, this is much faster to compute).
+**MODE 1 vs MODE 2: Automatic Generation Mode Selection**
+
+*Only used if `depot_wishes` is NOT set.*
+
+Controls which automatic depot generation mode to use:
+
+- **False (default)**: MODE 1 - Simple Layout Generation
+  - Fastest method
+  - Creates an all-direct layout (every parking spot has direct access)
+  - Results in larger depots with more space than needed
+  - Good for quick testing or when space is not a constraint
+
+- **True**: MODE 2 - Optimal Layout Generation
+  - Slower optimization-based method
+  - Minimizes depot size by optimizing parking arrangements
+  - Uses standard_block_length to configure parking rows
+  - Requires VehicleType objects to have dimensions (length, width, height)
+  - Better for realistic depot sizing
+
+Default: False
             """.strip(),
             f"{self.__class__.__name__}.charging_power_kw": """
-*Only used if `depot_wishes` is not set.* The charging power (in kW) to be used for depot chargers.
+**Charging power for automatic generation modes**
 
-Default: 90
+*Only used if `depot_wishes` is NOT set.*
+
+The charging power (in kW) to be used for depot chargers when depots are automatically generated
+(both simple and optimal modes). This value is applied to all generated depot charging infrastructure.
+
+**Note:** If using depot_wishes with auto_generate=True, specify power in the DepotConfigurationWish
+default_power parameter instead.
+
+Default: 90.0 kW
             """.strip(),
             f"{self.__class__.__name__}.standard_block_length": """
-*Only used if `depot_wishes` is not set and `generate_optimal_depots` is True.*
+**Block length for optimal layout generation**
 
-The amount of buses parked behing each other in one row in the depot layout optimization. This
-influences the shape of the depot. A higher value will lead to less areas, but more blocking of 
-vehicles as they park behind each other.
-            
+*Only used if `depot_wishes` is NOT set AND `generate_optimal_depots` is True (MODE 2).*
+
+The number of buses parked behind each other in one row during depot layout optimization.
+This parameter influences the shape and efficiency of the depot:
+
+- **Lower values (e.g., 4)**: More parking rows, fewer vehicles per row, less blocking, more flexible
+- **Higher values (e.g., 10)**: Fewer parking rows, more vehicles per row, more blocking, more compact
+
+Trade-offs:
+- Higher values create more compact depots but increase the chance of vehicles blocking each other
+- Lower values reduce blocking but require more total depot area
+
+**Note:** If using depot_wishes with auto_generate=True, specify this in the DepotConfigurationWish
+standard_block_length parameter instead.
+
 Default: 6
             """.strip(),
         }
 
-    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Path:
+    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
         """
-        Generates depots based on the provided parameters.
-        :param session: An open SQLAlchemy session.
-        :param params:
-        :return:
+        Generates depot infrastructure for all depot stations in the scenario.
+
+        This method performs the following steps:
+        1. Identifies all depot stations (stations where vehicle rotations start or end)
+        2. Deletes any existing depot infrastructure (Depot objects, Areas, Processes)
+        3. Generates new depot infrastructure based on the selected mode:
+           - MODE 1 (Simple): Fast all-direct layout
+           - MODE 2 (Optimal): Optimization-based layout
+           - MODE 3 (Custom): User-specified DepotConfigurationWish objects
+
+        Args:
+            session: An open SQLAlchemy session connected to the database containing the scenario.
+                    Must contain exactly one Scenario with defined vehicle rotations.
+            params: Dictionary of parameters controlling depot generation:
+                - DepotGenerator.depot_wishes: Optional list of DepotConfigurationWish objects
+                - DepotGenerator.generate_optimal_depots: Boolean for MODE 1 vs MODE 2 (default: False)
+                - DepotGenerator.charging_power_kw: Charging power in kW (default: 90.0)
+                - DepotGenerator.standard_block_length: Block length for MODE 2 (default: 6)
+
+        Returns:
+            Nothing.
+
+        Raises:
+            ValueError: If no scenario exists, multiple scenarios exist, depot_wishes validation fails,
+                       or depot stations are missing/extra in depot_wishes
+            TypeError: If depot_wishes is not a list or contains non-DepotConfigurationWish objects
+
+        Examples:
+            # MODE 1: Simple layout (default)
+            modifier.modify(session, {"DepotGenerator.charging_power_kw": 100.0})
+
+            # MODE 2: Optimal layout
+            modifier.modify(session, {
+                "DepotGenerator.generate_optimal_depots": True,
+                "DepotGenerator.charging_power_kw": 150.0,
+                "DepotGenerator.standard_block_length": 8
+            })
+
+            # MODE 3: Custom configuration
+            from eflips.depot.api import DepotConfigurationWish
+            wishes = [DepotConfigurationWish(station_id=1, auto_generate=True,
+                                            default_power=120.0, standard_block_length=6)]
+            modifier.modify(session, {"DepotGenerator.depot_wishes": wishes})
         """
         # Extract parameters
         depot_wishes = params.get(f"{self.__class__.__name__}.depot_wishes", None)
@@ -199,7 +330,6 @@ Default: 6
                 )
 
         self.logger.info("Depot generation completed successfully.")
-        return Path(".")
 
 
 class Simulation(Modifier):
