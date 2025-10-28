@@ -6,7 +6,6 @@ import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pytest
 import pytz
 import requests
 from eflips.model import (
@@ -745,7 +744,6 @@ def _create_depot_with_lines(
         )
 
 
-@pytest.fixture
 def multi_depot_scenario(
     db_session: Session,
     num_depots: int = NUM_DEPOTS,
