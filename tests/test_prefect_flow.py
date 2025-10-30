@@ -6,11 +6,135 @@ from typing import List
 
 import pytest
 from prefect import flow
+from prefect.futures import wait
+from prefect.task_runners import ProcessPoolTaskRunner
+from sqlalchemy.orm import Session
 
 from eflips.x.framework import PipelineContext
+from eflips.x.steps.analyzers import RotationInfoAnalyzer, GeographicTripPlotAnalyzer
 from eflips.x.steps.generators import BVGXMLIngester
 from eflips.x.steps.modifiers.simulation import DepotGenerator
 from tests.steps.analyzers.test_dummy_analyzer import TripDistanceAnalyzer
+from tests.util import MultiDepotScenarioGenerator
+from eflips.model import create_engine, VehicleType
+
+
+class TestFullSimulation:
+    """
+    This test suite verifies the full simulation flow. It creates a significantly sized scenario using the
+    `MultiDepotGenerator`, then creates a branching flow, where
+
+    1) The scenario is simulated as is, with depot charging only and large batteries
+    2) The batteries are made smaller, terminus charging is added, and the scenario simulated.
+    3) Small batteries, vehicle scheduling, depot assignment, and simulation are run.
+
+    For each of these scenarios, after the scenario is simulated, the HTML plots are generated to a different folder
+    """
+
+    @pytest.fixture
+    def work_dir(self) -> Path:
+        """Create a temporary work directory for pipeline execution."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+
+    def test_generate_Plots_in_parallel(self, work_dir: Path) -> None:
+        """
+        This test contains a nested flow structure to create a multi-depot scenario, then generate plots in parallel.
+
+        :return: None
+        """
+
+        @flow(name="test-create-multi-depot-scenario-flow")
+        def create_scenario_flow(context: PipelineContext) -> None:
+            """
+            This flow creates a multi-depot scenario using the MultiDepotGenerator. It changes a vehicle type's battery
+            capacity to based on the "create_scenario.battery_capacity" parameter in the pipeline_params.
+
+            :param work_dir: Path to the working directory
+            :param pipeline_params: Dictionary of pipeline parameters
+            :return: None
+            """
+            # Make sure the context has the correct parameters
+            if not "create_scenario.battery_capacity" in context.params:
+                raise ValueError(
+                    "Pipeline parameters must include 'create_scenario.battery_capacity'"
+                )
+
+            scenario_generator = MultiDepotScenarioGenerator(cache_enabled=False)
+            scenario_generator.execute(context)
+
+            # Manually obtain a session on the current database to modify vehicle types
+            db_url = f"sqlite:////{context.current_db.absolute().as_posix()}"
+            engine = create_engine(db_url)
+            with Session(engine) as session:
+                battery_capacity = context.params["create_scenario.battery_capacity"]
+                session.query(VehicleType).update({VehicleType.battery_capacity: battery_capacity})
+                session.commit()
+            engine.dispose()
+
+        @flow(name="create-all-plots-flow", task_runner=ProcessPoolTaskRunner)
+        def create_all_plots_flow(context: PipelineContext, output_dir: Path) -> None:
+            """
+            This flow generates all HTML plots for the current scenario in the context.
+
+            :param context: PipelineContext with the current database
+            :param output_dir: Directory to save the generated plots
+            :return: None
+            """
+            # Put the input analyes into the "input" subdirectory of output_dir
+            plots_output_dir = output_dir / "pre_sim_plots"
+            plots_output_dir.mkdir(parents=True, exist_ok=True)
+
+            rotation_info_task = RotationInfoAnalyzer()
+            rotation_info_future = rotation_info_task.execute(context).submit()
+
+            geographic_trip_plot_task = GeographicTripPlotAnalyzer()
+            geographic_trip_plot_future = geographic_trip_plot_task.execute(context).submit()
+
+            wait([rotation_info_future, geographic_trip_plot_future])
+            rotation_info = rotation_info_future.result()
+            geographic_trip_plot = geographic_trip_plot_future.result()
+
+            fig = rotation_info_task.visualize(rotation_info)
+            fig.write_html(plots_output_dir / "rotation_info.html")
+
+            fig = geographic_trip_plot_task.visualize(geographic_trip_plot)
+            fig.write_html(plots_output_dir / "geographic_trip_plot.html")
+
+        @flow(name="parallel-plotting-test")
+        def test_full_simulation_flow(self, work_dir: Path, pipeline_params: dict) -> None:
+            """
+            This flow creates a scenatio, then runs the pre-simulation plots on it.
+
+            :param work_dir: Path to the working directory
+            :param pipeline_params: Dictionary of pipeline parameters
+            :return: None
+            """
+            # TODO: Remove. Override work_dir for easier debugging
+            work_dir = Path("/tmp/eflips_x_prefect_test")
+            work_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create pipeline context
+            context = PipelineContext(work_dir=work_dir, params=pipeline_params)
+
+            # Step 1: Create multi-depot scenario
+            create_scenario_flow(context=context)
+
+            # Step 2: Generate plots
+            plots_output_dir = work_dir / "initial_plots"
+            create_all_plots_flow(context=context, output_dir=plots_output_dir)
+
+        # Define pipeline parameters
+        pipeline_params = {
+            "create_scenario.battery_capacity": 300.0,  # kWh
+            "log_level": "WARNING",
+        }
+        # Run the full simulation flow
+        test_full_simulation_flow(self, work_dir=work_dir, pipeline_params=pipeline_params)
+
+        # Verify that plots were created
+        initial_plots_dir = work_dir / "pre_sim_plots"
+        assert (initial_plots_dir / "rotation_info.html").exists()
 
 
 class TestPrefectFlow:
