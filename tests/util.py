@@ -5,6 +5,7 @@ import random
 import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any, Dict
 
 import pytz
 import requests
@@ -21,6 +22,7 @@ from eflips.model import (
     Depot,
     Plan,
 )
+from eflips.x.framework import Generator
 from geoalchemy2.shape import from_shape
 from shapely import Point
 from shapely.geometry import LineString
@@ -832,6 +834,143 @@ def multi_depot_scenario(
 
     db_session.commit()
     return scenario
+
+
+class MultiDepotScenarioGenerator(Generator):
+    """
+    Generator that wraps multi_depot_scenario() for use in eflips-x pipelines.
+
+    Creates a scenario with multiple depots and randomized bus schedules using configurable parameters.
+
+    Example usage:
+        ```python
+        from eflips.x.framework import PipelineContext
+        from pathlib import Path
+
+        context = PipelineContext(
+            work_dir=Path("output"),
+            params={
+                "num_depots": 3,
+                "lines_per_depot": 8,
+                "trips_per_line": 20,
+            }
+        )
+
+        generator = MultiDepotScenarioGenerator(code_version="v1")
+        generator.execute(context)
+        ```
+    """
+
+    def __init__(self, code_version: str = "v1", cache_enabled: bool = True, **kwargs):
+        """
+        Initialize the MultiDepotScenarioGenerator.
+
+        Args:
+            code_version: Version string for cache invalidation
+            cache_enabled: Whether to enable caching
+            **kwargs: Additional configuration passed to parent class
+        """
+        super().__init__(
+            input_files=None,  # No input files needed
+            code_version=code_version,
+            cache_enabled=cache_enabled,
+            **kwargs,
+        )
+
+    def document_params(self) -> Dict[str, str]:
+        """
+        Document the parameters accepted by this generator.
+
+        Returns:
+            Dictionary mapping parameter names to their descriptions
+        """
+        return {
+            f"{self.__class__.__name__}.num_depots": "Number of depots to create in the scenario (default: 2)",
+            f"{self.__class__.__name__}.lines_per_depot": "Number of lines per depot. Must be even. Determines the number of near "
+            "and far termini (default: 6)",
+            f"{self.__class__.__name__}.trips_per_line": "Number of passenger trips per line per day (default: 19)",
+            f"{self.__class__.__name__}.near_terminus_distance": "Distance from depot to near terminus in meters (default: 1000)",
+            f"{self.__class__.__name__}.far_terminus_distance": "Distance from depot to far terminus in meters (default: 4000)",
+            f"{self.__class__.__name__}.depot_ring_diameter": "Diameter of the depot ring around the center point in meters (default: 20000)",
+        }
+
+    def generate(self, session: Session, params: Dict[str, Any]) -> Path:
+        """
+        Generate the multi-depot scenario.
+
+        Args:
+            session: SQLAlchemy session for database operations
+            params: Dictionary of generation parameters
+
+        Returns:
+            Path to the generated database (available in context.current_db)
+        """
+        # Extract parameters with defaults
+        num_depots = params.get(f"{self.__class__.__name__}.num_depots", NUM_DEPOTS)
+        lines_per_depot = params.get(f"{self.__class__.__name__}.lines_per_depot", LINES_PER_DEPOT)
+        trips_per_line = params.get(f"{self.__class__.__name__}.trips_per_line", TRIPS_PER_LINE)
+        near_terminus_distance = params.get(
+            f"{self.__class__.__name__}.near_terminus_distance", NEAR_TERMINUS_DISTANCE
+        )
+        far_terminus_distance = params.get(
+            f"{self.__class__.__name__}.far_terminus_distance", FAR_TERMINUS_DISTANCE
+        )
+        depot_ring_diameter = params.get(
+            f"{self.__class__.__name__}.depot_ring_diameter", DEPOT_RING_DIAMETER
+        )
+
+        # Call the underlying function
+        scenario = multi_depot_scenario(
+            db_session=session,
+            num_depots=num_depots,
+            lines_per_depot=lines_per_depot,
+            trips_per_line=trips_per_line,
+            near_terminus_distance=near_terminus_distance,
+            far_terminus_distance=far_terminus_distance,
+            depot_ring_diameter=depot_ring_diameter,
+        )
+
+        # The database path will be managed by the parent class
+        # We just need to return a meaningful result
+        return Path(f"scenario_{scenario.id}")
+
+    def _create_artifact_markdown(self, context, result) -> str:
+        """
+        Create markdown documentation for the artifact.
+
+        Args:
+            context: Pipeline context
+            result: Result from generate()
+
+        Returns:
+            Markdown string for artifact logging
+        """
+        params = context.params
+        return f"""## MultiDepotScenarioGenerator Completed
+
+**Type**: Generator
+**Output Database**: `{context.current_db}`
+
+### Parameters
+- **Number of Depots**: {params.get('num_depots', NUM_DEPOTS)}
+- **Lines per Depot**: {params.get('lines_per_depot', LINES_PER_DEPOT)}
+- **Trips per Line**: {params.get('trips_per_line', TRIPS_PER_LINE)}
+- **Near Terminus Distance**: {params.get('near_terminus_distance', NEAR_TERMINUS_DISTANCE)}m
+- **Far Terminus Distance**: {params.get('far_terminus_distance', FAR_TERMINUS_DISTANCE)}m
+- **Depot Ring Diameter**: {params.get('depot_ring_diameter', DEPOT_RING_DIAMETER)}m
+
+### Network Structure
+Each depot has:
+- {params.get('lines_per_depot', LINES_PER_DEPOT) // 2} near termini (distributed evenly around depot)
+- {params.get('lines_per_depot', LINES_PER_DEPOT)} far termini (twice as many as near termini)
+- {params.get('lines_per_depot', LINES_PER_DEPOT)} lines (2 lines per near terminus)
+
+Total network size:
+- **Depots**: {params.get('num_depots', NUM_DEPOTS)}
+- **Total Lines**: {params.get('num_depots', NUM_DEPOTS) * params.get('lines_per_depot', LINES_PER_DEPOT)}
+- **Total Near Termini**: {params.get('num_depots', NUM_DEPOTS) * params.get('lines_per_depot', LINES_PER_DEPOT) // 2}
+- **Total Far Termini**: {params.get('num_depots', NUM_DEPOTS) * params.get('lines_per_depot', LINES_PER_DEPOT)}
+"""
 
 
 def generate_network_map(db_session: Session, scenario_id: int, output_file: str) -> None:

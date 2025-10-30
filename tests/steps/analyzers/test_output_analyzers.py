@@ -553,6 +553,7 @@ class TestDepotActivityAnalyzer:
                 },
             )
 
+    @pytest.mark.skip("Takes very, very long time to run in CI")
     def test_visualize(
         self,
         analyzer: DepotActivityAnalyzer,

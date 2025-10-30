@@ -172,6 +172,10 @@ class Generator(PipelineStep):
         """Execute generator: create new database."""
         output_db = context.get_next_db_path(self.__class__.__name__)
 
+        # Give a clear error if the working directory does not exist
+        if not context.work_dir.exists():
+            raise FileNotFoundError(f"Working directory {context.work_dir} does not exist.")
+
         # Set up the new database and open a session
         if output_db.exists():
             raise FileExistsError(f"Output database {output_db} already exists.")
