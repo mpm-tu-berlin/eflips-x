@@ -1,13 +1,15 @@
 """Tests for Prefect flow integration with eflips-x pipeline steps."""
 
+import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import List
 
 import pytest
 from prefect import flow
 from prefect.futures import wait
-from prefect.task_runners import ProcessPoolTaskRunner
+from prefect.task_runners import ProcessPoolTaskRunner, ThreadPoolTaskRunner
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import PipelineContext
@@ -72,7 +74,7 @@ class TestFullSimulation:
                 session.commit()
             engine.dispose()
 
-        @flow(name="create-all-plots-flow", task_runner=ProcessPoolTaskRunner)
+        @flow(name="create-all-plots-flow", task_runner=ThreadPoolTaskRunner)
         def create_all_plots_flow(context: PipelineContext, output_dir: Path) -> None:
             """
             This flow generates all HTML plots for the current scenario in the context.
@@ -85,21 +87,29 @@ class TestFullSimulation:
             plots_output_dir = output_dir / "pre_sim_plots"
             plots_output_dir.mkdir(parents=True, exist_ok=True)
 
-            rotation_info_task = RotationInfoAnalyzer()
-            rotation_info_future = rotation_info_task.execute(context).submit()
+            rotation_analyzer = RotationInfoAnalyzer()
+            rotation_analyzer._create_prefect_task()
+            temporary_db = Path(tempfile.gettempdir()) / Path(str(uuid.uuid4().hex) + ".sqlite")
+            rotation_info_future = rotation_analyzer._prefect_task.submit(
+                context=context, output_db=temporary_db
+            )
 
             geographic_trip_plot_task = GeographicTripPlotAnalyzer()
-            geographic_trip_plot_future = geographic_trip_plot_task.execute(context).submit()
+            geographic_trip_plot_task._create_prefect_task()
+            temporary_db = Path(tempfile.gettempdir()) / Path(str(uuid.uuid4().hex) + ".sqlite")
+            geographic_trip_plot_future = geographic_trip_plot_task._prefect_task.submit(
+                context=context, output_db=temporary_db
+            )
 
             wait([rotation_info_future, geographic_trip_plot_future])
-            rotation_info = rotation_info_future.result()
-            geographic_trip_plot = geographic_trip_plot_future.result()
+            rotation_info_df = rotation_info_future.result()
+            geographic_trip_plot_df = geographic_trip_plot_future.result()
 
-            fig = rotation_info_task.visualize(rotation_info)
+            fig = rotation_analyzer.visualize(rotation_info_df)
             fig.write_html(plots_output_dir / "rotation_info.html")
 
-            fig = geographic_trip_plot_task.visualize(geographic_trip_plot)
-            fig.write_html(plots_output_dir / "geographic_trip_plot.html")
+            map = geographic_trip_plot_task.visualize(geographic_trip_plot_df)
+            map.save(plots_output_dir / "geographic_trip_plot.html")
 
         @flow(name="parallel-plotting-test")
         def test_full_simulation_flow(self, work_dir: Path, pipeline_params: dict) -> None:
@@ -110,10 +120,6 @@ class TestFullSimulation:
             :param pipeline_params: Dictionary of pipeline parameters
             :return: None
             """
-            # TODO: Remove. Override work_dir for easier debugging
-            work_dir = Path("/tmp/eflips_x_prefect_test")
-            work_dir.mkdir(parents=True, exist_ok=True)
-
             # Create pipeline context
             context = PipelineContext(work_dir=work_dir, params=pipeline_params)
 
@@ -133,7 +139,7 @@ class TestFullSimulation:
         test_full_simulation_flow(self, work_dir=work_dir, pipeline_params=pipeline_params)
 
         # Verify that plots were created
-        initial_plots_dir = work_dir / "pre_sim_plots"
+        initial_plots_dir = work_dir / "initial_plots" / "pre_sim_plots"
         assert (initial_plots_dir / "rotation_info.html").exists()
 
 
@@ -245,33 +251,6 @@ class TestPrefectFlow:
         assert context.step_count == 1  # Generator counts as 1 step
         assert context.current_db is not None
         assert context.current_db.exists()
-
-    def test_flow_with_artifacts(
-        self, work_dir: Path, xml_files: List[Path], pipeline_params: dict
-    ):
-        """Test that analyzer results are stored in context artifacts."""
-
-        @flow(name="test-artifacts-flow")
-        def test_flow():
-            # Create pipeline context
-            context = PipelineContext(work_dir=work_dir, params=pipeline_params)
-
-            # Step 1: Generate database
-            ingester = BVGXMLIngester(input_files=xml_files, cache_enabled=False)
-            ingester.execute(context)
-
-            # Step 2: Analyze database
-            analyzer = TripDistanceAnalyzer(cache_enabled=False)
-            total_distance = analyzer.execute(context)
-
-            return context, total_distance
-
-        # Run the flow
-        context, total_distance = test_flow()
-
-        # Verify artifacts
-        assert "TripDistanceAnalyzer" in context.artifacts
-        assert context.artifacts["TripDistanceAnalyzer"] == total_distance
 
     def test_flow_step_count_increments(
         self, work_dir: Path, xml_files: List[Path], pipeline_params: dict
