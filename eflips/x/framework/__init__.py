@@ -5,6 +5,7 @@ eflips-x modules.
 
 import hashlib
 import shutil
+import tempfile
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -69,12 +70,12 @@ class PipelineStep(ABC):
         pass
 
     @abstractmethod
-    def compute_cache_key(self, context: PipelineContext) -> str:
+    def compute_cache_key(self, context: PipelineContext, output_db: Path) -> str:
         """Compute cache key for this step."""
         pass
 
     @abstractmethod
-    def execute_impl(self, context: PipelineContext) -> None:
+    def execute_impl(self, context: PipelineContext, output_db: Path) -> None:
         """Execute the step logic. To be implemented by subclasses."""
         pass
 
@@ -83,7 +84,21 @@ class PipelineStep(ABC):
         if self._prefect_task is None:
             self._create_prefect_task()
 
-        return self._prefect_task(context)
+        if not context.work_dir.exists():
+            raise FileNotFoundError(f"Working directory {context.work_dir} does not exist.")
+
+        output_db = context.get_next_db_path(self.__class__.__name__)
+
+        try:
+            self._prefect_task(context=context, output_db=output_db)
+        except Exception as e:
+            # If generation fails, move the incomplete DB file to a .failed extension
+            now = datetime.now().isoformat()
+            failed_db = output_db.with_suffix(f"-{now}.failed")
+            shutil.move(output_db, failed_db)
+            raise e
+
+        context.set_current_db(output_db)
 
     def _create_prefect_task(self):
         """Create a Prefect task for this step."""
@@ -91,11 +106,13 @@ class PipelineStep(ABC):
         @task(
             name=self.__class__.__name__,
             cache_key_fn=lambda ctx, parameters: (
-                self.compute_cache_key(parameters["context"]) if self.cache_enabled else None
+                self.compute_cache_key(parameters["context"], parameters["output_db"])
+                if self.cache_enabled
+                else None
             ),
         )
-        def task_wrapper(context: PipelineContext):
-            result = self.execute_impl(context)
+        def task_wrapper(context: PipelineContext, output_db: Path) -> Any:
+            result = self.execute_impl(context=context, output_db=output_db)
 
             # Create artifact for observability
             create_markdown_artifact(
@@ -148,9 +165,13 @@ class Generator(PipelineStep):
         super().__init__(**kwargs)
         self.input_files = [Path(f) for f in (input_files or [])]
 
-    def compute_cache_key(self, context: PipelineContext) -> str:
-        """Cache key based on input files and parameters, NOT database (since it doesn't exist yet)."""
+    def compute_cache_key(self, context: PipelineContext, output_db: Path) -> str:
+        if output_db is None:
+            raise ValueError("output_db must be provided for Generator cache key computation.")
+
         key_parts = [
+            f"work_dir:{context.work_dir.absolute().name}",
+            f"output_db:{output_db.absolute().name}",
             f"generator:{self.__class__.__name__}",
             f"code:{self.code_version}",
             f"deps:{self._compute_poetry_lock_hash()}",
@@ -168,42 +189,28 @@ class Generator(PipelineStep):
 
         return ":".join(key_parts)
 
-    def execute_impl(self, context: PipelineContext) -> Path:
+    def execute_impl(self, context: PipelineContext, output_db: Path) -> None:
         """Execute generator: create new database."""
-        output_db = context.get_next_db_path(self.__class__.__name__)
-
-        # Give a clear error if the working directory does not exist
-        if not context.work_dir.exists():
-            raise FileNotFoundError(f"Working directory {context.work_dir} does not exist.")
-
-        # Set up the new database and open a session
-        if output_db.exists():
-            raise FileExistsError(f"Output database {output_db} already exists.")
         db_url = f"sqlite:////{output_db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        Base.metadata.create_all(engine)
-        session = Session(engine)
+        db_engine = eflips.model.create_engine(db_url)
+
+        Base.metadata.create_all(db_engine)
+        session = Session(db_engine)
 
         try:
-            result = self.generate(session, context.params)
+            self.generate(session, context.params)
             session.commit()
             session.close()
         except Exception as e:
-            # Try to commit anyway
+            # Try to commit anyway. Reasoning: We want to have the state available for debugging if possible.
             try:
                 session.commit()
             except PendingRollbackError:
                 pass
             session.close()
-            # If generation fails, move the incomplete DB file to a .failed extension
-            now = datetime.now().isoformat()
-            failed_db = output_db.with_suffix(f"-{now}.failed")
-            shutil.move(output_db, failed_db)
             raise e
         finally:
-            engine.dispose()
-            context.set_current_db(output_db)
-        return result
+            db_engine.dispose()
 
     @abstractmethod
     def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Path:
@@ -228,9 +235,13 @@ class Modifier(PipelineStep):
         super().__init__(**kwargs)
         self.additional_files = [Path(f) for f in (additional_files or [])]
 
-    def compute_cache_key(self, context: PipelineContext) -> str:
+    def compute_cache_key(self, context: PipelineContext, output_db: Optional[Path] = None) -> str:
+        if output_db is None:
+            raise ValueError("output_db must be provided for Modifier cache key computation.")
         """Cache key based on input database, additional files, and parameters."""
         key_parts = [
+            f"work_dir:{context.work_dir.absolute().name}",
+            f"db_url:{output_db.absolute().name}",
             f"modifier:{self.__class__.__name__}",
             f"code:{self.code_version}",
             f"deps:{self._compute_poetry_lock_hash()}",
@@ -252,12 +263,10 @@ class Modifier(PipelineStep):
 
         return ":".join(key_parts)
 
-    def execute_impl(self, context: PipelineContext) -> Path:
+    def execute_impl(self, context: PipelineContext, output_db: Path) -> None:
         """Execute modifier: copy database and modify it."""
         if not context.current_db:
             raise ValueError(f"Modifier {self.__class__.__name__} requires an input database")
-
-        output_db = context.get_next_db_path(self.__class__.__name__)
 
         # Set up the new database and open a session
         if output_db.exists():
@@ -266,8 +275,8 @@ class Modifier(PipelineStep):
         shutil.copy2(context.current_db, output_db)
 
         db_url = f"sqlite:////{output_db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
+        db_engine = eflips.model.create_engine(db_url)
+        session = Session(db_engine)
 
         try:
             result = self.modify(session, context.params)
@@ -286,9 +295,7 @@ class Modifier(PipelineStep):
             shutil.move(output_db, failed_db)
             raise e
         finally:
-            engine.dispose()
-            context.set_current_db(output_db)
-        return result
+            db_engine.dispose()
 
     @abstractmethod
     def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Path:
@@ -314,9 +321,12 @@ class Analyzer(PipelineStep):
         super().__init__(**kwargs)
         self.additional_files = [Path(f) for f in (additional_files or [])]
 
-    def compute_cache_key(self, context: PipelineContext) -> str:
+    def compute_cache_key(self, context: PipelineContext, output_db: Path) -> str:
         """Cache key based on input database, additional files, and parameters."""
+
+        # Here, we do not care about output_db, as Analyzer's results depend only on input DB and params
         key_parts = [
+            f"work_dir:{context.work_dir.absolute().name}",
             f"analyzer:{self.__class__.__name__}",
             f"code:{self.code_version}",
             f"deps:{self._compute_poetry_lock_hash()}",
@@ -338,12 +348,47 @@ class Analyzer(PipelineStep):
 
         return ":".join(key_parts)
 
-    def execute_impl(self, context: PipelineContext) -> Any:
+    def execute(self, context: PipelineContext) -> Any:
+        """
+        Execute the step with Prefect task wrapping. Overridden in the Analyzer, as here we do not
+        create a new database. Instead (just to be safe if an unruly analyzer tries to write something),
+        we create a copy of the current DB as the "output_db" to pass to the task.
+        """
+        if self._prefect_task is None:
+            self._create_prefect_task()
+
+        if not context.work_dir.exists():
+            raise FileNotFoundError(f"Working directory {context.work_dir} does not exist.")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_db = Path(temp_dir) / f"{self.__class__.__name__}_temp.db"
+
+            try:
+                result = self._prefect_task(context=context, output_db=output_db)
+            except Exception as e:
+                # If generation fails, move the incomplete DB file to a .failed extension
+                now = datetime.now().isoformat()
+                dir_for_failed = context.work_dir / "failed_at_analyzer"
+                dir_for_failed.mkdir(parents=True, exist_ok=True)
+                failed_db = dir_for_failed / output_db.with_suffix(f"-{now}.failed")
+                shutil.move(output_db, failed_db)
+                raise e
+        return result
+
+    def execute_impl(self, context: PipelineContext, output_db: Optional[Path]) -> Any:
         """Execute analyzer: analyze database without modification."""
         if not context.current_db:
             raise ValueError(f"Analyzer {self.__class__.__name__} requires an input database")
 
-        db_url = f"sqlite:////{context.current_db.absolute().as_posix()}"
+        # Set up the new database and open a session
+        if output_db.exists():
+            raise FileExistsError(f"Analyzer working database {output_db} already exists.")
+
+        # Copy input to output
+        # This protects against analyzers that might try to write to the DB
+        shutil.copy2(context.current_db, output_db)
+
+        db_url = f"sqlite:////{output_db.absolute().as_posix()}"
         engine = eflips.model.create_engine(db_url)
         session = Session(engine)
 
@@ -354,9 +399,6 @@ class Analyzer(PipelineStep):
             session.rollback()
             session.close()
             engine.dispose()
-
-        # Store result in context artifacts
-        context.artifacts[self.__class__.__name__] = result
 
         return result
 
