@@ -53,7 +53,7 @@ class IntegratedScheduling(Modifier):
     a feasible schedule is found. It adds longer breaks to trips that need them until the schedule is feasible.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -306,7 +306,7 @@ class VehicleScheduling(Modifier):
     in the scenario.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -591,7 +591,7 @@ class DepotAssignment(Modifier):
     4. Logs comparison of before/after assignments
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -926,7 +926,7 @@ class DepotAssignment(Modifier):
         self,
         pre_optimization_assignments: dict[int, list[Rotation]],
         session: sqlalchemy.orm.session.Session,
-    ):
+    ) -> None:
         self.logger.info(
             f"Total of {len(pre_optimization_assignments)} depots with "
             f"{sum([len(v) for v in pre_optimization_assignments.values()])}"
@@ -955,7 +955,7 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
     or a list of rotation IDs that end with SOC below zero.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1138,7 +1138,7 @@ class StationElectrification(Modifier):
     and the utility functions from util_station_electrification module.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1232,7 +1232,7 @@ class StationElectrification(Modifier):
         return list(terminus_ids)
 
     @staticmethod
-    def _make_depot_stations_electrified(scenario: Scenario, session: Session):
+    def _make_depot_stations_electrified(scenario: Scenario, session: Session) -> None:
         """
         Before running SimBA for the first time, we need to make sure that the depot stations (The ones where rotations
         start and end) are electrified.

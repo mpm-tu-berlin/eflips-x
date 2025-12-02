@@ -47,7 +47,7 @@ class DepotGenerator(Modifier):
     - For optimal layout mode: VehicleType objects must have dimensions (length, width, height)
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -337,7 +337,8 @@ Default: 6
 
 
 class Simulation(Modifier):
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 

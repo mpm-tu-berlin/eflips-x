@@ -37,7 +37,7 @@ class PipelineContext:
         self.step_count += 1
         return self.work_dir / f"step_{self.step_count:03d}_{step_name}.db"
 
-    def set_current_db(self, db_path: Path):
+    def set_current_db(self, db_path: Path) -> Path:
         """Update current database reference."""
         self.current_db = db_path
         return db_path
@@ -52,7 +52,7 @@ class PrefectTask(Protocol):
 class PipelineStep(ABC):
     """Base class for all pipeline steps."""
 
-    def __init__(self, code_version: str, cache_enabled: bool = True, **kwargs):
+    def __init__(self, code_version: str, cache_enabled: bool = True, **kwargs: Any) -> None:
         if not code_version:
             raise ValueError(
                 "code_version must be provided for cache invalidation. Please set a default value "
@@ -107,7 +107,7 @@ class PipelineStep(ABC):
 
         context.set_current_db(output_db)
 
-    def _create_prefect_task(self):
+    def _create_prefect_task(self) -> None:
         """Create a Prefect task for this step."""
 
         @task(
@@ -167,7 +167,7 @@ class Generator(PipelineStep):
     def __init__(
         self,
         input_files: Optional[List[Union[str, Path]]] = None,
-        **kwargs,
+        **kwargs: Any,
     ):
         super().__init__(**kwargs)
         self.input_files = [Path(f) for f in (input_files or [])]
@@ -238,7 +238,7 @@ class Modifier(PipelineStep):
     Depends on previous database state for cache invalidation.
     """
 
-    def __init__(self, additional_files: Optional[List[Union[str, Path]]] = None, **kwargs):
+    def __init__(self, additional_files: Optional[List[Union[str, Path]]] = None, **kwargs: Any):
         super().__init__(**kwargs)
         self.additional_files = [Path(f) for f in (additional_files or [])]
 
@@ -324,7 +324,7 @@ class Analyzer(PipelineStep):
     Does NOT modify the database.
     """
 
-    def __init__(self, additional_files: Optional[List[Union[str, Path]]] = None, **kwargs):
+    def __init__(self, additional_files: Optional[List[Union[str, Path]]] = None, **kwargs: Any):
         super().__init__(**kwargs)
         self.additional_files = [Path(f) for f in (additional_files or [])]
 
