@@ -96,6 +96,7 @@ class IntegratedScheduling(Modifier):
         The database we return will be in the "just after vehicle scheduling" state, as if only VehicleScheduling
         had been run. Therefore, we use nested sessions to run depot assignment and terminus placement without
         modifying the outer session.
+
         Parameters:
         -----------
         session : Session
@@ -103,6 +104,7 @@ class IntegratedScheduling(Modifier):
         params : Dict[str, Any]
             Pipeline parameters:
             - IntegratedScheduling.max_iterations (optional): Maximum number of iterations to attempt
+
         Returns:
         --------
         None
@@ -201,12 +203,16 @@ class IntegratedScheduling(Modifier):
         3) from the possible termini from 2) it selects the one that is closest to the global top locations from 1)
 
         Parameters:
+        -----------
         rotation_ids : List[int]
             List of rotation IDs that have insufficient charging time
         nested_session : Session
             SQLAlchemy session connected to the database
         params : Dict[str, Any]
+            Pipeline parameters
+
         Returns:
+        --------
         set[int]
             Set of trip IDs that should have longer breaks added
         """
@@ -411,6 +417,7 @@ class VehicleScheduling(Modifier):
         1. Validates that exactly one scenario exists
         2. Generates energy consumption data for all trips
         3. For each vehicle type with rotations:
+
            - Creates a graph of possible trip connections
            - Solves the vehicle scheduling optimization
            - Writes the resulting rotation plan back to the database
@@ -1255,8 +1262,7 @@ class StationElectrification(Modifier):
         1. Validates that exactly one scenario exists
         2. Sets up initial depot electrification
         3. Removes terminus charging from rotations that don't need it
-        4. Iteratively adds charging stations at strategic termini until no rotations
-           end with SOC below 0%
+        4. Iteratively adds charging stations at strategic termini until no rotations end with SOC below 0%
 
         Parameters:
         -----------

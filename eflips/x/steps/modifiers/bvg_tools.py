@@ -511,8 +511,8 @@ for the vehicle type.
         :param session: An open SQLAlchemy session
         :param vehicle_type: The vehicle type to create the consumption LUT for
         :param multiplier: an optional multiplier to scale the consumption LUT. Default is 1.0 (no scaling)
-        :param path: an optional path to an Excel file containing the consumption LUT. if set
-        this will override the multiplier.
+        :param path: an optional path to an Excel file containing the consumption LUT. if set this will override the multiplier.
+
         :return: None. The LUT is added to the database via the session.
         """
         logger = logging.getLogger(__name__)

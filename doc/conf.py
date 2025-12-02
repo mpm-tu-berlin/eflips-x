@@ -15,7 +15,12 @@ release = "0.2.0"
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
-extensions = ["sphinx.ext.autodoc", "autoapi.extension", "sphinx_paramlinks"]
+extensions = [
+    "sphinx.ext.napoleon",
+    "sphinx.ext.autodoc",
+    "autoapi.extension",
+    "sphinx_paramlinks",
+]
 autodoc_typehints = "description"
 
 templates_path = ["_templates"]
@@ -23,6 +28,9 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 # -- Options for autoapi -----------------------------------------------------
 autoapi_dirs = ["../eflips/"]
+
+# Keep the generated files to allow for debugging
+autoapi_keep_files = True
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
