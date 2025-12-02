@@ -5,9 +5,10 @@ from datetime import datetime
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
+from uuid import UUID
 
 import sqlalchemy.orm.session
-from eflips.ingest.legacy.bvgxml import (
+from eflips.ingest.legacy.bvgxml import (  # type: ignore[import-untyped]
     load_and_validate_xml,
     create_stations,
     TimeProfile,
@@ -19,7 +20,7 @@ from eflips.ingest.legacy.bvgxml import (
     identify_and_delete_overlapping_rotations,
     recenter_station,
 )
-from eflips.ingest.legacy.xmldata import Linienfahrplan
+from eflips.ingest.legacy.xmldata import Linienfahrplan  # type: ignore[import-untyped]
 from eflips.model import Scenario, Route, ConsistencyWarning, Station, AssocRouteStation
 from geoalchemy2.functions import ST_Distance
 from prefect.artifacts import create_progress_artifact, update_progress_artifact
@@ -58,7 +59,7 @@ class BVGXMLIngester(Generator):
             f"{self.__class__.__name__}.multithreading": "Whether to use multithreading. Default is True.",
         }
 
-    def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Path:
+    def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
         match params["log_level"] or "INFO":
             case "DEBUG":
                 logging.basicConfig(level=logging.DEBUG)
@@ -80,6 +81,7 @@ class BVGXMLIngester(Generator):
         progress_artifact_id = create_progress_artifact(
             progress=0.0, key=self.__class__.__name__.lower()
         )
+        assert isinstance(progress_artifact_id, UUID)
 
         TOTAL_STEPS = 11
         current_step = 0

@@ -7,13 +7,15 @@ such as creating optimal rotation plans for different vehicle types.
 
 import logging
 import os
+import typing
 from collections import defaultdict, OrderedDict
 from datetime import timedelta
-from typing import Any, Dict, List, Tuple, Counter
+from typing import Any, Dict, List, Tuple, Counter, Set
 
 import eflips.model
+import pandas as pd
 import sqlalchemy.orm.session
-from eflips.depot.api import (
+from eflips.depot.api import (  # type: ignore[import-untyped]
     generate_consumption_result,
     simple_consumption_simulation,
     ConsumptionResult,
@@ -132,7 +134,7 @@ class IntegratedScheduling(Modifier):
             )
 
         iteration = 0
-        ids_of_trips_to_add_longer_breaks = set()
+        ids_of_trips_to_add_longer_breaks: Set[int] = set()
         while True:
             iteration += 1
             if iteration > max_iterations:
@@ -244,7 +246,9 @@ class IntegratedScheduling(Modifier):
                 .options(joinedload(Rotation.trips))
                 .one()
             )
-            candidate_termini_station_ids = defaultdict(int)  # station_id -> count of visits
+            candidate_termini_station_ids: Dict[int, int] = defaultdict(
+                int
+            )  # station_id -> count of visits
             for trip in rotation.trips[:-1]:  # Skip last trip, as no break after it
                 arrival_station_id = trip.route.arrival_station_id
                 candidate_termini_station_ids[arrival_station_id] += 1
@@ -501,7 +505,7 @@ class VehicleScheduling(Modifier):
 
             # Convert to the format eflips-opt expects: {trip_id: delta_soc, ...}
             # Also turn the delta_soc into a positive number
-            delta_socs: Dict[int, float] = {}
+            delta_socs = {}
             for trip_id, result in consumption.items():
                 delta_socs[trip_id] = -1 * result.delta_soc_total / (1 - battery_margin)
         else:
@@ -871,6 +875,8 @@ class DepotAssignment(Modifier):
         optimizer.write_optimization_results(delete_original_data=True)
 
         assert optimizer.data["result"] is not None
+        assert isinstance(optimizer.data["rotation"], pd.DataFrame)
+        assert isinstance(optimizer.data["result"], pd.DataFrame)
         assert optimizer.data["result"].shape[0] == optimizer.data["rotation"].shape[0]
 
         self.logger.info("Wrote optimization results to database")
@@ -1354,11 +1360,12 @@ class StationElectrification(Modifier):
                 )
 
                 if self.logger.isEnabledFor(logging.INFO):
-                    min_soc_end = (
+                    min_soc_end_query = (
                         session.query(func.min(Event.soc_end))
                         .filter(Event.scenario_id == scenario.id)
-                        .first()[0]
+                        .limit(1)
                     )
+                    min_soc_end = min_soc_end_query.scalar()
                     count_of_electrified_termini = (
                         session.query(Station)
                         .filter(Station.scenario_id == scenario.id, Station.is_electrified == True)
@@ -1563,7 +1570,7 @@ class StationElectrification(Modifier):
 
         # For these rotations, find all arrival stations except the last one (depot)
         # Sum up the time spent at each station
-        total_break_time_by_station = Counter()
+        total_break_time_by_station: typing.Counter[int] = Counter()
         for rotation in rotations_with_low_soc:
             for i in range(len(rotation.trips) - 1):
                 trip = rotation.trips[i]

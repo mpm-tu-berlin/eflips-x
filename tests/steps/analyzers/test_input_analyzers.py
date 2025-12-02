@@ -51,7 +51,7 @@ class TestRotationInfoAnalyzer:
         # Save database and create path
         db_session.commit()
 
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Verify result is a DataFrame
         assert isinstance(result, pd.DataFrame)
@@ -93,7 +93,7 @@ class TestRotationInfoAnalyzer:
         rotation_id = first_rotation.id
 
         # Analyze with filter
-        result = analyzer.analyze(temp_db, {"RotationInfoAnalyzer.rotation_ids": rotation_id})
+        result = analyzer.analyze(db_session, {"RotationInfoAnalyzer.rotation_ids": rotation_id})
 
         # Verify we only get one rotation
         assert len(result) == 1
@@ -116,7 +116,7 @@ class TestRotationInfoAnalyzer:
         rotation_ids = [r.id for r in rotations]
 
         # Analyze with filter
-        result = analyzer.analyze(temp_db, {"RotationInfoAnalyzer.rotation_ids": rotation_ids})
+        result = analyzer.analyze(db_session, {"RotationInfoAnalyzer.rotation_ids": rotation_ids})
 
         # Verify we only get two rotations
         assert len(result) == 2
@@ -132,7 +132,7 @@ class TestRotationInfoAnalyzer:
         """Test visualization method."""
         db_session.commit()
 
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Test visualization
         fig = RotationInfoAnalyzer.visualize(result)
@@ -150,7 +150,7 @@ class TestRotationInfoAnalyzer:
         """Test visualization with custom timezone."""
         db_session.commit()
 
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Test visualization with UTC timezone
         fig = RotationInfoAnalyzer.visualize(result, timezone=ZoneInfo("UTC"))
@@ -187,7 +187,7 @@ class TestGeographicTripPlotAnalyzer:
         """Test analyzing all trips without filtering."""
         db_session.commit()
 
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Verify result is a DataFrame
         assert isinstance(result, pd.DataFrame)
@@ -231,7 +231,7 @@ class TestGeographicTripPlotAnalyzer:
 
         # Analyze with filter
         result = analyzer.analyze(
-            temp_db, {"GeographicTripPlotAnalyzer.rotation_ids": rotation_id}
+            db_session, {"GeographicTripPlotAnalyzer.rotation_ids": rotation_id}
         )
 
         # Verify we only get trips from one rotation
@@ -248,7 +248,7 @@ class TestGeographicTripPlotAnalyzer:
         """Test visualization method."""
         db_session.commit()
 
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Test visualization
         map_obj = GeographicTripPlotAnalyzer.visualize(result)
@@ -294,7 +294,9 @@ class TestSingleRotationInfoAnalyzer:
         trip_count = len(first_rotation.trips)
 
         # Analyze
-        result = analyzer.analyze(temp_db, {"SingleRotationInfoAnalyzer.rotation_id": rotation_id})
+        result = analyzer.analyze(
+            db_session, {"SingleRotationInfoAnalyzer.rotation_id": rotation_id}
+        )
 
         # Verify result is a DataFrame
         assert isinstance(result, pd.DataFrame)
@@ -330,7 +332,7 @@ class TestSingleRotationInfoAnalyzer:
         db_session.commit()
 
         with pytest.raises(ValueError, match="Required parameter.*rotation_id.*not provided"):
-            analyzer.analyze(temp_db, {})
+            analyzer.analyze(db_session, {})
 
     def test_visualize(
         self,
@@ -348,7 +350,9 @@ class TestSingleRotationInfoAnalyzer:
         first_rotation = db_session.query(Rotation).first()
         rotation_id = first_rotation.id
 
-        result = analyzer.analyze(temp_db, {"SingleRotationInfoAnalyzer.rotation_id": rotation_id})
+        result = analyzer.analyze(
+            db_session, {"SingleRotationInfoAnalyzer.rotation_id": rotation_id}
+        )
 
         # Test visualization
         cyto_obj = SingleRotationInfoAnalyzer.visualize(result)

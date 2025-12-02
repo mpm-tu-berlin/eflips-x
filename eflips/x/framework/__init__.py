@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Protocol
 
 import eflips.model
 import sqlalchemy.orm.session
@@ -43,6 +43,12 @@ class PipelineContext:
         return db_path
 
 
+class PrefectTask(Protocol):
+    """Here, we specify the function signature for Prefect tasks used in PipelineStep."""
+
+    def __call__(self, context: PipelineContext, output_db: Path) -> Any: ...
+
+
 class PipelineStep(ABC):
     """Base class for all pipeline steps."""
 
@@ -55,7 +61,7 @@ class PipelineStep(ABC):
         self.code_version = code_version
         self.cache_enabled = cache_enabled
         self.config = kwargs
-        self._prefect_task = None
+        self._prefect_task: Optional[PrefectTask] = None
 
     @abstractmethod
     def document_params(self) -> Dict[str, str]:
@@ -90,6 +96,7 @@ class PipelineStep(ABC):
         output_db = context.get_next_db_path(self.__class__.__name__)
 
         try:
+            assert self._prefect_task is not None
             self._prefect_task(context=context, output_db=output_db)
         except Exception as e:
             # If generation fails, move the incomplete DB file to a .failed extension
@@ -213,7 +220,7 @@ class Generator(PipelineStep):
             db_engine.dispose()
 
     @abstractmethod
-    def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Path:
+    def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
         """Generate new database. To be implemented by subclasses."""
         pass
 
@@ -291,14 +298,14 @@ class Modifier(PipelineStep):
             session.close()
             # If modification fails, move the incomplete DB file to a .failed extension
             now = datetime.now().isoformat()
-            failed_db = output_db.with_suffix(f"-{now}.failed")
+            failed_db = output_db.with_suffix(f".{now}.failed")
             shutil.move(output_db, failed_db)
             raise e
         finally:
             db_engine.dispose()
 
     @abstractmethod
-    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Path:
+    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
         """Modify database in place. To be implemented by subclasses."""
         pass
 
@@ -364,18 +371,19 @@ class Analyzer(PipelineStep):
             output_db = Path(temp_dir) / f"{self.__class__.__name__}_temp.db"
 
             try:
+                assert self._prefect_task is not None
                 result = self._prefect_task(context=context, output_db=output_db)
             except Exception as e:
                 # If generation fails, move the incomplete DB file to a .failed extension
                 now = datetime.now().isoformat()
                 dir_for_failed = context.work_dir / "failed_at_analyzer"
                 dir_for_failed.mkdir(parents=True, exist_ok=True)
-                failed_db = dir_for_failed / output_db.with_suffix(f"-{now}.failed")
+                failed_db = dir_for_failed / output_db.with_suffix(f".{now}.failed")
                 shutil.move(output_db, failed_db)
                 raise e
         return result
 
-    def execute_impl(self, context: PipelineContext, output_db: Optional[Path]) -> Any:
+    def execute_impl(self, context: PipelineContext, output_db: Path) -> Any:
         """Execute analyzer: analyze database without modification."""
         if not context.current_db:
             raise ValueError(f"Analyzer {self.__class__.__name__} requires an input database")
@@ -393,7 +401,7 @@ class Analyzer(PipelineStep):
         session = Session(engine)
 
         try:
-            result = self.analyze(context.current_db, context.params)
+            result = self.analyze(session, context.params)
         finally:
             # Explicitly rollback any uncommitted transactions
             session.rollback()
@@ -403,7 +411,7 @@ class Analyzer(PipelineStep):
         return result
 
     @abstractmethod
-    def analyze(self, db: Path, params: Dict[str, Any]) -> Any:
+    def analyze(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Any:
         """Analyze database and return results. To be implemented by subclasses."""
         pass
 

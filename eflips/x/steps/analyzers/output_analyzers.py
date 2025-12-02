@@ -6,14 +6,13 @@ to make them usable within the eflips-x pipeline framework.
 """
 
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
-import eflips.model
 import matplotlib.animation as animation
 import pandas as pd
 import plotly.graph_objs as go  # type: ignore
+import sqlalchemy
 from eflips.eval.output import prepare as eval_output_prepare
 from eflips.eval.output import visualize as eval_output_visualize
 from eflips.eval.output.prepare import depot_layout
@@ -45,7 +44,9 @@ class DepartureArrivalSocAnalyzer(Analyzer):
     def document_params(self) -> Dict[str, str]:
         return {}
 
-    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
         """
         This Analyzer creates a dataframe with the SoC at departure and arrival for each trip.
         The columns are
@@ -61,28 +62,20 @@ class DepartureArrivalSocAnalyzer(Analyzer):
         - event_type: the type of event, either "Departure" or "Arrival"
 
         Args:
-            db: Path to the database file
+            session: SQLAlchemy session connected to the eflips-model database
             params: Analysis parameters (not used)
 
         Returns:
             DataFrame with SoC information at depot departure/arrival
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
+        # Auto-detect scenario_id
+        scenario = session.query(Scenario).one()
+        scenario_id = scenario.id
 
-        try:
-            # Auto-detect scenario_id
-            scenario = session.query(Scenario).one()
-            scenario_id = scenario.id
+        # Call eflips-eval prepare function
+        result = eval_output_prepare.departure_arrival_soc(scenario_id, session)
 
-            # Call eflips-eval prepare function
-            result = eval_output_prepare.departure_arrival_soc(scenario_id, session)
-
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        return result
 
     @staticmethod
     def visualize(prepared_data: pd.DataFrame) -> go.Figure:
@@ -127,7 +120,9 @@ Example: `params["DepotEventAnalyzer.vehicle_ids"] = [1, 2, 3]`
             """.strip()
         }
 
-    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
         """
         This function creates a dataframe with all the events at the depot for a given scenario.
         The columns are
@@ -143,25 +138,17 @@ Example: `params["DepotEventAnalyzer.vehicle_ids"] = [1, 2, 3]`
         Returns:
             DataFrame with depot events
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
+        # Auto-detect scenario_id
+        scenario = session.query(Scenario).one()
+        scenario_id = scenario.id
 
-        try:
-            # Auto-detect scenario_id
-            scenario = session.query(Scenario).one()
-            scenario_id = scenario.id
+        # Extract parameters
+        vehicle_ids = params.get(f"{self.__class__.__name__}.vehicle_ids", None)
 
-            # Extract parameters
-            vehicle_ids = params.get(f"{self.__class__.__name__}.vehicle_ids", None)
+        # Call eflips-eval prepare function
+        result = eval_output_prepare.depot_event(scenario_id, session, vehicle_ids)
 
-            # Call eflips-eval prepare function
-            result = eval_output_prepare.depot_event(scenario_id, session, vehicle_ids)
-
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        return result
 
     @staticmethod
     def visualize(
@@ -230,12 +217,14 @@ Example: `params["PowerAndOccupancyAnalyzer.sim_end_time"] = datetime(...)`
             """.strip(),
         }
 
-    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
         """
         Analyze the database and return power and occupancy timeseries.
 
         Args:
-            db: Path to the database file
+            session: SQLAlchemy session connected to the eflips-model database
             params: Analysis parameters (must include area_id)
 
         Returns:
@@ -244,38 +233,31 @@ Example: `params["PowerAndOccupancyAnalyzer.sim_end_time"] = datetime(...)`
         Raises:
             ValueError: If area_id parameter is not provided
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
 
-        try:
-            # Extract required parameter
-            area_id = params.get(f"{self.__class__.__name__}.area_id")
-            if area_id is None:
-                raise ValueError(
-                    f"Required parameter '{self.__class__.__name__}.area_id' not provided"
-                )
-
-            # Extract optional parameters
-            temporal_resolution = params.get(f"{self.__class__.__name__}.temporal_resolution", 60)
-            station_id = params.get(f"{self.__class__.__name__}.station_id", None)
-            sim_start_time = params.get(f"{self.__class__.__name__}.sim_start_time", None)
-            sim_end_time = params.get(f"{self.__class__.__name__}.sim_end_time", None)
-
-            # Call eflips-eval prepare function
-            result = eval_output_prepare.power_and_occupancy(
-                area_id,
-                session,
-                temporal_resolution,
-                station_id,
-                sim_start_time,
-                sim_end_time,
+        # Extract required parameter
+        area_id = params.get(f"{self.__class__.__name__}.area_id")
+        if area_id is None:
+            raise ValueError(
+                f"Required parameter '{self.__class__.__name__}.area_id' not provided"
             )
 
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        # Extract optional parameters
+        temporal_resolution = params.get(f"{self.__class__.__name__}.temporal_resolution", 60)
+        station_id = params.get(f"{self.__class__.__name__}.station_id", None)
+        sim_start_time = params.get(f"{self.__class__.__name__}.sim_start_time", None)
+        sim_end_time = params.get(f"{self.__class__.__name__}.sim_end_time", None)
+
+        # Call eflips-eval prepare function
+        result = eval_output_prepare.power_and_occupancy(
+            area_id,
+            session,
+            temporal_resolution,
+            station_id,
+            sim_start_time,
+            sim_end_time,
+        )
+
+        return result
 
     @staticmethod
     def visualize(
@@ -313,7 +295,9 @@ class SpecificEnergyConsumptionAnalyzer(Analyzer):
     def document_params(self) -> Dict[str, str]:
         return {}
 
-    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
         """
         Creates a dataframe of all the trip energy consumptions and distances for the given scenario.
         The dataframe contains the following columns:
@@ -332,22 +316,14 @@ class SpecificEnergyConsumptionAnalyzer(Analyzer):
         Returns:
             DataFrame with trip energy consumption information
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
+        # Auto-detect scenario_id
+        scenario = session.query(Scenario).one()
+        scenario_id = scenario.id
 
-        try:
-            # Auto-detect scenario_id
-            scenario = session.query(Scenario).one()
-            scenario_id = scenario.id
+        # Call eflips-eval prepare function
+        result = eval_output_prepare.specific_energy_consumption(scenario_id, session)
 
-            # Call eflips-eval prepare function
-            result = eval_output_prepare.specific_energy_consumption(scenario_id, session)
-
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        return result
 
     @staticmethod
     def visualize(prepared_data: pd.DataFrame) -> go.Figure:
@@ -397,7 +373,7 @@ Example: `params["VehicleSocAnalyzer.timezone"] = ZoneInfo("UTC")`
         }
 
     def analyze(
-        self, db: Path, params: Dict[str, Any]
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
     ) -> Tuple[pd.DataFrame, Dict[str, List[Tuple[str, datetime, datetime]]]]:
         """
         This function takes in a vehicle id and returns a description what happened to the vehicle over time.
@@ -414,7 +390,7 @@ Example: `params["VehicleSocAnalyzer.timezone"] = ZoneInfo("UTC")`
         - "trip": A list of the route name and the time the trip started and ended
 
         Args:
-            db: Path to the database file
+            session: SQLAlchemy session connected to the eflips-model database
             params: Analysis parameters (must include vehicle_id)
 
         Returns:
@@ -423,28 +399,21 @@ Example: `params["VehicleSocAnalyzer.timezone"] = ZoneInfo("UTC")`
         Raises:
             ValueError: If vehicle_id parameter is not provided
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
 
-        try:
-            # Extract required parameter
-            vehicle_id = params.get(f"{self.__class__.__name__}.vehicle_id")
-            if vehicle_id is None:
-                raise ValueError(
-                    f"Required parameter '{self.__class__.__name__}.vehicle_id' not provided"
-                )
+        # Extract required parameter
+        vehicle_id = params.get(f"{self.__class__.__name__}.vehicle_id")
+        if vehicle_id is None:
+            raise ValueError(
+                f"Required parameter '{self.__class__.__name__}.vehicle_id' not provided"
+            )
 
-            # Extract optional parameters
-            timezone = params.get(f"{self.__class__.__name__}.timezone", ZoneInfo("Europe/Berlin"))
+        # Extract optional parameters
+        timezone = params.get(f"{self.__class__.__name__}.timezone", ZoneInfo("Europe/Berlin"))
 
-            # Call eflips-eval prepare function
-            result = eval_output_prepare.vehicle_soc(vehicle_id, session, timezone)
+        # Call eflips-eval prepare function
+        result = eval_output_prepare.vehicle_soc(vehicle_id, session, timezone)
 
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        return result
 
     @staticmethod
     def visualize(
@@ -497,7 +466,7 @@ Example: `params["DepotActivityAnalyzer.animation_end"] = datetime(...)`
         }
 
     def analyze(
-        self, db: Path, params: Dict[str, Any]
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
     ) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
         """
         Analyze the database and return depot activity data.
@@ -512,39 +481,32 @@ Example: `params["DepotActivityAnalyzer.animation_end"] = datetime(...)`
         Raises:
             ValueError: If required parameters are not provided
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
 
-        try:
-            # Extract required parameters
-            depot_id = params.get(f"{self.__class__.__name__}.depot_id")
-            if depot_id is None:
-                raise ValueError(
-                    f"Required parameter '{self.__class__.__name__}.depot_id' not provided"
-                )
+        # Extract required parameters
+        depot_id = params.get(f"{self.__class__.__name__}.depot_id")
+        if depot_id is None:
+            raise ValueError(
+                f"Required parameter '{self.__class__.__name__}.depot_id' not provided"
+            )
 
-            animation_start = params.get(f"{self.__class__.__name__}.animation_start")
-            if animation_start is None:
-                raise ValueError(
-                    f"Required parameter '{self.__class__.__name__}.animation_start' not provided"
-                )
+        animation_start = params.get(f"{self.__class__.__name__}.animation_start")
+        if animation_start is None:
+            raise ValueError(
+                f"Required parameter '{self.__class__.__name__}.animation_start' not provided"
+            )
 
-            animation_end = params.get(f"{self.__class__.__name__}.animation_end")
-            if animation_end is None:
-                raise ValueError(
-                    f"Required parameter '{self.__class__.__name__}.animation_end' not provided"
-                )
+        animation_end = params.get(f"{self.__class__.__name__}.animation_end")
+        if animation_end is None:
+            raise ValueError(
+                f"Required parameter '{self.__class__.__name__}.animation_end' not provided"
+            )
 
-            animation_range = (animation_start, animation_end)
+        animation_range = (animation_start, animation_end)
 
-            # Call eflips-eval prepare function
-            result = eval_output_prepare.depot_activity(depot_id, session, animation_range)
+        # Call eflips-eval prepare function
+        result = eval_output_prepare.depot_activity(depot_id, session, animation_range)
 
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        return result
 
     @staticmethod
     def visualize(
