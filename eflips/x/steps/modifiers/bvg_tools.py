@@ -386,7 +386,7 @@ class RemoveUnusedVehicleTypes(Modifier):
     4. Deletes old vehicle types
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -767,7 +767,7 @@ class RemoveUnusedRotations(Modifier):
     3. Removes all rotations that do not start at one of the specified depot stations
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -931,7 +931,7 @@ class MergeStations(Modifier):
     7. Deletes the merged stations
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1121,7 +1121,7 @@ class ReduceToNDaysNDepots(Modifier):
     4. Removes all rotations that don't start at one of the selected depots
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 

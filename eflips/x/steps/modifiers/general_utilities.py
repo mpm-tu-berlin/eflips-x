@@ -32,7 +32,7 @@ class RemoveUnusedData(Modifier):
     3. Removes all stations that are not part of any route
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ class AddTemperatures(Modifier):
     The temperature is applied uniformly from datetime.min to datetime.max in UTC.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
