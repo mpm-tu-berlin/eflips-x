@@ -171,6 +171,7 @@ Default: 6
         1. Identifies all depot stations (stations where vehicle rotations start or end)
         2. Deletes any existing depot infrastructure (Depot objects, Areas, Processes)
         3. Generates new depot infrastructure based on the selected mode:
+
            - MODE 1 (Simple): Fast all-direct layout
            - MODE 2 (Optimal): Optimization-based layout
            - MODE 3 (Custom): User-specified DepotConfigurationWish objects
@@ -193,21 +194,25 @@ Default: 6
             TypeError: If depot_wishes is not a list or contains non-DepotConfigurationWish objects
 
         Examples:
-            # MODE 1: Simple layout (default)
-            modifier.modify(session, {"DepotGenerator.charging_power_kw": 100.0})
 
-            # MODE 2: Optimal layout
-            modifier.modify(session, {
-                "DepotGenerator.generate_optimal_depots": True,
-                "DepotGenerator.charging_power_kw": 150.0,
-                "DepotGenerator.standard_block_length": 8
-            })
+            MODE 1: Simple layout (default)::
 
-            # MODE 3: Custom configuration
-            from eflips.depot.api import DepotConfigurationWish
-            wishes = [DepotConfigurationWish(station_id=1, auto_generate=True,
-                                            default_power=120.0, standard_block_length=6)]
-            modifier.modify(session, {"DepotGenerator.depot_wishes": wishes})
+                modifier.modify(session, {"DepotGenerator.charging_power_kw": 100.0})
+
+            MODE 2: Optimal layout::
+
+                modifier.modify(session, {
+                    "DepotGenerator.generate_optimal_depots": True,
+                    "DepotGenerator.charging_power_kw": 150.0,
+                    "DepotGenerator.standard_block_length": 8
+                })
+
+            MODE 3: Custom configuration::
+
+                from eflips.depot.api import DepotConfigurationWish
+                wishes = [DepotConfigurationWish(station_id=1, auto_generate=True,
+                                                default_power=120.0, standard_block_length=6)]
+                modifier.modify(session, {"DepotGenerator.depot_wishes": wishes})
         """
         # Extract parameters
         depot_wishes = params.get(f"{self.__class__.__name__}.depot_wishes", None)
