@@ -5,12 +5,10 @@ The Simulation Modifiers run a simulation. This may also include depot optimizat
 """
 
 import logging
-from pathlib import Path
 from typing import Any, Dict
 
-import eflips.model
 import sqlalchemy.orm.session
-from eflips.depot.api import (
+from eflips.depot.api import (  # type: ignore[import-untyped]
     generate_consumption_result,
     simple_consumption_simulation,
     group_rotations_by_start_end_stop,
@@ -19,6 +17,7 @@ from eflips.depot.api import (
     generate_optimal_depot_layout,
     DepotConfigurationWish,
     simulate_scenario,
+    SmartChargingStrategy,
 )
 from eflips.model import (
     Scenario,
@@ -362,7 +361,7 @@ Default: False
             """.strip(),
         }
 
-    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Path:
+    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
         """
         Runs a simulation based on the provided parameters.
         :param session: An open SQLAlchemy session.
@@ -374,7 +373,7 @@ Default: False
         repetition_period = params.get(f"{self.__class__.__name__}.repetition_period", None)
         smart_charging = params.get(
             f"{self.__class__.__name__}.smart_charging",
-            eflips.depot.api.SmartChargingStrategy.NONE,
+            SmartChargingStrategy.NONE,
         )
         ignore_unstable_simulation = params.get(
             f"{self.__class__.__name__}.ignore_unstable_simulation", False

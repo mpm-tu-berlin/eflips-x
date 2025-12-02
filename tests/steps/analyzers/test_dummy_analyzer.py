@@ -1,11 +1,9 @@
 """Dummy analyzer for testing pipeline flows."""
 
-from pathlib import Path
 from typing import Dict, Any
 
-import eflips.model
+import sqlalchemy.orm.session
 from eflips.model import Trip, Route
-from sqlalchemy.orm import Session
 
 from eflips.x.framework import Analyzer
 
@@ -22,7 +20,7 @@ class TripDistanceAnalyzer(Analyzer):
     def document_params(self) -> Dict[str, str]:
         return dict()
 
-    def analyze(self, db: Path, params: Dict[str, Any]) -> float:
+    def analyze(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> float:
         """
         Analyze the database and return the total distance of all trips.
 
@@ -33,20 +31,13 @@ class TripDistanceAnalyzer(Analyzer):
         Returns:
             Total distance of all trips in meters
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
 
-        try:
-            # Query all trips and sum their route distances
-            total_distance = (
-                session.query(Route.distance).join(Trip).filter(Route.distance.isnot(None)).all()
-            )
+        # Query all trips and sum their route distances
+        total_distance = (
+            session.query(Route.distance).join(Trip).filter(Route.distance.isnot(None)).all()
+        )
 
-            # Sum up all distances
-            result = sum(distance[0] for distance in total_distance if distance[0] is not None)
+        # Sum up all distances
+        result = sum(distance[0] for distance in total_distance if distance[0] is not None)
 
-            return float(result)
-        finally:
-            session.close()
-            engine.dispose()
+        return float(result)

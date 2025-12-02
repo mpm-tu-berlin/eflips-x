@@ -10,7 +10,7 @@ import logging
 import warnings
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Optional
 
 import eflips.model
 import numpy as np
@@ -28,7 +28,7 @@ from eflips.model import (
     ConsumptionLut,
     Scenario,
 )
-from fuzzywuzzy import fuzz
+from fuzzywuzzy import fuzz  # type: ignore[import-untyped]
 from geoalchemy2.shape import to_shape
 from sqlalchemy import not_, func
 from sqlalchemy.orm import Session, joinedload
@@ -38,7 +38,7 @@ from eflips.x.framework import Modifier
 
 def depots_for_bvg(
     session: sqlalchemy.orm.session.Session,
-) -> List[Dict[str, Union[int, Tuple[float, float], List[int]]]]:
+) -> List[Dict[str, Union[int, Tuple[float, float], List[int], str]]]:
     """
     Get depot configuration for BVG (Berlin) scenarios.
 
@@ -117,28 +117,29 @@ def depots_for_bvg(
 
     scenario = session.query(Scenario).one()
 
-    depot_list: List[Dict[str, Union[int, Tuple[float, float], List[int]]]] = []
-    all_vehicle_type_ids = (
-        session.query(VehicleType.id).filter(VehicleType.scenario == scenario).all()
+    depot_list: List[Dict[str, Union[int, Tuple[float, float], List[int], str]]] = []
+    all_vehicle_type_id_query = (
+        session.query(VehicleType).filter(VehicleType.scenario == scenario).all()
     )
-    all_vehicle_type_ids = [x[0] for x in all_vehicle_type_ids]
+    all_vehicle_type_ids = [x.id for x in all_vehicle_type_id_query]
 
     # "Abstellfläche Mariendorf" will have a capacity of zero
-    station_id = (
-        session.query(Station.id)
+    station_id_query = (
+        session.query(Station)
         .filter(Station.name_short == "BF MDA")
         .filter(Station.scenario == scenario)
-        .one()[0]
+        .one()
     )
+    station_id: int = station_id_query.id
 
     vehicle_types = ["EN", "GN", "DD"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
 
     depot_list.append(
         {
@@ -149,20 +150,21 @@ def depots_for_bvg(
     )
 
     # "Betriebshof Spandau will hava a capacity of 220
-    station_id = (
-        session.query(Station.id)
+    station_id_query = (
+        session.query(Station)
         .filter(Station.name_short == "BF S")
         .filter(Station.scenario == scenario)
-        .one()[0]
+        .one()
     )
+    station_id = station_id_query.id
     vehicle_types = ["EN", "GN", "DD"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
 
     depot_list.append(
         {
@@ -173,21 +175,22 @@ def depots_for_bvg(
     )
 
     # "Betriebshof Indira-Gandhi-Straße" will have a capacity of 300
-    station_id = (
-        session.query(Station.id)
+    station_id_query = (
+        session.query(Station)
         .filter(Station.name_short == "BFI")
         .filter(Station.scenario == scenario)
-        .one()[0]
+        .one()
     )
+    station_id = station_id_query.id
 
     vehicle_types = ["EN", "GN", "DD"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
 
     depot_list.append(
         {
@@ -198,21 +201,22 @@ def depots_for_bvg(
     )
 
     # "Betriebshof Britz" will have a capacity of 140
-    station_id = (
-        session.query(Station.id)
+    station_id_query = (
+        session.query(Station)
         .filter(Station.name_short == "BTRB")
         .filter(Station.scenario == scenario)
-        .one()[0]
+        .one()
     )
+    station_id = station_id_query.id
 
     vehicle_types = ["EN", "GN", "DD"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
 
     depot_list.append(
         {
@@ -223,21 +227,22 @@ def depots_for_bvg(
     )
 
     # "Betriebshof Cicerostraße" will have a capacity of 209
-    station_id = (
-        session.query(Station.id)
+    station_id_query = (
+        session.query(Station)
         .filter(Station.name_short == "BF C")
         .filter(Station.scenario == scenario)
-        .one()[0]
+        .one()
     )
+    station_id = station_id_query.id
 
     vehicle_types = ["EN", "GN", "DD"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
 
     depot_list.append(
         {
@@ -248,21 +253,22 @@ def depots_for_bvg(
     )
 
     # "Betriebshof Müllerstraße" will have a capacity of 155
-    station_id = (
-        session.query(Station.id)
+    station_id_query = (
+        session.query(Station)
         .filter(Station.name_short == "BF M")
         .filter(Station.scenario == scenario)
-        .one()[0]
+        .one()
     )
+    station_id = station_id_query.id
 
     vehicle_types = ["EN", "GN", "DD"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
 
     depot_list.append(
         {
@@ -273,21 +279,22 @@ def depots_for_bvg(
     )
 
     # "Betriebshof Lichtenberg" will have a capacity of 120
-    station_id = (
-        session.query(Station.id)
+    station_id_query = (
+        session.query(Station)
         .filter(Station.name_short == "BHLI")
         .filter(Station.scenario == scenario)
-        .one()[0]
+        .one()
     )
+    station_id = station_id_query.id
 
     vehicle_types = ["GN"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
     depot_list.append(
         {
             "depot_station": station_id,
@@ -299,13 +306,13 @@ def depots_for_bvg(
     # "Betriebshof Köpenicker Landstraße" will have a capacity of 200
 
     vehicle_types = ["EN", "GN"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
     depot_list.append(
         {
             "depot_station": (13.4964867, 52.4654085),
@@ -317,13 +324,13 @@ def depots_for_bvg(
 
     # "Betriebshof Rummelsburger Landstraße" will have a capacity of 60
     vehicle_types = ["GN"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
     depot_list.append(
         {
             "depot_station": (13.5053889, 52.4714167),
@@ -335,13 +342,13 @@ def depots_for_bvg(
 
     # "Betriebshof Säntisstraße" will have a capacity of 230
     vehicle_types = ["EN", "GN"]
-    vehicle_type_ids = (
-        session.query(VehicleType.id)
+    vehicle_type_query = (
+        session.query(VehicleType)
         .filter(VehicleType.name_short.in_(vehicle_types))
         .filter(VehicleType.scenario == scenario)
         .all()
     )
-    vehicle_type_ids = [x[0] for x in vehicle_type_ids]
+    vehicle_type_ids = [x.id for x in vehicle_type_query]
     depot_list.append(
         {
             "depot_station": (13.3844563, 52.416735),
@@ -495,7 +502,7 @@ for the vehicle type.
         session: Session,
         vehicle_type: VehicleType,
         multiplier: float = 1.0,
-        path: Path = None,
+        path: Optional[Path] = None,
     ) -> None:
         """
         This method creates the correpsonding vehicle class and consumption LUT for the given vehicle type.
@@ -563,7 +570,7 @@ for the vehicle type.
                 f"Scaled consumption LUT for vehicle type {vehicle_type.name_short} by {multiplier}"
             )
 
-    def modify(self, session: Session, params: Dict[str, Any]) -> Path:
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
         """
         Modify the database by removing unused vehicle types and creating standardized ones.
 
@@ -1020,7 +1027,7 @@ Uses the Levenshtein distance ratio (0-100) to compare station names.
         stations_in_use = session.query(Station).filter(Station.id.in_(station_ids_in_use)).all()
 
         for station in stations_in_use:
-            geom_wkb = to_shape(station.geom).wkb
+            geom_wkb = to_shape(station.geom).wkb  # type: ignore[arg-type]
 
             # Do a fancy geospatial query to find all stations within the given distance
             nearby_stations = (

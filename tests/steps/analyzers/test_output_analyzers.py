@@ -108,7 +108,7 @@ class TestDepartureArrivalSocAnalyzer:
         db_session: Session,
     ):
         """Test analyzing departure/arrival SoC."""
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Verify result is a DataFrame
         assert isinstance(result, pd.DataFrame)
@@ -142,7 +142,7 @@ class TestDepartureArrivalSocAnalyzer:
         db_session: Session,
     ):
         """Test visualization method."""
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Test visualization
         fig = DepartureArrivalSocAnalyzer.visualize(result)
@@ -172,7 +172,7 @@ class TestDepotEventAnalyzer:
         self, analyzer: DepotEventAnalyzer, temp_db: Path, simulated_scenario, db_session: Session
     ):
         """Test analyzing all vehicles without filtering."""
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Verify result is a DataFrame
         assert isinstance(result, pd.DataFrame)
@@ -211,7 +211,7 @@ class TestDepotEventAnalyzer:
         event_count = db_session.query(Event).filter_by(vehicle_id=vehicle_id).count()
 
         # Analyze with filter
-        result = analyzer.analyze(temp_db, {"DepotEventAnalyzer.vehicle_ids": vehicle_id})
+        result = analyzer.analyze(db_session, {"DepotEventAnalyzer.vehicle_ids": vehicle_id})
 
         # Verify we only get events from one vehicle
         assert len(result) == event_count
@@ -221,7 +221,7 @@ class TestDepotEventAnalyzer:
         self, analyzer: DepotEventAnalyzer, temp_db: Path, simulated_scenario, db_session: Session
     ):
         """Test visualization method."""
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Test visualization with different color schemes
         for color_scheme in ["event_type", "location", "area_type"]:
@@ -261,7 +261,7 @@ class TestPowerAndOccupancyAnalyzer:
         area_id = first_area.id
 
         # Analyze
-        result = analyzer.analyze(temp_db, {"PowerAndOccupancyAnalyzer.area_id": area_id})
+        result = analyzer.analyze(db_session, {"PowerAndOccupancyAnalyzer.area_id": area_id})
 
         # Verify result is a DataFrame
         assert isinstance(result, pd.DataFrame)
@@ -287,7 +287,7 @@ class TestPowerAndOccupancyAnalyzer:
         area_ids = [a.id for a in areas]
 
         # Analyze
-        result = analyzer.analyze(temp_db, {"PowerAndOccupancyAnalyzer.area_id": area_ids})
+        result = analyzer.analyze(db_session, {"PowerAndOccupancyAnalyzer.area_id": area_ids})
 
         # Verify result is a DataFrame
         assert isinstance(result, pd.DataFrame)
@@ -302,7 +302,7 @@ class TestPowerAndOccupancyAnalyzer:
     ):
         """Test that missing area_id raises ValueError."""
         with pytest.raises(ValueError, match="Required parameter.*area_id.*not provided"):
-            analyzer.analyze(temp_db, {})
+            analyzer.analyze(db_session, {})
 
     def test_visualize(
         self,
@@ -315,7 +315,7 @@ class TestPowerAndOccupancyAnalyzer:
         first_area = db_session.query(Area).first()
         area_id = first_area.id
 
-        result = analyzer.analyze(temp_db, {"PowerAndOccupancyAnalyzer.area_id": area_id})
+        result = analyzer.analyze(db_session, {"PowerAndOccupancyAnalyzer.area_id": area_id})
 
         # Test visualization
         fig = PowerAndOccupancyAnalyzer.visualize(result)
@@ -351,7 +351,7 @@ class TestSpecificEnergyConsumptionAnalyzer:
         db_session: Session,
     ):
         """Test analyzing specific energy consumption."""
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Verify result is a DataFrame
         assert isinstance(result, pd.DataFrame)
@@ -383,7 +383,7 @@ class TestSpecificEnergyConsumptionAnalyzer:
         db_session: Session,
     ):
         """Test visualization method."""
-        result = analyzer.analyze(temp_db, {})
+        result = analyzer.analyze(db_session, {})
 
         # Test visualization
         fig = SpecificEnergyConsumptionAnalyzer.visualize(result)
@@ -418,7 +418,7 @@ class TestVehicleSocAnalyzer:
         vehicle_id = first_vehicle.id
 
         # Analyze
-        result = analyzer.analyze(temp_db, {"VehicleSocAnalyzer.vehicle_id": vehicle_id})
+        result = analyzer.analyze(db_session, {"VehicleSocAnalyzer.vehicle_id": vehicle_id})
 
         # Verify result is a tuple
         assert isinstance(result, tuple)
@@ -447,7 +447,7 @@ class TestVehicleSocAnalyzer:
     ):
         """Test that missing vehicle_id raises ValueError."""
         with pytest.raises(ValueError, match="Required parameter.*vehicle_id.*not provided"):
-            analyzer.analyze(temp_db, {})
+            analyzer.analyze(db_session, {})
 
     def test_visualize(
         self, analyzer: VehicleSocAnalyzer, temp_db: Path, simulated_scenario, db_session: Session
@@ -456,7 +456,9 @@ class TestVehicleSocAnalyzer:
         first_vehicle = db_session.query(Vehicle).first()
         vehicle_id = first_vehicle.id
 
-        df, descriptions = analyzer.analyze(temp_db, {"VehicleSocAnalyzer.vehicle_id": vehicle_id})
+        df, descriptions = analyzer.analyze(
+            db_session, {"VehicleSocAnalyzer.vehicle_id": vehicle_id}
+        )
 
         # Test visualization
         fig = VehicleSocAnalyzer.visualize(df, descriptions)
@@ -502,7 +504,7 @@ class TestDepotActivityAnalyzer:
 
         # Analyze
         result = analyzer.analyze(
-            temp_db,
+            db_session,
             {
                 "DepotActivityAnalyzer.depot_id": depot_id,
                 "DepotActivityAnalyzer.animation_start": animation_start,
@@ -537,11 +539,11 @@ class TestDepotActivityAnalyzer:
         """Test that missing required parameters raise ValueError."""
         # Missing depot_id
         with pytest.raises(ValueError, match="Required parameter.*depot_id.*not provided"):
-            analyzer.analyze(temp_db, {})
+            analyzer.analyze(db_session, {})
 
         # Missing animation_start
         with pytest.raises(ValueError, match="Required parameter.*animation_start.*not provided"):
-            analyzer.analyze(temp_db, {"DepotActivityAnalyzer.depot_id": 1})
+            analyzer.analyze(db_session, {"DepotActivityAnalyzer.depot_id": 1})
 
         # Missing animation_end
         with pytest.raises(ValueError, match="Required parameter.*animation_end.*not provided"):

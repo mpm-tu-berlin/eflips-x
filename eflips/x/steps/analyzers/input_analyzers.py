@@ -5,15 +5,14 @@ These analyzers wrap the eflips.eval.input module's prepare/visualize functions
 to make them usable within the eflips-x pipeline framework.
 """
 
-from pathlib import Path
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
 import dash_cytoscape as cyto  # type: ignore
-import eflips.model
 import folium  # type: ignore
 import pandas as pd
 import plotly.graph_objs as go  # type: ignore
+import sqlalchemy
 from eflips.eval.input import prepare as eval_input_prepare
 from eflips.eval.input import visualize as eval_input_visualize
 from eflips.model import Scenario
@@ -57,7 +56,9 @@ Example: `params["RotationInfoAnalyzer.rotation_ids"] = [1, 2, 3]`
             """.strip()
         }
 
-    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
         """
         This function provides information about the rotations in a scenario. This information can be provided even before
         the simulation has been run. It creates a dataframe with the following columns:
@@ -76,25 +77,18 @@ Example: `params["RotationInfoAnalyzer.rotation_ids"] = [1, 2, 3]`
 
         :return: a pandas DataFrame
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
 
-        try:
-            # Auto-detect scenario_id
-            scenario = session.query(Scenario).one()
-            scenario_id = scenario.id
+        # Auto-detect scenario_id
+        scenario = session.query(Scenario).one()
+        scenario_id = scenario.id
 
-            # Extract parameters
-            rotation_ids = params.get(f"{self.__class__.__name__}.rotation_ids", None)
+        # Extract parameters
+        rotation_ids = params.get(f"{self.__class__.__name__}.rotation_ids", None)
 
-            # Call eflips-eval prepare function
-            result = eval_input_prepare.rotation_info(scenario_id, session, rotation_ids)
+        # Call eflips-eval prepare function
+        result = eval_input_prepare.rotation_info(scenario_id, session, rotation_ids)
 
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        return result
 
     @staticmethod
     def visualize(
@@ -144,7 +138,9 @@ Example: `params["GeographicTripPlotAnalyzer.rotation_ids"] = [1, 2, 3]`
             """.strip()
         }
 
-    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
         """
         This function creates a dataframe that can be used to visualize the geographic distribution of rotations. It creates
         a dataframe with one row for each trip and the following columns:
@@ -161,25 +157,18 @@ Example: `params["GeographicTripPlotAnalyzer.rotation_ids"] = [1, 2, 3]`
 
         :return: a pandas DataFrame
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
 
-        try:
-            # Auto-detect scenario_id
-            scenario = session.query(Scenario).one()
-            scenario_id = scenario.id
+        # Auto-detect scenario_id
+        scenario = session.query(Scenario).one()
+        scenario_id = scenario.id
 
-            # Extract parameters
-            rotation_ids = params.get(f"{self.__class__.__name__}.rotation_ids", None)
+        # Extract parameters
+        rotation_ids = params.get(f"{self.__class__.__name__}.rotation_ids", None)
 
-            # Call eflips-eval prepare function
-            result = eval_input_prepare.geographic_trip_plot(scenario_id, session, rotation_ids)
+        # Call eflips-eval prepare function
+        result = eval_input_prepare.geographic_trip_plot(scenario_id, session, rotation_ids)
 
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        return result
 
     @staticmethod
     def visualize(prepared_data: pd.DataFrame) -> folium.Map:
@@ -225,7 +214,9 @@ Example: `params["SingleRotationInfoAnalyzer.rotation_id"] = 1`
             """.strip()
         }
 
-    def analyze(self, db: Path, params: Dict[str, Any]) -> pd.DataFrame:
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
         """
         This Analyzer provides information over the trips in a single rotation and returns a pandas DataFrame with the
         following columns:
@@ -252,25 +243,18 @@ Example: `params["SingleRotationInfoAnalyzer.rotation_id"] = 1`
         Raises:
             ValueError: If rotation_id parameter is not provided
         """
-        db_url = f"sqlite:///{db.absolute().as_posix()}"
-        engine = eflips.model.create_engine(db_url)
-        session = Session(engine)
 
-        try:
-            # Extract required parameter
-            rotation_id = params.get(f"{self.__class__.__name__}.rotation_id")
-            if rotation_id is None:
-                raise ValueError(
-                    f"Required parameter '{self.__class__.__name__}.rotation_id' not provided"
-                )
+        # Extract required parameter
+        rotation_id = params.get(f"{self.__class__.__name__}.rotation_id")
+        if rotation_id is None:
+            raise ValueError(
+                f"Required parameter '{self.__class__.__name__}.rotation_id' not provided"
+            )
 
-            # Call eflips-eval prepare function
-            result = eval_input_prepare.single_rotation_info(rotation_id, session)
+        # Call eflips-eval prepare function
+        result = eval_input_prepare.single_rotation_info(rotation_id, session)
 
-            return result
-        finally:
-            session.close()
-            engine.dispose()
+        return result
 
     @staticmethod
     def visualize(prepared_data: pd.DataFrame) -> cyto.Cytoscape:
