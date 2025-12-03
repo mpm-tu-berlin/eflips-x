@@ -40,7 +40,10 @@ jobs:
 
       - name: Run Tests
         run:
-          SPATIALITE_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/mod_spatialite poetry run pytest
+           poetry run pytest
         env:
           PYTHONPATH: ${{ github.workspace }}
+          OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}
+          OPENROUTESERVICE_BASE_URL: "https://api.openrouteservice.org/"
+          SPATIALITE_LIBRARY_PATH: "/usr/lib/x86_64-linux-gnu/mod_spatialite"
           # The DATABASE_URL is set conditionally above
