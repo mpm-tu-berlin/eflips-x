@@ -231,6 +231,8 @@ data/input/Berlin 2025-06/*.xml
 
 # Ignore cache and output
 data/cache/**/*
+!data/cache/route_cache.json
+!data/cache/snap_cache.json
 data/output/**/*
 
 doc/_build/*
