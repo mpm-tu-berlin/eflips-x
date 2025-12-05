@@ -45,7 +45,8 @@ class BVGXMLIngester(Generator):
             missing_files = [str(f) for f in self.input_files if not f.exists()]
             raise ValueError(f"The following input files do not exist: {missing_files}")
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         This method documents the parameters of the generator. It returns a dictionary where the keys are the parameter
         and the values are a description of the parameter. The values may use markdown formatting. They may be
@@ -56,7 +57,7 @@ class BVGXMLIngester(Generator):
         """
         return {
             "log_level": "Logging level. One of DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is INFO.",
-            f"{self.__class__.__name__}.multithreading": "Whether to use multithreading. Default is True.",
+            f"{cls.__name__}.multithreading": "Whether to use multithreading. Default is True.",
         }
 
     def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:

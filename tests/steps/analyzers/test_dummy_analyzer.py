@@ -17,8 +17,9 @@ class TripDistanceAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
-        return dict()
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {}
 
     def analyze(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> float:
         """

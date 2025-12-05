@@ -57,7 +57,8 @@ class IntegratedScheduling(Modifier):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -68,7 +69,7 @@ class IntegratedScheduling(Modifier):
             - IntegratedScheduling.max_iterations: Maximum number of iterations to attempt
         """
         return {
-            f"{self.__class__.__name__}.max_iterations": """
+            f"{cls.__name__}.max_iterations": """
             Maximum number of iterations to attempt for integrated scheduling.
             The modifier will try to create feasible schedules by adjusting break times
             and re-running vehicle scheduling, depot assignment, and terminus placement.
@@ -340,7 +341,8 @@ class VehicleScheduling(Modifier):
         """Get the default charge type."""
         return ChargeType.DEPOT
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -355,7 +357,7 @@ class VehicleScheduling(Modifier):
             - VehicleScheduling.longer_break_time_duration: Additional break time for specified trips
         """
         return {
-            f"{self.__class__.__name__}.minimum_break_time": """
+            f"{cls.__name__}.minimum_break_time": """
             Minimum break time required between trips.
             This ensures drivers have adequate rest between consecutive trips.
 
@@ -363,7 +365,7 @@ class VehicleScheduling(Modifier):
             Type: timedelta
             Example: timedelta(minutes=15)
             """.strip(),
-            f"{self.__class__.__name__}.maximum_schedule_duration": """
+            f"{cls.__name__}.maximum_schedule_duration": """
             Maximum duration of a vehicle schedule.
             This limits how long a single vehicle can operate before returning to depot.
 
@@ -371,7 +373,7 @@ class VehicleScheduling(Modifier):
             Type: timedelta
             Example: timedelta(hours=12, minutes=30)
             """.strip(),
-            f"{self.__class__.__name__}.battery_margin": """
+            f"{cls.__name__}.battery_margin": """
             Battery safety margin as a fraction (0.0 to 1.0).
             This reduces the effective battery capacity to ensure vehicles don't fully deplete.
             For example, 0.1 means 10% of battery capacity is reserved as safety margin.
@@ -380,7 +382,7 @@ class VehicleScheduling(Modifier):
             Type: float
             Example: 0.15 (15% margin)
             """.strip(),
-            f"{self.__class__.__name__}.longer_break_time_trips": """
+            f"{cls.__name__}.longer_break_time_trips": """
             List of trip IDs that require a longer break time after completion.
             This can be used to specify trips that require additional rest or preparation time.
 
@@ -388,7 +390,7 @@ class VehicleScheduling(Modifier):
             Type: List[int]
             Example: [123, 456, 789]
             """.strip(),
-            f"{self.__class__.__name__}.longer_break_time_duration": """
+            f"{cls.__name__}.longer_break_time_duration": """
             Additional break time duration for trips specified in longer_break_time_trips.
             This duration is added on top of the minimum_break_time.
 
@@ -396,7 +398,7 @@ class VehicleScheduling(Modifier):
             Type: timedelta
             Example: timedelta(minutes=10)
             """.strip(),
-            f"{self.__class__.__name__}.charge_type": """
+            f"{cls.__name__}.charge_type": """
             The charge type to consider for scheduling optimization. When in ChargeType.DEPOT mode, the schedule is
             created in a way that respects battery constraints, making the trip sequences (blocks) only as long as
             the battery allows. In ChargeType.OPPORTUNITY mode, the optimizer assumes that vehicles can charge
@@ -610,7 +612,8 @@ class DepotAssignment(Modifier):
         """Get the default maximum number of optimization iterations."""
         return 5
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -625,7 +628,7 @@ class DepotAssignment(Modifier):
             - DepotAssignment.max_iterations: Maximum optimization iterations
         """
         return {
-            f"{self.__class__.__name__}.depot_config": """
+            f"{cls.__name__}.depot_config": """
             A list of depot configurations. Each configuration is a dict with:
             - "depot_station": Station ID or (lon, lat) tuple
             - "capacity": Depot capacity in 12m bus equivalents
@@ -636,7 +639,7 @@ class DepotAssignment(Modifier):
             Type: List[Dict]
             Example: depots_for_bvg(db_session) from eflips.x.steps.modifiers.bvg_tools
             """,
-            f"{self.__class__.__name__}.base_url": """
+            f"{cls.__name__}.base_url": """
             Base URL for the OpenRouteService (ORS) routing API.
             Used to calculate travel distances between depots and rotation start/end points.
 
@@ -644,7 +647,7 @@ class DepotAssignment(Modifier):
             Type: str
             Example: "http://mpm-v-ors.mpm.tu-berlin.de:8080/ors/"
             """,
-            f"{self.__class__.__name__}.depot_usage": """
+            f"{cls.__name__}.depot_usage": """
             Initial depot capacity usage factor (0.0 to 1.0).
             The optimizer starts with this fraction of nominal depot capacity and
             iteratively reduces it to find the minimal feasible assignment.
@@ -654,7 +657,7 @@ class DepotAssignment(Modifier):
             Type: float
             Example: 0.9 (90% capacity)
             """,
-            f"{self.__class__.__name__}.step_size": """
+            f"{cls.__name__}.step_size": """
             Capacity reduction step size per iteration (0.0 to 1.0).
             After each successful optimization, depot capacities are reduced by this factor.
             Smaller step sizes find tighter capacity bounds but take more iterations.
@@ -663,7 +666,7 @@ class DepotAssignment(Modifier):
             Type: float
             Example: 0.05 (reduce by 5% each iteration)
             """,
-            f"{self.__class__.__name__}.max_iterations": """
+            f"{cls.__name__}.max_iterations": """
             Maximum number of optimization iterations to attempt.
             The optimizer stops after this many iterations or when a solution becomes infeasible.
 
@@ -959,7 +962,8 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this analyzer.
 
@@ -969,7 +973,7 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
             This analyzer does not use any configurable parameters.
         """
         return {
-            self.__class__.__name__
+            cls.__name__
             + ".charging_power_kw": """
             The charging power in kW to assume for all charging stations during the analysis. Default is 150 kW.
             """.strip()
@@ -1152,7 +1156,8 @@ class StationElectrification(Modifier):
         termini_count = len(self._get_all_termini(session))
         return max(1, int(termini_count * 0.25))
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -1164,7 +1169,7 @@ class StationElectrification(Modifier):
             - StationElectrification.max_stations_to_electrify: Maximum number of stations to electrify
         """
         return {
-            f"{self.__class__.__name__}.charging_power_kw": """
+            f"{cls.__name__}.charging_power_kw": """
             The charging power in kW for opportunity charging stations added during
             station electrification. This parameter determines how quickly vehicles can
             charge at termini. Higher power means faster charging but may require more
@@ -1174,7 +1179,7 @@ class StationElectrification(Modifier):
             Type: float
             Example: 300.0
             """.strip(),
-            f"{self.__class__.__name__}.max_stations_to_electrify": """
+            f"{cls.__name__}.max_stations_to_electrify": """
             Maximum number of terminus stations to electrify before giving up. This prevents
             the algorithm from attempting to electrify the entire network if the schedule is
             fundamentally infeasible. If this limit is reached, an exception is raised.
