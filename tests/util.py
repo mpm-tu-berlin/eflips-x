@@ -879,7 +879,8 @@ class MultiDepotScenarioGenerator(Generator):
             **kwargs,
         )
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters accepted by this generator.
 
@@ -887,13 +888,13 @@ class MultiDepotScenarioGenerator(Generator):
             Dictionary mapping parameter names to their descriptions
         """
         return {
-            f"{self.__class__.__name__}.num_depots": "Number of depots to create in the scenario (default: 2)",
-            f"{self.__class__.__name__}.lines_per_depot": "Number of lines per depot. Must be even. Determines the number of near "
+            f"{cls.__name__}.num_depots": "Number of depots to create in the scenario (default: 2)",
+            f"{cls.__name__}.lines_per_depot": "Number of lines per depot. Must be even. Determines the number of near "
             "and far termini (default: 6)",
-            f"{self.__class__.__name__}.trips_per_line": "Number of passenger trips per line per day (default: 19)",
-            f"{self.__class__.__name__}.near_terminus_distance": "Distance from depot to near terminus in meters (default: 1000)",
-            f"{self.__class__.__name__}.far_terminus_distance": "Distance from depot to far terminus in meters (default: 4000)",
-            f"{self.__class__.__name__}.depot_ring_diameter": "Diameter of the depot ring around the center point in meters (default: 20000)",
+            f"{cls.__name__}.trips_per_line": "Number of passenger trips per line per day (default: 19)",
+            f"{cls.__name__}.near_terminus_distance": "Distance from depot to near terminus in meters (default: 1000)",
+            f"{cls.__name__}.far_terminus_distance": "Distance from depot to far terminus in meters (default: 4000)",
+            f"{cls.__name__}.depot_ring_diameter": "Diameter of the depot ring around the center point in meters (default: 20000)",
         }
 
     def generate(self, session: Session, params: Dict[str, Any]) -> Path:

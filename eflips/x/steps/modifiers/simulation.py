@@ -59,9 +59,10 @@ class DepotGenerator(Modifier):
     def default_standard_block_length(self) -> int:
         return 6
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            f"{self.__class__.__name__}.depot_wishes": """
+            f"{cls.__name__}.depot_wishes": """
 **MODE 3: Custom Configuration**
 
 A list of `DepotConfigurationWish` objects from eflips.depot.api, one for each depot station
@@ -106,7 +107,7 @@ depot_wishes = [
 
 Default: None (uses automatic generation instead)
             """.strip(),
-            f"{self.__class__.__name__}.generate_optimal_depots": """
+            f"{cls.__name__}.generate_optimal_depots": """
 **MODE 1 vs MODE 2: Automatic Generation Mode Selection**
 
 *Only used if `depot_wishes` is NOT set.*
@@ -128,7 +129,7 @@ Controls which automatic depot generation mode to use:
 
 Default: False
             """.strip(),
-            f"{self.__class__.__name__}.charging_power_kw": """
+            f"{cls.__name__}.charging_power_kw": """
 **Charging power for automatic generation modes**
 
 *Only used if `depot_wishes` is NOT set.*
@@ -141,7 +142,7 @@ default_power parameter instead.
 
 Default: 90.0 kW
             """.strip(),
-            f"{self.__class__.__name__}.standard_block_length": """
+            f"{cls.__name__}.standard_block_length": """
 **Block length for optimal layout generation**
 
 *Only used if `depot_wishes` is NOT set AND `generate_optimal_depots` is True (MODE 2).*
@@ -342,25 +343,26 @@ class Simulation(Modifier):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            f"{self.__class__.__name__}.repetition_period": """
+            f"{cls.__name__}.repetition_period": """
 The repetition period (in days) for the simulation. This defines after how many days the schedule repeats.
 It should be a timedelta object representing whole days (e.g., timedelta(days=7) for a weekly repetition).
 
 Default: auto-detected based on the scenario.
             """.strip(),
-            f"{self.__class__.__name__}.smart_charging": """
+            f"{cls.__name__}.smart_charging": """
 Set a eflips.depot.api.SmartChargingStrategy to be used during the simulation. If not set, no smart charging
 will be applied (SmartChargingStrategy.NONE).
 Default: SmartChargingStrategy.NONE
             """.strip(),
-            f"{self.__class__.__name__}.ignore_unstable_simulation": """
+            f"{cls.__name__}.ignore_unstable_simulation": """
 If True, the simulation will not raise an exception if it becomes unstable.
             
 Default: False
             """.strip(),
-            f"{self.__class__.__name__}.ignore_delayed_trips": """
+            f"{cls.__name__}.ignore_delayed_trips": """
 If True, the simulation will ignore delayed trips instead of raising an exception.
 
 Default: False

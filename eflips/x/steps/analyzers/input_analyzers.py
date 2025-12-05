@@ -44,15 +44,16 @@ class RotationInfoAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            "RotationInfoAnalyzer.rotation_ids": """
+            f"{cls.__name__}.rotation_ids": f"""
 Optional parameter to filter rotations. Can be:
 - A single rotation ID (int)
 - A list of rotation IDs (List[int])
 - None to include all rotations (default)
 
-Example: `params["RotationInfoAnalyzer.rotation_ids"] = [1, 2, 3]`
+Example: `params["{cls.__name__}.rotation_ids"] = [1, 2, 3]`
             """.strip()
         }
 
@@ -126,15 +127,16 @@ class GeographicTripPlotAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            "GeographicTripPlotAnalyzer.rotation_ids": """
+            f"{cls.__name__}.rotation_ids": f"""
 Optional parameter to filter rotations. Can be:
 - A single rotation ID (int)
 - A list of rotation IDs (List[int])
 - None to include all rotations (default)
 
-Example: `params["GeographicTripPlotAnalyzer.rotation_ids"] = [1, 2, 3]`
+Example: `params[f"{cls.__name__}.rotation_ids"] = [1, 2, 3]`
             """.strip()
         }
 
@@ -205,12 +207,13 @@ class SingleRotationInfoAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            "SingleRotationInfoAnalyzer.rotation_id": """
+            f"{cls.__name__}.rotation_id": f"""
 **Required** parameter specifying the rotation ID to analyze.
 
-Example: `params["SingleRotationInfoAnalyzer.rotation_id"] = 1`
+Example: `params["{cls.__name__}.rotation_id"] = 1`
             """.strip()
         }
 

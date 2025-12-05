@@ -63,8 +63,9 @@ class PipelineStep(ABC):
         self.config = kwargs
         self._prefect_task: Optional[PrefectTask] = None
 
+    @classmethod
     @abstractmethod
-    def document_params(self) -> Dict[str, str]:
+    def document_params(cls) -> Dict[str, str]:
         """
         This method documents the parameters of the generator. It returns a dictionary where the keys are the parameter
         and the values are a description of the parameter. The values may use markdown formatting. They may be

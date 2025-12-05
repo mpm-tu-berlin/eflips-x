@@ -41,7 +41,8 @@ class DepartureArrivalSocAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {}
 
     def analyze(
@@ -108,15 +109,16 @@ class DepotEventAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            "DepotEventAnalyzer.vehicle_ids": """
+            f"{cls.__name__}.vehicle_ids": f"""
 Optional parameter to filter vehicles. Can be:
 - A single vehicle ID (int)
 - A list of vehicle IDs (List[int])
 - None to include all vehicles (default)
 
-Example: `params["DepotEventAnalyzer.vehicle_ids"] = [1, 2, 3]`
+Example: `params["{cls.__name__}.vehicle_ids"] = [1, 2, 3]`
             """.strip()
         }
 
@@ -183,37 +185,38 @@ class PowerAndOccupancyAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            "PowerAndOccupancyAnalyzer.area_id": """
+            f"{cls.__name__}.area_id": f"""
 **Required** parameter specifying the area ID(s) to analyze. Can be:
 - A single area ID (int)
 - A list of area IDs (Iterable[int])
 
-Example: `params["PowerAndOccupancyAnalyzer.area_id"] = [1, 2]`
+Example: `params["{cls.__name__}.area_id"] = [1, 2]`
             """.strip(),
-            "PowerAndOccupancyAnalyzer.temporal_resolution": """
+            f"{cls.__name__}.temporal_resolution": f"""
 Temporal resolution of the timeseries in seconds. Default is 60 seconds.
 
-Example: `params["PowerAndOccupancyAnalyzer.temporal_resolution"] = 120`
+Example: `params["{cls.__name__}.temporal_resolution"] = 120`
             """.strip(),
-            "PowerAndOccupancyAnalyzer.station_id": """
+            f"{cls.__name__}.station_id": f"""
 Optional station ID(s) for opportunity charging events. Can be:
 - A single station ID (int)
 - A list of station IDs (Iterable[int])
 - None to exclude stations (default)
 
-Example: `params["PowerAndOccupancyAnalyzer.station_id"] = [1, 2]`
+Example: `params["{cls.__name__}.station_id"] = [1, 2]`
             """.strip(),
-            "PowerAndOccupancyAnalyzer.sim_start_time": """
+            f"{cls.__name__}.sim_start_time": f"""
 Optional start time to filter the timeseries. If set, no data before this time is included.
 
-Example: `params["PowerAndOccupancyAnalyzer.sim_start_time"] = datetime(...)`
+Example: `params["{cls.__name__}.sim_start_time"] = datetime(...)`
             """.strip(),
-            "PowerAndOccupancyAnalyzer.sim_end_time": """
+            f"{cls.__name__}.sim_end_time": f"""
 Optional end time to filter the timeseries. If set, no data after this time is included.
 
-Example: `params["PowerAndOccupancyAnalyzer.sim_end_time"] = datetime(...)`
+Example: `params["{cls.__name__}.sim_end_time"] = datetime(...)`
             """.strip(),
         }
 
@@ -292,7 +295,8 @@ class SpecificEnergyConsumptionAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {}
 
     def analyze(
@@ -358,17 +362,18 @@ class VehicleSocAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            "VehicleSocAnalyzer.vehicle_id": """
+            f"{cls.__name__}.vehicle_id": f"""
 **Required** parameter specifying the vehicle ID to analyze.
 
-Example: `params["VehicleSocAnalyzer.vehicle_id"] = 1`
+Example: `params["{cls.__name__}.vehicle_id"] = 1`
             """.strip(),
-            "VehicleSocAnalyzer.timezone": """
+            f"{cls.__name__}.timezone": f"""
 Optional timezone for the visualization. Default is Europe/Berlin.
 
-Example: `params["VehicleSocAnalyzer.timezone"] = ZoneInfo("UTC")`
+Example: `params["{cls.__name__}.timezone"] = ZoneInfo("UTC")`
             """.strip(),
         }
 
@@ -446,22 +451,23 @@ class DepotActivityAnalyzer(Analyzer):
     def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         return {
-            "DepotActivityAnalyzer.depot_id": """
+            f"{cls.__name__}.depot_id": f"""
 **Required** parameter specifying the depot ID to analyze.
 
-Example: `params["DepotActivityAnalyzer.depot_id"] = 1`
+Example: `params["{cls.__name__}.depot_id"] = 1`
             """.strip(),
-            "DepotActivityAnalyzer.animation_start": """
+            f"{cls.__name__}.animation_start": f"""
 **Required** parameter specifying the start time of the animation range.
 
-Example: `params["DepotActivityAnalyzer.animation_start"] = datetime(...)`
+Example: `params["{cls.__name__}.animation_start"] = datetime(...)`
             """.strip(),
-            "DepotActivityAnalyzer.animation_end": """
+            f"{cls.__name__}.animation_end": f"""
 **Required** parameter specifying the end time of the animation range.
 
-Example: `params["DepotActivityAnalyzer.animation_end"] = datetime(...)`
+Example: `params["{cls.__name__}.animation_end"] = datetime(...)`
             """.strip(),
         }
 

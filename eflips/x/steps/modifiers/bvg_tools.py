@@ -453,7 +453,8 @@ class RemoveUnusedVehicleTypes(Modifier):
             "DD": ["DL", "D"],
         }
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -463,14 +464,14 @@ class RemoveUnusedVehicleTypes(Modifier):
             Dictionary documenting the parameters of this modifier.
         """
         return {
-            f"{self.__class__.__name__}.new_vehicle_types": """
+            f"{cls.__name__}.new_vehicle_types": """
 List of `VehicleType` instances to create in the database. Each instance should have a unique
 `name_short` property that doesn't conflict with existing vehicle types in the database.
 
 **Default:** Three vehicle types (EN: single decker, GN: articulated bus, DD: double decker)
 with BVG-specific configurations.
             """.strip(),
-            f"{self.__class__.__name__}.vehicle_type_conversion": """
+            f"{cls.__name__}.vehicle_type_conversion": """
 Dictionary mapping new vehicle type short names (keys) to lists of old vehicle type short names
 (values). The keys must match the `name_short` values of the new vehicle types. The values must
 cover all existing vehicle types in the database that should be kept.
@@ -487,7 +488,7 @@ old type short names to convert.
 }
 ```
             """.strip(),
-            f"{self.__class__.__name__}.override_consumption_lut": """
+            f"{cls.__name__}.override_consumption_lut": """
 This should be a Dict[str, float | Path], with the key being the short name of the (new)
 vehicle type to override. If the value is a float, a default LUT based on Ji(2022) will 
 be created using eflips-model and it's consumption will be scaled by multiplying with the
@@ -789,7 +790,8 @@ class RemoveUnusedRotations(Modifier):
             "BF MDA",
         ]
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -799,7 +801,7 @@ class RemoveUnusedRotations(Modifier):
             Dictionary documenting the parameters of this modifier.
         """
         return {
-            f"{self.__class__.__name__}.depot_station_short_names": """
+            f"{cls.__name__}.depot_station_short_names": """
 List of station short names that represent depots/garages where rotations should start and end.
 Only rotations that start and end at the same station from this list will be kept.
 
@@ -945,7 +947,8 @@ class MergeStations(Modifier):
         """Get the default fuzzy name matching percentage threshold."""
         return 80.0
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -955,7 +958,7 @@ class MergeStations(Modifier):
             Dictionary documenting the parameters of this modifier.
         """
         return {
-            f"{self.__class__.__name__}.max_distance_meters": """
+            f"{cls.__name__}.max_distance_meters": """
 Maximum distance in meters between two stations to consider them as potentially the same station.
 Stations beyond this distance will never be merged, regardless of name similarity.
 
@@ -965,7 +968,7 @@ Stations beyond this distance will never be merged, regardless of name similarit
 
 **Note:** This uses geospatial distance calculation (ST_Distance).
             """.strip(),
-            f"{self.__class__.__name__}.match_percentage": """
+            f"{cls.__name__}.match_percentage": """
 Minimum fuzzy name matching percentage required to merge two nearby stations.
 Uses the Levenshtein distance ratio (0-100) to compare station names.
 
@@ -1135,7 +1138,8 @@ class ReduceToNDaysNDepots(Modifier):
         """Get the default number of depots to keep."""
         return 2
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -1145,7 +1149,7 @@ class ReduceToNDaysNDepots(Modifier):
             Dictionary documenting the parameters of this modifier.
         """
         return {
-            f"{self.__class__.__name__}.num_days": """
+            f"{cls.__name__}.num_days": """
 Number of days with the most trips to keep in the dataset. The modifier will identify the days
 with the highest trip counts and remove all rotations that don't start on one of these days.
 
@@ -1156,7 +1160,7 @@ with the highest trip counts and remove all rotations that don't start on one of
 **Note:** Days with fewer trips (which might be just overflow into the wee hours of the following
 day) are intentionally avoided by selecting days with the MOST trips.
             """.strip(),
-            f"{self.__class__.__name__}.num_depots": """
+            f"{cls.__name__}.num_depots": """
 Number of depots with the fewest rotations to keep in the dataset. The modifier will identify
 depot stations (where rotations start/end) with the fewest rotations and keep only those.
 

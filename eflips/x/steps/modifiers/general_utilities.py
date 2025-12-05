@@ -36,7 +36,8 @@ class RemoveUnusedData(Modifier):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -145,7 +146,8 @@ class AddTemperatures(Modifier):
         """Get the default temperature value in Celsius."""
         return -12.0
 
-    def document_params(self) -> Dict[str, str]:
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
         """
         Document the parameters of this modifier.
 
@@ -156,7 +158,7 @@ class AddTemperatures(Modifier):
             - AddTemperatures.temperature_celsius: Temperature value in degrees Celsius
         """
         return {
-            f"{self.__class__.__name__}.temperature_celsius": """
+            f"{cls.__name__}.temperature_celsius": """
             Temperature value in degrees Celsius to apply to all scenarios.
             This will be used as a constant temperature throughout all time.
 
