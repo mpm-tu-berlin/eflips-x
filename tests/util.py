@@ -95,12 +95,14 @@ def route(start_lat: float, start_lon: float, end_lat: float, end_lon: float) ->
         return distance, None
 
     # Get API key from environment
-    api_key = os.environ.get("OPENROUTESERVICE_API_KEY")
-    if not api_key:
+    if "OPENROUTESERVICE_API_KEY" in os.environ:
+        api_key = os.environ["OPENROUTESERVICE_API_KEY"]
+    else:
         # If no API key, return None for geometry (will fall back to straight line)
         warnings.warn(
             "No OpenRouteService API key provided. Make sure your server does not need an API key."
         )
+        api_key = None
 
     # Get base URL from environment, or use official API
     base_url = os.environ.get("OPENROUTESERVICE_BASE_URL")
