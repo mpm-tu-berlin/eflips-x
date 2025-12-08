@@ -371,7 +371,7 @@ def depots_for_bvg(
     return depot_list
 
 
-class RemoveUnusedVehicleTypes(Modifier):
+class SetUpBvgVehicleTypes(Modifier):
     """
     Remove unused vehicle types from a just-imported BVGXML dataset.
 
