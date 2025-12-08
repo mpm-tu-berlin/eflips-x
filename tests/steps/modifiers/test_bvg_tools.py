@@ -26,15 +26,15 @@ from sqlalchemy.orm import Session
 
 from eflips.x.framework import PipelineContext
 from eflips.x.steps.modifiers.bvg_tools import (
-    RemoveUnusedVehicleTypes,
+    SetUpBvgVehicleTypes,
     RemoveUnusedRotations,
     MergeStations,
     ReduceToNDaysNDepots,
 )
 
 
-class TestRemoveUnusedVehicleTypes:
-    """Test suite for RemoveUnusedVehicleTypes modifier."""
+class TestSetUpBvgVehicleTypes:
+    """Test suite for SetUpBvgVehicleTypes modifier."""
 
     @pytest.fixture
     def scenario_with_vehicle_types(self, db_session: Session) -> Scenario:
@@ -196,8 +196,8 @@ class TestRemoveUnusedVehicleTypes:
     def test_remove_unused_vehicle_types_with_defaults(
         self, temp_db: Path, scenario_with_vehicle_types, db_session: Session
     ):
-        """Test RemoveUnusedVehicleTypes modifier using default parameters."""
-        modifier = RemoveUnusedVehicleTypes()
+        """Test SetUpBvgVehicleTypes modifier using default parameters."""
+        modifier = SetUpBvgVehicleTypes()
 
         # Create pipeline context
         context = PipelineContext(work_dir=temp_db.parent, current_db=temp_db)
@@ -260,14 +260,14 @@ class TestRemoveUnusedVehicleTypes:
     def test_remove_unused_vehicle_types_with_multiplier(
         self, temp_db: Path, scenario_with_vehicle_types, db_session: Session
     ):
-        """Test RemoveUnusedVehicleTypes modifier using default parameters."""
-        modifier = RemoveUnusedVehicleTypes()
+        """Test SetUpBvgVehicleTypes modifier using default parameters."""
+        modifier = SetUpBvgVehicleTypes()
 
         # Create pipeline context
         context = PipelineContext(work_dir=temp_db.parent, current_db=temp_db)
 
         params = {
-            "RemoveUnusedVehicleTypes.override_consumption_lut": {
+            "SetUpBvgVehicleTypes.override_consumption_lut": {
                 "GN": 2.0,
             }
         }
@@ -302,8 +302,8 @@ class TestRemoveUnusedVehicleTypes:
     def test_remove_unused_vehicle_types_with_path(
         self, temp_db: Path, scenario_with_vehicle_types, db_session: Session
     ):
-        """Test RemoveUnusedVehicleTypes modifier using default parameters."""
-        modifier = RemoveUnusedVehicleTypes()
+        """Test SetUpBvgVehicleTypes modifier using default parameters."""
+        modifier = SetUpBvgVehicleTypes()
 
         # Create pipeline context
         context = PipelineContext(work_dir=temp_db.parent, current_db=temp_db)
@@ -312,7 +312,7 @@ class TestRemoveUnusedVehicleTypes:
         consumption_lut_path = project_root / "data" / "input" / "consumption_lut_gn.xlsx"
 
         params = {
-            "RemoveUnusedVehicleTypes.override_consumption_lut": {
+            "SetUpBvgVehicleTypes.override_consumption_lut": {
                 "GN": consumption_lut_path.as_posix(),
             }
         }
@@ -347,8 +347,8 @@ class TestRemoveUnusedVehicleTypes:
     def test_remove_unused_vehicle_types_with_custom_params(
         self, temp_db: Path, scenario_with_vehicle_types
     ):
-        """Test RemoveUnusedVehicleTypes modifier with custom parameters."""
-        modifier = RemoveUnusedVehicleTypes()
+        """Test SetUpBvgVehicleTypes modifier with custom parameters."""
+        modifier = SetUpBvgVehicleTypes()
 
         # Create custom vehicle types
         scenario_id = scenario_with_vehicle_types.id
@@ -385,8 +385,8 @@ class TestRemoveUnusedVehicleTypes:
 
         # Create pipeline context with custom parameters
         params = {
-            "RemoveUnusedVehicleTypes.new_vehicle_types": [custom_vt1, custom_vt2],
-            "RemoveUnusedVehicleTypes.vehicle_type_conversion": custom_conversion,
+            "SetUpBvgVehicleTypes.new_vehicle_types": [custom_vt1, custom_vt2],
+            "SetUpBvgVehicleTypes.vehicle_type_conversion": custom_conversion,
         }
 
         # Run modifier
@@ -428,7 +428,7 @@ class TestRemoveUnusedVehicleTypes:
 
     def test_validation_duplicate_short_names(self, temp_db: Path, scenario_with_vehicle_types):
         """Test that duplicate name_short values in new vehicle types raise an error."""
-        modifier = RemoveUnusedVehicleTypes()
+        modifier = SetUpBvgVehicleTypes()
 
         scenario_id = scenario_with_vehicle_types.id
         vt1 = VehicleType(
@@ -445,8 +445,8 @@ class TestRemoveUnusedVehicleTypes:
         )
 
         params = {
-            "RemoveUnusedVehicleTypes.new_vehicle_types": [vt1, vt2],
-            "RemoveUnusedVehicleTypes.vehicle_type_conversion": {"SAME": ["GN"]},
+            "SetUpBvgVehicleTypes.new_vehicle_types": [vt1, vt2],
+            "SetUpBvgVehicleTypes.vehicle_type_conversion": {"SAME": ["GN"]},
         }
 
         db_url = f"sqlite:///{temp_db.absolute().as_posix()}"
@@ -462,7 +462,7 @@ class TestRemoveUnusedVehicleTypes:
 
     def test_validation_conversion_keys_mismatch(self, temp_db: Path, scenario_with_vehicle_types):
         """Test that mismatched conversion keys and new vehicle types raise an error."""
-        modifier = RemoveUnusedVehicleTypes()
+        modifier = SetUpBvgVehicleTypes()
 
         scenario_id = scenario_with_vehicle_types.id
         vt1 = VehicleType(
@@ -474,8 +474,8 @@ class TestRemoveUnusedVehicleTypes:
 
         # Conversion mapping has different key than vehicle type short name
         params = {
-            "RemoveUnusedVehicleTypes.new_vehicle_types": [vt1],
-            "RemoveUnusedVehicleTypes.vehicle_type_conversion": {"WRONG_KEY": ["GN"]},
+            "SetUpBvgVehicleTypes.new_vehicle_types": [vt1],
+            "SetUpBvgVehicleTypes.vehicle_type_conversion": {"WRONG_KEY": ["GN"]},
         }
 
         db_url = f"sqlite:///{temp_db.absolute().as_posix()}"
@@ -491,7 +491,7 @@ class TestRemoveUnusedVehicleTypes:
 
     def test_validation_conflicting_names(self, temp_db: Path, scenario_with_vehicle_types):
         """Test that conflicting new vehicle type names raise an error."""
-        modifier = RemoveUnusedVehicleTypes()
+        modifier = SetUpBvgVehicleTypes()
 
         # Add a vehicle type to the database that won't be converted
         db_url = f"sqlite:///{temp_db.absolute().as_posix()}"
@@ -522,8 +522,8 @@ class TestRemoveUnusedVehicleTypes:
             )
 
             params = {
-                "RemoveUnusedVehicleTypes.new_vehicle_types": [vt_conflict],
-                "RemoveUnusedVehicleTypes.vehicle_type_conversion": {
+                "SetUpBvgVehicleTypes.new_vehicle_types": [vt_conflict],
+                "SetUpBvgVehicleTypes.vehicle_type_conversion": {
                     "STAYS": ["GN"]  # Trying to map GN to STAYS, but STAYS already exists
                 },
             }
@@ -537,13 +537,13 @@ class TestRemoveUnusedVehicleTypes:
 
     def test_document_params(self):
         """Test that document_params returns expected parameter documentation."""
-        modifier = RemoveUnusedVehicleTypes()
+        modifier = SetUpBvgVehicleTypes()
         docs = modifier.document_params()
 
-        assert "RemoveUnusedVehicleTypes.new_vehicle_types" in docs
-        assert "RemoveUnusedVehicleTypes.vehicle_type_conversion" in docs
-        assert "VehicleType" in docs["RemoveUnusedVehicleTypes.new_vehicle_types"]
-        assert "Dict[str, List[str]]" in docs["RemoveUnusedVehicleTypes.vehicle_type_conversion"]
+        assert "SetUpBvgVehicleTypes.new_vehicle_types" in docs
+        assert "SetUpBvgVehicleTypes.vehicle_type_conversion" in docs
+        assert "VehicleType" in docs["SetUpBvgVehicleTypes.new_vehicle_types"]
+        assert "Dict[str, List[str]]" in docs["SetUpBvgVehicleTypes.vehicle_type_conversion"]
 
 
 class TestRemoveUnusedRotations:
