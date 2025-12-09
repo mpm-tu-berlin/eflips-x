@@ -737,7 +737,7 @@ class DepotAssignment(Modifier):
         params : Dict[str, Any]
             Pipeline parameters:
             - DepotAssignment.depot_config (required): List of depot configuration dicts
-            - DepotAssignment.base_url (required): ORS routing service URL
+            - DepotAssignment.base_url (optional): ORS routing service URL. Required, but tries to load it from environment variables if unset.
             - DepotAssignment.depot_usage (optional): Initial depot capacity usage
             - DepotAssignment.step_size (optional): Capacity reduction step per iteration
             - DepotAssignment.max_iterations (optional): Max optimization iterations
