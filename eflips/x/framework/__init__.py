@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, Protocol
+from typing import Any, Dict, List, Optional, Union, Protocol, Generator as TypingGenerator, Tuple
 
 import eflips.model
 import sqlalchemy.orm.session
@@ -45,12 +45,14 @@ class PipelineContext:
         return db_path
 
     @contextmanager
-    def get_session(self):
+    def get_session(self) -> TypingGenerator[sqlalchemy.orm.session.Session, None, None]:
         """
         Context manager to get a SQLAlchemy session for the current database.
         :yield: SQLAlchemy session
         :return: None
         """
+        if not self.current_db:
+            raise ValueError("No current database set in PipelineContext.")
         db_url = f"sqlite:////{self.current_db.absolute().as_posix()}"
         db_engine = eflips.model.create_engine(db_url)
         session = Session(db_engine)
@@ -170,7 +172,9 @@ class PipelineStep(ABC):
         return hash_sha256.hexdigest()
 
     @staticmethod
-    def find_project_root(marker_files=("pyproject.toml", "poetry.lock", ".git")) -> Path:
+    def find_project_root(
+        marker_files: Tuple[str, ...] = ("pyproject.toml", "poetry.lock", ".git")
+    ) -> Path:
         """Find project root by walking up from current file until a marker is found."""
         current = Path(__file__).resolve().parent
 

@@ -21,6 +21,7 @@ from tempfile import gettempdir
 from typing import List, Any, Dict, Type, Optional
 
 import dash_cytoscape as cyto  # type: ignore[import-untyped]
+import eflips.model
 import folium  # type: ignore[import-untyped]
 import matplotlib
 import plotly  # type: ignore[import-untyped]
@@ -113,7 +114,9 @@ def execute_and_save_simple_analyzer(
     save_visualization(vis, output_file, analyzer)
 
 
-def query_all_ids(context: PipelineContext, model_class: Type, id_attr: str = "id") -> List[int]:
+def query_all_ids(
+    context: PipelineContext, model_class: Type[eflips.model.Base], id_attr: str = "id"
+) -> List[int]:
     """
     Query all IDs for a given model class.
 
