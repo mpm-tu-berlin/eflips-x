@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Union, Protocol
 import eflips.model
 import sqlalchemy.orm.session
 from eflips.model import Base
-from prefect import task
+from prefect import task, flow
 from prefect.artifacts import create_markdown_artifact
 from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import Session
@@ -86,6 +86,13 @@ class PipelineStep(ABC):
         """Execute the step logic. To be implemented by subclasses."""
         pass
 
+    @staticmethod
+    def _move_to_failed(db_path: Path) -> None:
+        """Move the given database file to a .failed extension with a timestamp."""
+        now = datetime.now().isoformat()
+        failed_db = db_path.with_suffix(f".{now}.failed")
+        shutil.move(db_path, failed_db)
+
     def execute(self, context: PipelineContext) -> None:
         """Execute the step with Prefect task wrapping."""
         if self._prefect_task is None:
@@ -101,9 +108,7 @@ class PipelineStep(ABC):
             self._prefect_task(context=context, output_db=output_db)
         except Exception as e:
             # If generation fails, move the incomplete DB file to a .failed extension
-            now = datetime.now().isoformat()
-            failed_db = output_db.with_suffix(f"-{now}.failed")
-            shutil.move(output_db, failed_db)
+            self._move_to_failed(output_db)
             raise e
 
         context.set_current_db(output_db)
@@ -298,9 +303,7 @@ class Modifier(PipelineStep):
                 pass
             session.close()
             # If modification fails, move the incomplete DB file to a .failed extension
-            now = datetime.now().isoformat()
-            failed_db = output_db.with_suffix(f".{now}.failed")
-            shutil.move(output_db, failed_db)
+            self._move_to_failed(output_db)
             raise e
         finally:
             db_engine.dispose()
@@ -376,11 +379,7 @@ class Analyzer(PipelineStep):
                 result = self._prefect_task(context=context, output_db=output_db)
             except Exception as e:
                 # If generation fails, move the incomplete DB file to a .failed extension
-                now = datetime.now().isoformat()
-                dir_for_failed = context.work_dir / "failed_at_analyzer"
-                dir_for_failed.mkdir(parents=True, exist_ok=True)
-                failed_db = dir_for_failed / output_db.with_suffix(f".{now}.failed")
-                shutil.move(output_db, failed_db)
+                self._move_to_failed(output_db)
                 raise e
         return result
 
