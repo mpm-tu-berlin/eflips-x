@@ -4,10 +4,12 @@ eflips-x modules.
 """
 
 import hashlib
+import logging
 import shutil
 import tempfile
 import warnings
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +18,7 @@ from typing import Any, Dict, List, Optional, Union, Protocol
 import eflips.model
 import sqlalchemy.orm.session
 from eflips.model import Base
-from prefect import task, flow
+from prefect import task
 from prefect.artifacts import create_markdown_artifact
 from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import Session
@@ -42,6 +44,22 @@ class PipelineContext:
         self.current_db = db_path
         return db_path
 
+    @contextmanager
+    def get_session(self):
+        """
+        Context manager to get a SQLAlchemy session for the current database.
+        :yield: SQLAlchemy session
+        :return: None
+        """
+        db_url = f"sqlite:////{self.current_db.absolute().as_posix()}"
+        db_engine = eflips.model.create_engine(db_url)
+        session = Session(db_engine)
+        try:
+            yield session
+        finally:
+            session.close()
+            db_engine.dispose()
+
 
 class PrefectTask(Protocol):
     """Here, we specify the function signature for Prefect tasks used in PipelineStep."""
@@ -62,6 +80,7 @@ class PipelineStep(ABC):
         self.cache_enabled = cache_enabled
         self.config = kwargs
         self._prefect_task: Optional[PrefectTask] = None
+        self.logger = logging.getLogger(__name__)
 
     @classmethod
     @abstractmethod
@@ -103,13 +122,8 @@ class PipelineStep(ABC):
 
         output_db = context.get_next_db_path(self.__class__.__name__)
 
-        try:
-            assert self._prefect_task is not None
-            self._prefect_task(context=context, output_db=output_db)
-        except Exception as e:
-            # If generation fails, move the incomplete DB file to a .failed extension
-            self._move_to_failed(output_db)
-            raise e
+        assert self._prefect_task is not None
+        self._prefect_task(context=context, output_db=output_db)
 
         context.set_current_db(output_db)
 
@@ -143,7 +157,8 @@ class PipelineStep(ABC):
         """Create markdown for artifact logging. To be implemented by subclasses."""
         pass
 
-    def _compute_file_hash(self, filepath: Path) -> str:
+    @staticmethod
+    def _compute_file_hash(filepath: Path) -> str:
         """Compute SHA256 hash of a file."""
         if not filepath.exists():
             return "missing"
@@ -154,9 +169,22 @@ class PipelineStep(ABC):
                 hash_sha256.update(chunk)
         return hash_sha256.hexdigest()
 
+    @staticmethod
+    def find_project_root(marker_files=("pyproject.toml", "poetry.lock", ".git")) -> Path:
+        """Find project root by walking up from current file until a marker is found."""
+        current = Path(__file__).resolve().parent
+
+        for parent in [current, *current.parents]:
+            if any((parent / marker).exists() for marker in marker_files):
+                return parent
+
+        raise FileNotFoundError(f"Could not find project root (looked for {marker_files})")
+
     def _compute_poetry_lock_hash(self) -> str:
         """Hash poetry.lock for dependency tracking."""
-        poetry_lock = Path("poetry.lock")
+        project_root = self.find_project_root()
+        poetry_lock = project_root / "poetry.lock"
+
         if poetry_lock.exists():
             return self._compute_file_hash(poetry_lock)
         else:
@@ -200,7 +228,11 @@ class Generator(PipelineStep):
             params_hash = hashlib.sha256(params_str.encode()).hexdigest()[:8]
             key_parts.append(f"params:{params_hash}")
 
-        return ":".join(key_parts)
+        # Combine it all and hash to create a final key
+        final_key = ":".join(key_parts)
+        self.logger.debug(f"Computed cache key for {self.__class__.__name__}: {final_key}")
+
+        return hashlib.sha256(final_key.encode()).hexdigest()
 
     def execute_impl(self, context: PipelineContext, output_db: Path) -> None:
         """Execute generator: create new database."""
@@ -274,7 +306,11 @@ class Modifier(PipelineStep):
             params_hash = hashlib.sha256(params_str.encode()).hexdigest()[:8]
             key_parts.append(f"params:{params_hash}")
 
-        return ":".join(key_parts)
+        # Combine it all and hash to create a final key
+        final_key = ":".join(key_parts)
+        self.logger.debug(f"Computed cache key for {self.__class__.__name__}: {final_key}")
+
+        return hashlib.sha256(final_key.encode()).hexdigest()
 
     def execute_impl(self, context: PipelineContext, output_db: Path) -> None:
         """Execute modifier: copy database and modify it."""
@@ -357,7 +393,11 @@ class Analyzer(PipelineStep):
             params_hash = hashlib.sha256(params_str.encode()).hexdigest()[:8]
             key_parts.append(f"params:{params_hash}")
 
-        return ":".join(key_parts)
+        # Combine it all and hash to create a final key
+        final_key = ":".join(key_parts)
+        self.logger.debug(f"Computed cache key for {self.__class__.__name__}: {final_key}")
+
+        return hashlib.sha256(final_key.encode()).hexdigest()
 
     def execute(self, context: PipelineContext) -> Any:
         """
