@@ -5,6 +5,7 @@ These analyzers wrap the eflips.eval.input module's prepare/visualize functions
 to make them usable within the eflips-x pipeline framework.
 """
 
+import json
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
@@ -258,6 +259,64 @@ Example: `params["{cls.__name__}.rotation_id"] = 1`
         result = eval_input_prepare.single_rotation_info(rotation_id, session)
 
         return result
+
+    def export_cytoscape_html(
+        self, cytoscape: cyto.Cytoscape, filename="graph.html", layout="cose"
+    ):
+        """Export Cytoscape elements to a self-contained HTML file."""
+
+        elements = cytoscape.elements
+
+        html_template = f"""<!DOCTYPE html>
+    <html>
+    <head>
+        <title>Cytoscape Graph</title>
+        <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+        <style>
+            #cy {{
+                width: 100%;
+                height: 100vh;
+                background-color: #f5f5f5;
+            }}
+        </style>
+    </head>
+    <body>
+        <div id="cy"></div>
+        <script>
+            var cy = cytoscape({{
+                container: document.getElementById('cy'),
+                elements: {json.dumps(elements)},
+                layout: {{ name: '{layout}' }},
+                style: [
+                    {{
+                        selector: 'node',
+                        style: {{
+                            'label': 'data(label)',
+                            'background-color': '#0074D9',
+                            'color': '#fff',
+                            'text-valign': 'center',
+                            'text-halign': 'center'
+                        }}
+                    }},
+                    {{
+                        selector: 'edge',
+                        style: {{
+                            'width': 2,
+                            'line-color': '#ccc',
+                            'target-arrow-color': '#ccc',
+                            'target-arrow-shape': 'triangle',
+                            'curve-style': 'bezier'
+                        }}
+                    }}
+                ]
+            }});
+        </script>
+    </body>
+    </html>"""
+
+        with open(filename, "w") as f:
+            f.write(html_template)
+        self.logger.info(f"Exported to {filename}")
 
     @staticmethod
     def visualize(prepared_data: pd.DataFrame) -> cyto.Cytoscape:
