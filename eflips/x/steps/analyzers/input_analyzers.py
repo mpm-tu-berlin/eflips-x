@@ -6,6 +6,7 @@ to make them usable within the eflips-x pipeline framework.
 """
 
 import json
+from pathlib import Path
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
@@ -261,8 +262,8 @@ Example: `params["{cls.__name__}.rotation_id"] = 1`
         return result
 
     def export_cytoscape_html(
-        self, cytoscape: cyto.Cytoscape, filename="graph.html", layout="cose"
-    ):
+        self, cytoscape: cyto.Cytoscape, filename: str | Path, layout: str = "cose"
+    ) -> None:
         """Export Cytoscape elements to a self-contained HTML file."""
 
         elements = cytoscape.elements
