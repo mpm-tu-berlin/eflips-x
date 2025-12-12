@@ -14,6 +14,7 @@ from eflips.x.steps.analyzers.output_analyzers import (
     DepartureArrivalSocAnalyzer,
     DepotActivityAnalyzer,
     DepotEventAnalyzer,
+    InteractiveMapAnalyzer,
     PowerAndOccupancyAnalyzer,
     SpecificEnergyConsumptionAnalyzer,
     VehicleSocAnalyzer,
@@ -27,6 +28,7 @@ __all__ = [
     # Output analyzers
     "DepartureArrivalSocAnalyzer",
     "DepotEventAnalyzer",
+    "InteractiveMapAnalyzer",
     "PowerAndOccupancyAnalyzer",
     "SpecificEnergyConsumptionAnalyzer",
     "VehicleSocAnalyzer",
