@@ -228,25 +228,34 @@ Example: `params["{cls.__name__}.sim_end_time"] = datetime(...)`
 
         Args:
             session: SQLAlchemy session connected to the eflips-model database
-            params: Analysis parameters (must include area_id)
+            params: Analysis parameters (must include either area_id or station_id, but not both)
 
         Returns:
             DataFrame with power and occupancy timeseries
 
         Raises:
-            ValueError: If area_id parameter is not provided
+            ValueError: If both area_id and station_id are set, or neither is set
         """
 
-        # Extract required parameter
+        # Extract parameters
         area_id = params.get(f"{self.__class__.__name__}.area_id")
-        if area_id is None:
-            raise ValueError(
-                f"Required parameter '{self.__class__.__name__}.area_id' not provided"
-            )
+        station_id = params.get(f"{self.__class__.__name__}.station_id", None)
+
+        # XOR validation: exactly one must be set
+        area_id_set = area_id is not None and (not isinstance(area_id, list) or len(area_id) > 0)
+        station_id_set = station_id is not None
+
+        if area_id_set and station_id_set:
+            raise ValueError("Cannot set both area_id and station_id")
+        if not area_id_set and not station_id_set:
+            raise ValueError("Must set either area_id or station_id")
+
+        # If only station_id is set, use empty list for area_id
+        if station_id_set and not area_id_set:
+            area_id = []
 
         # Extract optional parameters
         temporal_resolution = params.get(f"{self.__class__.__name__}.temporal_resolution", 60)
-        station_id = params.get(f"{self.__class__.__name__}.station_id", None)
         sim_start_time = params.get(f"{self.__class__.__name__}.sim_start_time", None)
         sim_end_time = params.get(f"{self.__class__.__name__}.sim_end_time", None)
 
@@ -537,4 +546,103 @@ Example: `params["{cls.__name__}.animation_end"] = datetime(...)`
         area_blocks = depot_layout(depot_id, session)
         return eval_output_visualize.depot_activity_animation(
             area_blocks, area_occupancy, animation_range, time_resolution
+        )
+
+
+class InteractiveMapAnalyzer(Analyzer):
+    """
+    Analyzer for creating interactive map visualization.
+
+    Prepares data for an interactive folium map showing depots, routes,
+    charging stations, and termini. Supports multiple scenarios.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.scenario_ids": f"""
+Optional parameter specifying the scenario ID(s) to include on the map. Can be:
+- A single scenario ID (int)
+- A list of scenario IDs (List[int])
+- None to auto-detect the scenario (default)
+
+Example: `params["{cls.__name__}.scenario_ids"] = [1, 2]`
+            """.strip(),
+        }
+
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Prepare all data needed for the interactive map visualization.
+
+        This function extracts and organizes data for creating an interactive folium map
+        showing depots, routes, charging stations, and termini. Supports multiple scenarios.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database
+            params: Analysis parameters (scenario_ids is optional)
+
+        Returns:
+            Dictionary with all map data organized by scenario
+
+        The returned dictionary has the following structure:
+        {
+            "scenarios": {
+                scenario_id: {
+                    "name": scenario name,
+                    "name_short": short name,
+                    "depots": [...],
+                    "routes": [...],
+                    "termini_electrified": [...],
+                    "termini_unelectrified": [...]
+                }
+            },
+            "map_center": {"latitude": float, "longitude": float},
+            "global_color_map": {depot_id: hex_color}
+        }
+        """
+        # Extract optional parameter
+        scenario_ids = params.get(f"{self.__class__.__name__}.scenario_ids")
+
+        # Auto-detect scenario_id if not provided
+        if scenario_ids is None:
+            scenario = session.query(Scenario).one()
+            scenario_ids = scenario.id
+
+        # Call eflips-eval prepare function
+        result = eval_output_prepare.interactive_map_data(scenario_ids, session)
+
+        return result
+
+    @staticmethod
+    def visualize(
+        prepared_data: Dict[str, Any],
+        station_plot_dir: str | None = None,
+        depot_plot_dir: str | None = None,
+    ) -> "folium.Map":  # type: ignore
+        """
+        Create an interactive folium map from prepared data.
+
+        This function creates a map with depots, routes, and termini.
+        Supports multiple scenarios with toggleable layers.
+
+        Args:
+            prepared_data: Output from analyze() method
+            station_plot_dir: Optional path to directory containing station plots (named station_{id}.html)
+            depot_plot_dir: Optional path to directory containing depot plots (named depot_{id}.html)
+
+        Returns:
+            folium.Map object ready to be saved
+
+        Example usage:
+            >>> prepared = analyzer.analyze(session, params)
+            >>> m = InteractiveMapAnalyzer.visualize(prepared, depot_plot_dir="plots/depots")
+            >>> m.save("map.html")
+        """
+        return eval_output_visualize.interactive_map(
+            prepared_data, station_plot_dir, depot_plot_dir
         )
