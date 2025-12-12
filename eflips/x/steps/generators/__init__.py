@@ -491,6 +491,12 @@ class GTFSIngester(Generator):
 
         logger = logging.getLogger(__name__)
 
+        # Set up a progress artifact for tracking
+        progress_artifact_id = create_progress_artifact(
+            progress=0.0, key=self.__class__.__name__.lower()
+        )
+        assert isinstance(progress_artifact_id, UUID)
+
         # Get GTFS zip file
         gtfs_zip_file = self.input_files[0]
         logger.info(f"Processing GTFS file: {gtfs_zip_file}")
@@ -526,11 +532,31 @@ class GTFSIngester(Generator):
         # Create eflips-ingest GtfsIngester instance
         gtfs_ingester = EflipsIngestGtfsIngester(database_url=db_url)
 
+        # Create progress callbacks that map to 0-50% for prepare, 50-100% for ingest
+        def prepare_progress_callback(progress: float) -> None:
+            """Map prepare progress (0-1) to overall progress (0-50%)."""
+            overall_progress = progress * 50.0
+            update_progress_artifact(
+                artifact_id=progress_artifact_id,
+                progress=overall_progress,
+                description=f"Preparing GTFS data: {overall_progress:.1f}%",
+            )
+
+        def ingest_progress_callback(progress: float) -> None:
+            """Map ingest progress (0-1) to overall progress (50-100%)."""
+            overall_progress = 50.0 + (progress * 50.0)
+            update_progress_artifact(
+                artifact_id=progress_artifact_id,
+                progress=overall_progress,
+                description=f"Ingesting GTFS data: {overall_progress:.1f}%",
+            )
+
         # Prepare the data
         logger.info("Calling prepare() on GtfsIngester")
         success, result = gtfs_ingester.prepare(
             gtfs_zip_file=gtfs_zip_file,
             start_date=start_date,
+            progress_callback=prepare_progress_callback,
             duration=duration,
             agency_name=agency_name,
             bus_only=bus_only,
@@ -549,6 +575,14 @@ class GTFSIngester(Generator):
 
         # Ingest the data
         logger.info("Calling ingest() on GtfsIngester")
-        gtfs_ingester.ingest(uuid=ingestion_uuid, always_flush=False)
+        gtfs_ingester.ingest(
+            uuid=ingestion_uuid, always_flush=False, progress_callback=ingest_progress_callback
+        )
 
+        # Mark as 100% complete
+        update_progress_artifact(
+            artifact_id=progress_artifact_id,
+            progress=100.0,
+            description="GTFS ingestion completed successfully",
+        )
         logger.info("GTFS ingestion completed successfully")
