@@ -261,7 +261,7 @@ Example: `params["{cls.__name__}.sim_end_time"] = datetime(...)`
 
         # Call eflips-eval prepare function
         result = eval_output_prepare.power_and_occupancy(
-            area_id,
+            area_id,  # type: ignore [arg-type]
             session,
             temporal_resolution,
             station_id,
