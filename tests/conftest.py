@@ -46,3 +46,9 @@ def db_session(temp_db: Path) -> Generator[Session, None, None]:
 def test_data_dir() -> Path:
     """Return path to test data directory."""
     return Path(__file__).parent.parent / "data" / "input" / "Berlin Testing"
+
+
+@pytest.fixture
+def gtfs_test_data_dir() -> Path:
+    """Return path to GTFS test data directory."""
+    return Path(__file__).parent.parent / "data" / "input" / "GTFS"
