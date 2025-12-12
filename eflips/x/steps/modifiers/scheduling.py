@@ -37,6 +37,7 @@ from eflips.model import (
 from eflips.opt.depot_rotation_matching import DepotRotationOptimizer
 from eflips.opt.scheduling import create_graph, solve, write_back_rotation_plan
 from sqlalchemy import func, not_
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from eflips.x.framework import Modifier, Analyzer
@@ -981,7 +982,7 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
 
     def _get_default_charging_power_kw(self) -> float:
         """Get the default charging power in kW."""
-        return 150.0
+        return 450.0
 
     def analyze(self, session: Session, params: Dict[str, Any]) -> List[int] | None:
         """
@@ -1055,7 +1056,7 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
         station_q = (
             session.query(Station)
             .filter(Station.scenario_id == scenario.id)
-            .filter(Station.charge_type != ChargeType.DEPOT)
+            .filter(or_(Station.charge_type == None, Station.charge_type != ChargeType.DEPOT))
         )
         station_q.update(
             {
@@ -1216,7 +1217,7 @@ class StationElectrification(Modifier):
             session.query(Route.arrival_station_id)
             .join(Station, Route.arrival_station_id == Station.id)
             .filter(Station.scenario_id == scenario.id)
-            .filter(Station.charge_type != ChargeType.DEPOT)
+            .filter(or_(Station.charge_type == None, Station.charge_type != ChargeType.DEPOT))
             .distinct()
             .all()
         )
@@ -1225,7 +1226,7 @@ class StationElectrification(Modifier):
             session.query(Route.departure_station_id)
             .join(Station, Route.departure_station_id == Station.id)
             .filter(Station.scenario_id == scenario.id)
-            .filter(Station.charge_type != ChargeType.DEPOT)
+            .filter(or_(Station.charge_type == None, Station.charge_type != ChargeType.DEPOT))
             .distinct()
         )
 
@@ -1420,6 +1421,7 @@ class StationElectrification(Modifier):
 
             finally:
                 savepoint.rollback()  # Remove simulation results to keep DB clean
+                session.expire_all()  # Detach all objects to avoid stale data
 
             # Actually electrify the selected station
             station_to_electrify = (
@@ -1507,6 +1509,7 @@ class StationElectrification(Modifier):
             high_soc_rot_ids = [rotation.id for rotation in high_soc_rot_q]
         finally:
             savepoint.rollback()  # Remove simulation results to keep DB clean
+            session.expire_all()  # Detach all objects to avoid stale data
 
         # For the rotations with high SoC, remove the ability to charge at the terminus
         session.query(Rotation).filter(Rotation.id.in_(high_soc_rot_ids)).update(
@@ -1537,6 +1540,7 @@ class StationElectrification(Modifier):
             .filter(Rotation.scenario_id == scenario.id)
             .filter(Event.event_type == EventType.DRIVING)
             .filter(Event.soc_end < 0)
+            .distinct()
         )
         return rotations_q.count()
 
@@ -1565,6 +1569,7 @@ class StationElectrification(Modifier):
         int | None
             The ID of the charging station that was added, or None if no station could be added
         """
+        self.logger.setLevel(logging.INFO)  # TODO remove after debugging
 
         # Identify all rotations with SOC < 0
         rotations_with_low_soc = (
