@@ -1574,8 +1574,6 @@ class StationElectrification(Modifier):
         int | None
             The ID of the charging station that was added, or None if no station could be added
         """
-        self.logger.setLevel(logging.INFO)  # TODO remove after debugging
-
         # Identify all rotations with SOC < 0
         rotations_with_low_soc = (
             session.query(Rotation)
