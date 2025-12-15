@@ -42,18 +42,6 @@ from eflips.x.steps.analyzers import (
 logger = logging.getLogger(__name__)
 
 
-def _optional_path_to_str(path: Optional[Path]) -> Optional[str]:
-    """Convert optional Path to optional string.
-
-    Args:
-        path: Path object or None
-
-    Returns:
-        String representation of path, or None if path is None
-    """
-    return str(path) if path is not None else None
-
-
 def save_visualization(vis: Any, output_file: Path, analyzer: Optional[Analyzer] = None) -> None:
     """
     Save a visualization to a file based on its type.
@@ -122,8 +110,8 @@ def execute_simple_analyzer(
 def execute_interactive_map_analyzer(
     context: PipelineContext,
     output_file: Path,
-    depot_plot_dir: Optional[Path] = None,
-    station_plot_dir: Optional[Path] = None,
+    depot_plot_dir: Optional[str] = None,
+    station_plot_dir: Optional[str] = None,
 ) -> None:
     """
     Execute InteractiveMapAnalyzer with optional directory parameters.
@@ -139,12 +127,8 @@ def execute_interactive_map_analyzer(
     analyzer = InteractiveMapAnalyzer()
     result = analyzer.execute(context=context)
 
-    # Convert Path to string for visualize method
-    depot_dir_str = _optional_path_to_str(depot_plot_dir)
-    station_dir_str = _optional_path_to_str(station_plot_dir)
-
     vis = analyzer.visualize(
-        result, station_plot_dir=station_dir_str, depot_plot_dir=depot_dir_str
+        result, station_plot_dir=station_plot_dir, depot_plot_dir=depot_plot_dir
     )
     save_visualization(vis, output_file, analyzer)
 
@@ -405,17 +389,21 @@ def generate_all_plots(
 
     # Execute InteractiveMapAnalyzer with depot and station plot directories
     logger.info("Submitting InteractiveMapAnalyzer...")
-    map_output_file = simple_dir / "InteractiveMapAnalyzer.html"
+    map_output_file = output_dir / "InteractiveMapAnalyzer.html"
 
     # Determine plot directories based on mode
     depot_dir = None if pre_simulation_only else depots_dir
     station_dir = None if pre_simulation_only else stations_dir
 
+    # For the links to be stable, they should be relative paths
+    depot_dir_rel = str(depot_dir.relative_to(output_dir) if depot_dir else None)
+    station_dir_rel = str(station_dir.relative_to(output_dir) if station_dir else None)
+
     future = execute_interactive_map_analyzer.submit(
         context,
         map_output_file,
-        depot_plot_dir=depot_dir,
-        station_plot_dir=station_dir,
+        depot_plot_dir=depot_dir_rel,
+        station_plot_dir=station_dir_rel,
     )
     all_futures.append(future)
 
