@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from numbers import Number
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Protocol, Generator as TypingGenerator, Tuple
 
@@ -72,6 +73,8 @@ class PrefectTask(Protocol):
 class PipelineStep(ABC):
     """Base class for all pipeline steps."""
 
+    DEFAULT_LOG_LEVEL = logging.WARNING
+
     def __init__(self, code_version: str, cache_enabled: bool = True, **kwargs: Any) -> None:
         if not code_version:
             raise ValueError(
@@ -114,8 +117,44 @@ class PipelineStep(ABC):
         failed_db = db_path.with_suffix(f".{now}.failed")
         shutil.move(db_path, failed_db)
 
+    def set_log_level(self, context: PipelineContext) -> None:
+        """
+        Set the log level for this step based on the context.params dictionary. If it contains a log level specific
+        to this step, use that. Otherwise, use a global log level if present. If neither is present, default to WARNING.
+        :param context:
+        :return:
+        """
+        if f"{self.__class__.__name__}.log_level" in context.params:
+            level_str: Number | str = context.params[f"{self.__class__.__name__}.log_level"]
+            if isinstance(level_str, int):
+                level: int = level_str
+            elif isinstance(level_str, str):
+                level = getattr(logging, level_str.upper(), self.DEFAULT_LOG_LEVEL)
+            else:
+                warnings.warn(
+                    f"Invalid log level type for {self.__class__.__name__}.log_level: {type(level_str)}. "
+                    f"Defaulting to {self.DEFAULT_LOG_LEVEL}."
+                )
+        elif "log_level" in context.params:
+            level_str = context.params["log_level"]
+            if isinstance(level_str, int):
+                level = level_str
+            elif isinstance(level_str, str):
+                level = getattr(logging, level_str.upper(), self.DEFAULT_LOG_LEVEL)
+            else:
+                warnings.warn(
+                    f"Invalid log level type for log_level: {type(level_str)}. "
+                    f"Defaulting to {self.DEFAULT_LOG_LEVEL}."
+                )
+        else:
+            level = self.DEFAULT_LOG_LEVEL
+        logging.basicConfig(level=level)
+        self.logger.setLevel(level)
+
     def execute(self, context: PipelineContext) -> None:
         """Execute the step with Prefect task wrapping."""
+        self.set_log_level(context)
+
         if self._prefect_task is None:
             self._create_prefect_task()
 
@@ -243,6 +282,14 @@ class Generator(PipelineStep):
         db_url = f"sqlite:////{output_db.absolute().as_posix()}"
         db_engine = eflips.model.create_engine(db_url)
 
+        # Check if the database file already exists. If yes, warn and remove it.
+        if output_db.exists():
+            warnings.warn(
+                f"Re-creating existing database at {output_db}. This may indicate a problem with cache "
+                "invalidation. If you did some actions that require re-running this step, you may ignore this warning."
+            )
+            output_db.unlink()
+
         Base.metadata.create_all(db_engine)
         session = Session(db_engine)
 
@@ -322,8 +369,14 @@ class Modifier(PipelineStep):
             raise ValueError(f"Modifier {self.__class__.__name__} requires an input database")
 
         # Set up the new database and open a session
+        # Check if the database file already exists. If yes, warn and remove it.
         if output_db.exists():
-            raise FileExistsError(f"Output database {output_db} already exists.")
+            warnings.warn(
+                f"Re-creating existing database at {output_db}. This may indicate a problem with cache "
+                "invalidation. If you did some actions that require re-running this step, you may ignore this warning."
+            )
+            output_db.unlink()
+
         # Copy input to output to preserve intermediate states
         shutil.copy2(context.current_db, output_db)
 
@@ -409,6 +462,8 @@ class Analyzer(PipelineStep):
         create a new database. Instead (just to be safe if an unruly analyzer tries to write something),
         we create a copy of the current DB as the "output_db" to pass to the task.
         """
+        self.set_log_level(context)
+
         if self._prefect_task is None:
             self._create_prefect_task()
 
