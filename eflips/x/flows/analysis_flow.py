@@ -9,6 +9,8 @@ uses process-based parallelism for maximum performance.
 """
 import logging
 import multiprocessing
+import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional, Tuple, Type
@@ -21,7 +23,7 @@ import plotly  # type: ignore[import-untyped]
 from eflips.model import Area, Depot, Event, Rotation, Station, Vehicle
 from prefect import flow, task
 from prefect.futures import wait
-from prefect.task_runners import ProcessPoolTaskRunner
+from prefect.task_runners import ProcessPoolTaskRunner, ThreadPoolTaskRunner, TaskRunner
 
 from eflips.x.framework import Analyzer, PipelineContext
 from eflips.x.steps.analyzers import (
@@ -315,9 +317,19 @@ def query_all_ids(
         return [getattr(obj, id_attr) for obj in session.query(model_class).all()]
 
 
+if sys.platform == "darwin":
+    warnings.warn(
+        "ProcessPoolTaskRunner may have issues on macOS. Using ThreadPoolTaskRunner instead. "
+        "Performance will be severy degraded due to GIL."
+    )
+    TASK_RUNNER: TaskRunner = ThreadPoolTaskRunner(max_workers=multiprocessing.cpu_count())
+else:
+    TASK_RUNNER = ProcessPoolTaskRunner(max_workers=multiprocessing.cpu_count())
+
+
 @flow(
     name="analysis-flow",
-    task_runner=ProcessPoolTaskRunner(max_workers=multiprocessing.cpu_count()),  # type: ignore[arg-type]
+    task_runner=TASK_RUNNER,  # type: ignore[arg-type]
 )
 def generate_all_plots(
     context: PipelineContext,
