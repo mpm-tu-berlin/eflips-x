@@ -980,7 +980,8 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
             """.strip()
         }
 
-    def _get_default_charging_power_kw(self) -> float:
+    @classmethod
+    def _get_default_charging_power_kw(cls) -> float:
         """Get the default charging power in kW."""
         return 450.0
 
@@ -1315,14 +1316,18 @@ class StationElectrification(Modifier):
 
         # Check for power mismatch with InsufficientChargingTimeAnalyzer
         analyzer_power_key = f"{InsufficientChargingTimeAnalyzer.__name__}.charging_power_kw"
-        if analyzer_power_key in params:
-            analyzer_power = params[analyzer_power_key]
-            if analyzer_power != charging_power:
-                raise ValueError(
-                    f"Charging power mismatch: {self.__class__.__name__} has {charging_power} kW "
-                    f"but {InsufficientChargingTimeAnalyzer.__name__} has {analyzer_power} kW. "
-                    "Both must use the same charging power."
-                )
+        analyzer_power = params.get(
+            analyzer_power_key, InsufficientChargingTimeAnalyzer._get_default_charging_power_kw()
+        )
+        our_power_key = f"{self.__class__.__name__}.charging_power_kw"
+        our_power = params.get(our_power_key, self._get_default_charging_power_kw())
+
+        if analyzer_power != our_power:
+            raise ValueError(
+                f"Charging power mismatch: InsufficientChargingTimeAnalyzer uses "
+                f"{analyzer_power} kW, but StationElectrification uses {our_power} kW. "
+                f"Please ensure both use the same charging power."
+            )
 
         # Make sure there is just one scenario
         scenario_q = session.query(Scenario)
