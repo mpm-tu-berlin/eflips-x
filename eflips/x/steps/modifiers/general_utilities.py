@@ -12,7 +12,7 @@ from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
 import eflips.model
-from eflips.model import Route, Line, Station, Scenario, Temperatures
+from eflips.model import Route, Line, Station, Scenario, Temperatures, Rotation
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import Modifier
@@ -32,7 +32,7 @@ class RemoveUnusedData(Modifier):
     3. Removes all stations that are not part of any route
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.0.1", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -110,6 +110,17 @@ class RemoveUnusedData(Modifier):
                 stations_removed += 1
 
         self.logger.info(f"Removed {stations_removed} unused stations")
+
+        # Remove all rotaions that have no trips
+        all_rotations = session.query(Rotation).all()
+        rotations_removed = 0
+        for rotation in all_rotations:
+            if len(rotation.trips) == 0:
+                self.logger.debug(f"Removing rotation {rotation.name}")
+                session.delete(rotation)
+                rotations_removed += 1
+
+        self.logger.info(f"Removed {rotations_removed} unused rotations")
 
         # Log the number of remaining objects
         remaining_routes = session.query(Route).count()
