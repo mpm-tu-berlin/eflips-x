@@ -301,7 +301,7 @@ class TestPowerAndOccupancyAnalyzer:
         db_session: Session,
     ):
         """Test that missing area_id raises ValueError."""
-        with pytest.raises(ValueError, match="Required parameter.*area_id.*not provided"):
+        with pytest.raises(ValueError, match="Must set either area_id or station_id"):
             analyzer.analyze(db_session, {})
 
     def test_visualize(
