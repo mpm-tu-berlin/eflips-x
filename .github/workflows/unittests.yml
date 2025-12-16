@@ -9,9 +9,11 @@ jobs:
   unittest:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         PYTHON_VERSION: [ "3.12", "3.13" ]
         DATABASE: [ "sqlite" ]
+        split: [ "1", "2", "3", "4", "5", "6", "7", "8" ]  # Number of splits for pytest-split
 
     steps:
       # Downloads a copy of the code in your repository before running CI tests
@@ -38,12 +40,22 @@ jobs:
         run: |
           poetry install --no-root
 
+      - name: Add pytest-split
+        run: |
+          poetry run pip install pytest-split
+
       - name: Run Tests
         run:
-           poetry run pytest -n auto tests
+           poetry run pytest --splits 8 --group ${{ matrix.split }} --store-durations tests
         env:
           PYTHONPATH: ${{ github.workspace }}
           OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}
           OPENROUTESERVICE_BASE_URL: "https://api.openrouteservice.org/"
           SPATIALITE_LIBRARY_PATH: "/usr/lib/x86_64-linux-gnu/mod_spatialite"
           # The DATABASE_URL is set conditionally above
+
+      - name: Upload durations
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-durations-${{ matrix.split }}
+          path: .test_durations
