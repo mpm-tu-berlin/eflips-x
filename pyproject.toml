@@ -33,6 +33,7 @@ sphinx-autoapi = "^3.6.1"
 sphinx-paramlinks = "^0.6.0"
 pydocstringformatter = "^0.7.5"
 pytest-xdist = "^3.8.0"
+pytest-split = "^0.10.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
