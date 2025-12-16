@@ -582,28 +582,11 @@ Example: `params["{cls.__name__}.scenario_ids"] = [1, 2]`
         This function extracts and organizes data for creating an interactive folium map
         showing depots, routes, charging stations, and termini. Supports multiple scenarios.
 
-        Args:
-            session: SQLAlchemy session connected to the eflips-model database
-            params: Analysis parameters (scenario_ids is optional)
 
-        Returns:
-            Dictionary with all map data organized by scenario
+        :parameter session: SQLAlchemy session connected to the eflips-model database
+        :parameter params: Analysis parameters (scenario_ids is optional)
 
-        The returned dictionary has the following structure:
-        {
-            "scenarios": {
-                scenario_id: {
-                    "name": scenario name,
-                    "name_short": short name,
-                    "depots": [...],
-                    "routes": [...],
-                    "termini_electrified": [...],
-                    "termini_unelectrified": [...]
-                }
-            },
-            "map_center": {"latitude": float, "longitude": float},
-            "global_color_map": {depot_id: hex_color}
-        }
+        :return: Dictionary with all map data organized by scenario
         """
         # Extract optional parameter
         scenario_ids = params.get(f"{self.__class__.__name__}.scenario_ids")
