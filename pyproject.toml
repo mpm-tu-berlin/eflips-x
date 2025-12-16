@@ -1,6 +1,6 @@
 [project]
 name = "eflips-x"
-version = "0.2.0"
+version = "1.0.0"
 description = "Workflow Orchestrator for Running [eFLIPS](https://github.com/stars/ludgerheide/lists/ebus2030)  electric city bus network simulations."
 authors = [
     {name = "Ludger Heide",email = "ludger.heide@tu-berlin.de"}

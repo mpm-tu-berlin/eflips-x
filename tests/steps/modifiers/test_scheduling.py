@@ -553,7 +553,7 @@ class TestDepotAssignment:
         """Add the DEPOT_ROTATION_MATCHING_ORS_CACHE to the enironment variables before each test."""
         if os.environ.get("DEPOT_ROTATION_MATCHING_ORS_CACHE") is None:
             path_to_this_file = Path(__file__).resolve().parent
-            path_to_cache_zip = path_to_this_file / "depot_roation_match_cache.zip"
+            path_to_cache_zip = path_to_this_file / "depot_rotation_match_cache.zip"
             temp_dir = gettempdir()
             with ZipFile(path_to_cache_zip, "r") as zip_ref:
                 zip_ref.extractall(temp_dir)

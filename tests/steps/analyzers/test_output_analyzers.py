@@ -1,8 +1,10 @@
 """Tests for output analyzers."""
 
+import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from zipfile import ZipFile
 
 import matplotlib.animation as animation
 import pandas as pd
@@ -68,6 +70,19 @@ def simulated_scenario(db_session: Session, tmp_path: Path) -> Scenario:
                 "vehicle_type": [vt.id for vt in all_vehicle_types],
                 "name": depot.name,
             }
+        )
+
+    """Add the DEPOT_ROTATION_MATCHING_ORS_CACHE to the enironment variables before each test."""
+    if os.environ.get("DEPOT_ROTATION_MATCHING_ORS_CACHE") is None:
+        path_to_this_file = Path(__file__).resolve().parent
+        path_to_cache_zip = (
+            path_to_this_file / ".." / "modifiers" / "depot_rotation_match_cache.zip"
+        )
+        temp_dir = tempfile.gettempdir()
+        with ZipFile(path_to_cache_zip, "r") as zip_ref:
+            zip_ref.extractall(temp_dir)
+        os.environ["DEPOT_ROTATION_MATCHING_ORS_CACHE"] = os.path.join(
+            temp_dir, "DEPOT_ROTATION_MATCHING_ORS_CACHE"
         )
 
     depot_assigner = DepotAssignment()
