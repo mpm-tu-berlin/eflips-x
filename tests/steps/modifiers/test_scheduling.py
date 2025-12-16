@@ -1770,6 +1770,7 @@ class TestStationElectrification:
 
         # Use lower charging power - this might require more stations
         params = {
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 300.0,  # Match custom power
             "StationElectrification.charging_power_kw": 300.0,  # Lower than default 450kW
             "StationElectrification.max_stations_to_electrify": 10,
         }
@@ -1816,6 +1817,7 @@ class TestStationElectrification:
 
         # Set a very low limit to force failure
         params = {
+            "InsufficientChargingTimeAnalyzer.charging_power_kw": 1,  # Very low power
             "StationElectrification.charging_power_kw": 1,
             "StationElectrification.max_stations_to_electrify": 1,  # Very low limit
         }
@@ -1859,21 +1861,37 @@ class TestStationElectrification:
         with pytest.raises(ValueError, match="charging_power_kw must be a number"):
             modifier.modify(
                 session=db_session,
-                params={"StationElectrification.charging_power_kw": "450"},
+                params={
+                    "InsufficientChargingTimeAnalyzer.charging_power_kw": 450.0,
+                    "StationElectrification.charging_power_kw": "450",
+                },
             )
 
         # Test negative charging_power_kw
         with pytest.raises(ValueError, match="charging_power_kw must be positive"):
             modifier.modify(
                 session=db_session,
-                params={"StationElectrification.charging_power_kw": -100.0},
+                params={
+                    "InsufficientChargingTimeAnalyzer.charging_power_kw": -100.0,
+                    "StationElectrification.charging_power_kw": -100.0,
+                },
             )
 
         # Test zero charging_power_kw
         with pytest.raises(ValueError, match="charging_power_kw must be positive"):
             modifier.modify(
                 session=db_session,
-                params={"StationElectrification.charging_power_kw": 0.0},
+                params={
+                    "InsufficientChargingTimeAnalyzer.charging_power_kw": 0.0,
+                    "StationElectrification.charging_power_kw": 0.0,
+                },
+            )
+
+        # Test missing InsufficientChargingTimeAnalyzer unset when StationElectrification power is set
+        with pytest.raises(ValueError, match="Please ensure both use the same charging power."):
+            modifier.modify(
+                session=db_session,
+                params={"StationElectrification.charging_power_kw": 300.0},
             )
 
         # Test invalid max_stations_to_electrify type
