@@ -40,7 +40,7 @@ jobs:
 
       - name: Run Tests
         run:
-           poetry run pytest
+           poetry run pytest -n auto tests
         env:
           PYTHONPATH: ${{ github.workspace }}
           OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}

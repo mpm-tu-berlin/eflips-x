@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta
 from pathlib import Path
+from tempfile import gettempdir
+from zipfile import ZipFile
 
 import pytest
 import pytz
@@ -30,6 +32,7 @@ from eflips.x.steps.modifiers.scheduling import (
     IntegratedScheduling,
     StationElectrification,
 )
+import os
 
 
 class TestVehicleScheduling:
@@ -544,6 +547,19 @@ class TestVehicleScheduling:
 
 class TestDepotAssignment:
     """Test suite for DepotAssignment modifier."""
+
+    @pytest.fixture(autouse=True)
+    def set_cache_directory(self):
+        """Add the DEPOT_ROTATION_MATCHING_ORS_CACHE to the enironment variables before each test."""
+        if os.environ.get("DEPOT_ROTATION_MATCHING_ORS_CACHE") is None:
+            path_to_this_file = Path(__file__).resolve().parent
+            path_to_cache_zip = path_to_this_file / "depot_roation_match_cache.zip"
+            temp_dir = gettempdir()
+            with ZipFile(path_to_cache_zip, "r") as zip_ref:
+                zip_ref.extractall(temp_dir)
+            os.environ["DEPOT_ROTATION_MATCHING_ORS_CACHE"] = os.path.join(
+                temp_dir, "DEPOT_ROTATION_MATCHING_ORS_CACHE"
+            )
 
     @pytest.fixture
     def multi_depot_scenario_fixture(self, db_session: Session, tmp_path: Path) -> Scenario:
