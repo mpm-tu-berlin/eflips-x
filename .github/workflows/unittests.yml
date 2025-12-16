@@ -19,6 +19,8 @@ jobs:
       # Downloads a copy of the code in your repository before running CI tests
       - name: Check out code
         uses: actions/checkout@v5
+        with:
+          lfs: 'true'
 
       # SQLite/SpatiaLite specific setup
       - name: Install SpatiaLite
