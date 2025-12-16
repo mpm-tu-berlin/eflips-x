@@ -1103,14 +1103,14 @@ sqlalchemy = ">=2.0.23,<3.0.0"
 
 [[package]]
 name = "eflips-opt"
-version = "0.3.13"
+version = "0.3.15"
 description = "A collection of pre-simulation optimization algorithms for eFLIPS."
 optional = false
 python-versions = "<3.14,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_opt-0.3.13-py3-none-any.whl", hash = "sha256:fcb5a98484212ddafa61fc47ad4d61864ccb2e4e4eb202b5369a9d9e3f533ffb"},
-    {file = "eflips_opt-0.3.13.tar.gz", hash = "sha256:affb45e2c84e51aff3fc7868332c9cf53c0092f2281850247470408180be0ca5"},
+    {file = "eflips_opt-0.3.15-py3-none-any.whl", hash = "sha256:352401e21823f58c7ef0cdf700919718107aa2e1877799e6cdde8e2edd9f0a93"},
+    {file = "eflips_opt-0.3.15.tar.gz", hash = "sha256:0ead8ea212c9f0e9e366f8c2c3b1fdaac5134804cf11942bcd5bc48deda8c527"},
 ]
 
 [package.dependencies]
@@ -1294,6 +1294,21 @@ typing-extensions = {version = ">=4.6.0", markers = "python_version < \"3.13\""}
 
 [package.extras]
 test = ["pytest (>=6)"]
+
+[[package]]
+name = "execnet"
+version = "2.1.2"
+description = "execnet: rapid multi-Python deployment"
+optional = false
+python-versions = ">=3.8"
+groups = ["dev"]
+files = [
+    {file = "execnet-2.1.2-py3-none-any.whl", hash = "sha256:67fba928dd5a544b783f6056f449e5e3931a5c378b128bc18501f7ea79e296ec"},
+    {file = "execnet-2.1.2.tar.gz", hash = "sha256:63d83bfdd9a23e35b9c6a3261412324f964c2ec8dcd8d3c6916ee9373e0befcd"},
+]
+
+[package.extras]
+testing = ["hatch", "pre-commit", "pytest", "tox"]
 
 [[package]]
 name = "fastapi"
@@ -4240,6 +4255,27 @@ files = [
 pytest = ">=2.3"
 
 [[package]]
+name = "pytest-xdist"
+version = "3.8.0"
+description = "pytest xdist plugin for distributed testing, most importantly across multiple CPUs"
+optional = false
+python-versions = ">=3.9"
+groups = ["dev"]
+files = [
+    {file = "pytest_xdist-3.8.0-py3-none-any.whl", hash = "sha256:202ca578cfeb7370784a8c33d6d05bc6e13b4f25b5053c30a152269fd10f0b88"},
+    {file = "pytest_xdist-3.8.0.tar.gz", hash = "sha256:7e578125ec9bc6050861aa93f2d59f1d8d085595d6551c2c90b6f4fad8d3a9f1"},
+]
+
+[package.dependencies]
+execnet = ">=2.1"
+pytest = ">=7.0.0"
+
+[package.extras]
+psutil = ["psutil (>=3.0)"]
+setproctitle = ["setproctitle"]
+testing = ["filelock"]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 description = "Extensions to the standard Python datetime module"
@@ -6226,4 +6262,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "76c3f64b4a6a54f7b921a76fc80f6634ea1b818548d89db52d88e25702f4541c"
+content-hash = "a0236465e1707a1bef4bd8b1f2a4b7a0ef851cd6144934bf6eaca581f9d4282b"
