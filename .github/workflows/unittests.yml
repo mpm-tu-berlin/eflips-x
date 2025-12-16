@@ -13,7 +13,7 @@ jobs:
       matrix:
         PYTHON_VERSION: [ "3.12", "3.13" ]
         DATABASE: [ "sqlite" ]
-        split: [ "1", "2", "3", "4", "5", "6", "7", "8" ]  # Number of splits for pytest-split
+        split: [ "1", "2", "3", "4" ]  # Number of splits for pytest-split
 
     steps:
       # Downloads a copy of the code in your repository before running CI tests
@@ -44,7 +44,7 @@ jobs:
 
       - name: Run Tests
         run:
-           poetry run pytest --splits 8 --group ${{ matrix.split }} --store-durations tests
+          poetry run pytest --splits 4 --group ${{ matrix.split }} --store-durations tests
         env:
           PYTHONPATH: ${{ github.workspace }}
           OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}
@@ -56,5 +56,5 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           include-hidden-files: 'true'
-          name: test-durations-${{ matrix.split }}
+          name: test-durations-${{ matrix.PYTHON_VERSION }}-${{ matrix.split }}
           path: .test_durations
