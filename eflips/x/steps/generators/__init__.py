@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple
 from uuid import UUID
 
+import gtfs_kit as gk  # type: ignore[import-untyped]
 import sqlalchemy.orm.session
+from eflips.ingest.gtfs import GtfsIngester as EflipsIngestGtfsIngester
 from eflips.ingest.legacy.bvgxml import (
     load_and_validate_xml,
     create_stations,
@@ -25,9 +27,6 @@ from eflips.model import Scenario, Route, ConsistencyWarning, Station, AssocRout
 from geoalchemy2.functions import ST_Distance
 from prefect.artifacts import create_progress_artifact, update_progress_artifact
 from sqlalchemy import func, text
-
-import gtfs_kit as gk  # type: ignore[import-untyped]
-from eflips.ingest.gtfs import GtfsIngester as EflipsIngestGtfsIngester
 
 from eflips.x.framework import Generator
 
@@ -586,3 +585,96 @@ class GTFSIngester(Generator):
             description="GTFS ingestion completed successfully",
         )
         logger.info("GTFS ingestion completed successfully")
+
+
+class CopyCreator(Generator):
+    """
+    Lightweight generator that copies an existing database file to create a new pipeline step.
+
+    This generator is useful for branching workflows where you want to start from an existing
+    database without using a Modifier (which would require cache invalidation based on the
+    input database hash). Instead, CopyCreator treats the source database as an input file,
+    similar to how other generators treat XML or GTFS files.
+
+    The copy operation bypasses the normal Generator session creation to avoid unnecessary
+    overhead when no actual generation logic needs to run.
+    """
+
+    def __init__(
+        self,
+        input_files: List[Path],
+        code_version: str = "v1",
+        cache_enabled: bool = True,
+    ):
+        """
+        Initialize the CopyCreator.
+
+        :param input_files: List containing exactly one Path to a database file to copy
+        :param code_version: Version string for cache invalidation
+        :param cache_enabled: Whether to enable caching
+        """
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+        self.input_files = input_files
+
+        if not all(isinstance(f, Path) for f in self.input_files):
+            raise ValueError("All input_files must be of type pathlib.Path")
+        if len(self.input_files) != 1:
+            raise ValueError(
+                f"CopyCreator requires exactly one database file, got {len(self.input_files)}"
+            )
+        if not all(f.exists() for f in self.input_files):
+            missing_files = [str(f) for f in self.input_files if not f.exists()]
+            raise ValueError(f"The following input files do not exist: {missing_files}")
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        """
+        Document the parameters accepted by this generator.
+
+        :return: Dictionary mapping parameter names to descriptions (empty for CopyCreator)
+        """
+        return {}
+
+    def execute_impl(self, context, output_db: Path) -> None:
+        """
+        Override execute_impl to perform a simple file copy without opening a session.
+
+        This is more efficient than the default Generator.execute_impl() which creates
+        a new database and opens a session.
+
+        :param context: PipelineContext (unused, but required by interface)
+        :param output_db: Path to the output database file
+        """
+        import shutil
+        import warnings
+
+        source_db = self.input_files[0]
+
+        # Check if the database file already exists. If yes, warn and remove it.
+        if output_db.exists():
+            warnings.warn(
+                f"Re-creating existing database at {output_db}. This may indicate a problem with cache "
+                "invalidation. If you did some actions that require re-running this step, you may ignore this warning."
+            )
+            output_db.unlink()
+
+        # Ensure parent directory exists
+        output_db.parent.mkdir(parents=True, exist_ok=True)
+
+        # Copy the database file
+        shutil.copy2(source_db, output_db)
+        self.logger.info(f"Copied database from {source_db} to {output_db}")
+
+    def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
+        """
+        Generate method (not used since execute_impl is overridden).
+
+        This method is required by the Generator abstract base class but is never called
+        because we override execute_impl().
+
+        :param session: SQLAlchemy session (unused)
+        :param params: Pipeline parameters (unused)
+        """
+        raise NotImplementedError(
+            "CopyCreator.generate() should never be called. execute_impl() is overridden to bypass this."
+        )
