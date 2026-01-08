@@ -15,7 +15,6 @@ operations to prevent resource exhaustion from concurrent eflips_schedule_rust s
 
 import logging
 import multiprocessing
-import shutil
 from datetime import timedelta
 from pathlib import Path
 from typing import List, Dict, Union, Tuple, Any
@@ -28,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from eflips.x.framework import Modifier
 from eflips.x.framework import PipelineContext, PipelineStep
-from eflips.x.steps.generators import BVGXMLIngester
+from eflips.x.steps.generators import BVGXMLIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import (
     MergeStations,
     ReduceToNDaysNDepots,
@@ -81,22 +80,6 @@ SCHEDULING_SEMAPHORE = manager.Semaphore(1)
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-
-def copy_database(source_db: Path, dest_db: Path) -> None:
-    """
-    Copy a database file from source to destination.
-
-    Parameters:
-    -----------
-    source_db : Path
-        Source database file path
-    dest_db : Path
-        Destination database file path
-    """
-    dest_db.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_db, dest_db)
-    logger.info(f"Copied database from {source_db} to {dest_db}")
 
 
 class UpdateBatteryCapacity(Modifier):
@@ -354,10 +337,6 @@ def run_ou_scenario(common_db: Path) -> Path:
     work_dir = WORK_DIR_BASE / "ou"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy common database as baseline
-    baseline_db = work_dir / "step_000_baseline.db"
-    copy_database(common_db, baseline_db)
-
     # Configure parameters
     params = {
         "log_level": "INFO",
@@ -370,8 +349,9 @@ def run_ou_scenario(common_db: Path) -> Path:
         "Simulation.ignore_unstable_simulation": False,
     }
 
-    # Create context
-    context = PipelineContext(work_dir=work_dir, params=params, current_db=baseline_db)
+    # Create context and copy common database as baseline
+    context = PipelineContext(work_dir=work_dir, params=params)
+    CopyCreator(input_files=[common_db]).execute(context=context)
 
     # Get depot configuration (need a session)
     with context.get_session() as session:
@@ -426,10 +406,6 @@ def run_dep_scenario(common_db: Path) -> None:
     work_dir = WORK_DIR_BASE / "dep"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy common database as baseline
-    baseline_db = work_dir / "step_000_baseline.db"
-    copy_database(common_db, baseline_db)
-
     # Configure parameters
     params = {
         "log_level": "INFO",
@@ -441,8 +417,9 @@ def run_dep_scenario(common_db: Path) -> None:
         "Simulation.ignore_unstable_simulation": False,
     }
 
-    # Create context
-    context = PipelineContext(work_dir=work_dir, params=params, current_db=baseline_db)
+    # Create context and copy common database as baseline
+    context = PipelineContext(work_dir=work_dir, params=params)
+    CopyCreator(input_files=[common_db]).execute(context=context)
 
     # Get depot configuration
     with context.get_session() as session:
@@ -494,10 +471,6 @@ def run_term_scenario(common_db: Path) -> None:
     work_dir = WORK_DIR_BASE / "term"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy common database as baseline
-    baseline_db = work_dir / "step_000_baseline.db"
-    copy_database(common_db, baseline_db)
-
     # Configure parameters
     params = {
         "log_level": "INFO",
@@ -511,8 +484,9 @@ def run_term_scenario(common_db: Path) -> None:
         "Simulation.ignore_unstable_simulation": False,
     }
 
-    # Create context
-    context = PipelineContext(work_dir=work_dir, params=params, current_db=baseline_db)
+    # Create context and copy common database as baseline
+    context = PipelineContext(work_dir=work_dir, params=params)
+    CopyCreator(input_files=[common_db]).execute(context=context)
 
     # Get depot configuration
     with context.get_session() as session:
@@ -575,12 +549,6 @@ def run_diesel_scenario(finished_ou_db: Path) -> None:
     work_dir = WORK_DIR_BASE / "diesel"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # DIESEL branches from OU scenario's final database
-
-    # Copy common database to temp directory
-    temp_baseline_db = work_dir / "step_000_baseline.db"
-    copy_database(finished_ou_db, temp_baseline_db)
-
     # Configure diesel-specific parameters
     params = {
         "log_level": "INFO",
@@ -590,10 +558,9 @@ def run_diesel_scenario(finished_ou_db: Path) -> None:
         "Simulation.ignore_unstable_simulation": False,
     }
 
-    # Create diesel context
-    context = PipelineContext(work_dir=work_dir, params=params, current_db=finished_ou_db)
-    # Override the context's current_db to the OU final database
-    context.current_db = temp_baseline_db
+    # Create context and copy OU final database as baseline
+    context = PipelineContext(work_dir=work_dir, params=params)
+    CopyCreator(input_files=[finished_ou_db]).execute(context=context)
 
     # Run diesel-specific steps
     steps = [
