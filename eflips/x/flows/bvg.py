@@ -9,12 +9,10 @@ This flow implements the BVG (Berlin public transport) three-scenario analysis:
 - TERM (Fokus Endhaltestellen): Terminal focus with IntegratedScheduling and smaller batteries
 - DIESEL: Diesel baseline for comparison
 
-The scenarios run in parallel after a common pipeline, with semaphore-guarded scheduling
-operations to prevent resource exhaustion from concurrent eflips_schedule_rust solve() calls.
+The scenarios run in parallel after a common pipeline
 """
 
 import logging
-import multiprocessing
 from datetime import timedelta
 from pathlib import Path
 from typing import List, Dict, Union, Tuple, Any
@@ -22,7 +20,6 @@ from typing import List, Dict, Union, Tuple, Any
 from eflips.model import ChargeType, VehicleType
 from prefect import flow, task
 from prefect.futures import wait
-from prefect.task_runners import ProcessPoolTaskRunner
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import Modifier
@@ -73,9 +70,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 INPUT_DATA_DIR = PROJECT_ROOT / "data" / "input" / "Berlin 2025-06"
 WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvg"
 
-# Module-level semaphore to guard scheduling operations (max 1 concurrent)
-manager = multiprocessing.Manager()
-SCHEDULING_SEMAPHORE = manager.Semaphore(1)
 
 # ============================================================================
 # Helper Functions
@@ -328,8 +322,6 @@ def run_ou_scenario(common_db: Path) -> Path:
     -----------
     common_db : Path
         Path to the common database to branch from
-    semaphore : threading.Semaphore
-        Semaphore to guard scheduling operations
     """
     logger.info("Starting OU scenario...")
 
@@ -361,19 +353,9 @@ def run_ou_scenario(common_db: Path) -> Path:
             depots = depots_for_bvg(session)
         params["DepotAssignment.depot_config"] = depots
 
-    # OU uses large batteries (same as common pipeline defaults), no need to update
-
-    # Guard the scheduling operation
-    global semaphore
-    semaphore = SCHEDULING_SEMAPHORE
-    with semaphore:
-        logger.info("Acquired scheduling semaphore for OU scenario")
-        steps = [VehicleScheduling()]
-        run_steps(context=context, steps=steps)
-        logger.info("Released scheduling semaphore for OU scenario")
-
     # Continue with non-scheduling steps (can run in parallel with other scenarios)
     steps = [
+        VehicleScheduling(),
         DepotAssignment(),
         StationElectrification(),
         DepotGenerator(),
@@ -397,8 +379,6 @@ def run_dep_scenario(common_db: Path) -> None:
     -----------
     common_db : Path
         Path to the common database to branch from
-    semaphore : threading.Semaphore
-        Semaphore to guard scheduling operations
     """
     logger.info("Starting DEP scenario...")
 
@@ -431,16 +411,8 @@ def run_dep_scenario(common_db: Path) -> None:
 
     # DEP uses large batteries (same as common pipeline defaults), no need to update
 
-    # Guard the scheduling operation
-    global semaphore
-    semaphore = SCHEDULING_SEMAPHORE
-    with semaphore:
-        logger.info("Acquired scheduling semaphore for DEP scenario")
-        steps = [VehicleScheduling()]
-        run_steps(context=context, steps=steps)
-        logger.info("Released scheduling semaphore for DEP scenario")
-    # Continue with non-scheduling steps
     steps = [
+        VehicleScheduling(),
         DepotAssignment(),
         DepotGenerator(),
         Simulation(),
@@ -462,8 +434,6 @@ def run_term_scenario(common_db: Path) -> None:
     -----------
     common_db : Path
         Path to the common database to branch from
-    semaphore : threading.Semaphore
-        Semaphore to guard scheduling operations
     """
     logger.info("Starting TERM scenario...")
 
@@ -503,22 +473,11 @@ def run_term_scenario(common_db: Path) -> None:
         "DD": 320.0,  # 68% of large battery (472.0)
     }
 
-    # Update battery capacities and run IntegratedScheduling
-    steps = [UpdateBatteryCapacity()]
-
-    # Guard the IntegratedScheduling operation
-    global semaphore
-    semaphore = SCHEDULING_SEMAPHORE
-    with semaphore:
-        logger.info("Acquired scheduling semaphore for TERM scenario")
-        steps.append(IntegratedScheduling())
-        run_steps(context=context, steps=steps)
-        logger.info("Released scheduling semaphore for TERM scenario")
-
-    # Continue with non-scheduling steps
     # NOTE: IntegratedScheduling returns database in "just after vehicle scheduling" state
     # It rolls back its nested DepotAssignment calls, so we must run DepotAssignment again
     steps = [
+        UpdateBatteryCapacity(),
+        IntegratedScheduling(),
         DepotAssignment(),  # Re-run since IntegratedScheduling rolls back
         StationElectrification(),
         DepotGenerator(),
@@ -540,8 +499,6 @@ def run_diesel_scenario(finished_ou_db: Path) -> None:
     -----------
     finished_ou_db : Path
         Path to the finished OU scenario database to branch from
-    semaphore : threading.Semaphore
-        Semaphore to guard scheduling operations
     """
     logger.info("Starting DIESEL scenario...")
 
@@ -579,7 +536,7 @@ def run_diesel_scenario(finished_ou_db: Path) -> None:
 # ============================================================================
 
 
-@flow(name="BVG Three-Scenario Flow", task_runner=ProcessPoolTaskRunner)
+@flow(name="BVG Three-Scenario Flow")
 def bvg_three_scenario_flow() -> None:
     """
     Main flow orchestrating the BVG three-scenario analysis.
@@ -588,15 +545,13 @@ def bvg_three_scenario_flow() -> None:
     - OU, DEP, TERM start together after common pipeline
     - DIESEL starts after OU completes (branching dependency)
 
-    Scheduling operations are guarded by a semaphore to prevent resource
-    exhaustion from concurrent eflips_schedule_rust solve() calls.
     """
     logger.info("Starting BVG three-scenario flow...")
 
     # Phase 1: Common pipeline (sequential)
     common_db = run_common_pipeline()
 
-    # Phase 2: Run scenarios in parallel with semaphore-guarded scheduling
+    # Phase 2: Run scenarios in parallel
     futures = []
 
     # Submit OU, DEP, TERM in parallel
