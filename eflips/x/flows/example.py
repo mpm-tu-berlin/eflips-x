@@ -28,6 +28,7 @@ import plotly  # type: ignore[import-untyped]
 from eflips.model import ChargeType, Vehicle, Depot, Area, Rotation, Event
 from prefect import flow
 
+from eflips.x.flows import run_steps
 from eflips.x.framework import PipelineStep, PipelineContext, Analyzer
 from eflips.x.steps.analyzers import (
     RotationInfoAnalyzer,
@@ -132,14 +133,8 @@ def query_all_ids(
         return [getattr(obj, id_attr) for obj in session.query(model_class).all()]
 
 
-@flow
-def run_steps(context: PipelineContext, steps: List[PipelineStep]) -> None:
-    """Run a sequence of pipeline steps."""
-    for step in steps:
-        step.execute(context=context)
-
-
-if __name__ == "__main__":
+@flow(name="BVG Flow Example")
+def main():
     ### Step 1: Initialize Pipeline ###
     # Create a unique working directory for this pipeline run
     work_dir = Path(gettempdir()) / (
@@ -332,3 +327,7 @@ if __name__ == "__main__":
             "Skipping DepotActivityAnalyzer (video generation disabled). "
             "Set GENERATE_DEPOT_VIDEOS = True to enable."
         )
+
+
+if __name__ == "__main__":
+    main()

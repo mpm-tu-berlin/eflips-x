@@ -147,7 +147,6 @@ from eflips.x.steps.modifiers.scheduling import VehicleScheduling, DepotAssignme
 from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
 
 
-@flow
 def run_steps(context: PipelineContext, steps: List[PipelineStep]) -> None:
    """Run a sequence of pipeline steps."""
    for step in steps:

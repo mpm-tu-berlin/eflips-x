@@ -21,6 +21,7 @@ from eflips.model import ChargeType, VehicleType
 from prefect import flow
 from sqlalchemy.orm import Session
 
+from eflips.x.flows import run_steps
 from eflips.x.framework import Modifier
 from eflips.x.framework import PipelineContext, PipelineStep
 from eflips.x.steps.generators import BVGXMLIngester, CopyCreator
@@ -182,12 +183,6 @@ class CleanSimulationResults(Modifier):
 
         vehicles_count = session.query(Vehicle).filter(Vehicle.scenario_id == scenario.id).delete()
         logger.info(f"Deleted {vehicles_count} vehicles")
-
-
-def run_steps(context: PipelineContext, steps: List[PipelineStep]) -> None:
-    """Run a sequence of pipeline steps."""
-    for step in steps:
-        step.execute(context=context)
 
 
 # ============================================================================
