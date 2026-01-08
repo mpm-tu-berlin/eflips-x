@@ -18,8 +18,7 @@ from pathlib import Path
 from typing import List, Dict, Union, Tuple, Any
 
 from eflips.model import ChargeType, VehicleType
-from prefect import flow, task
-from prefect.futures import wait
+from prefect import flow
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import Modifier
@@ -54,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level switch for testing
 REDUCED_DATA = False  # Set to True for quick testing
+LOG_LEVEL = "INFO"
 
 # Derived configuration
 if REDUCED_DATA:
@@ -184,7 +184,6 @@ class CleanSimulationResults(Modifier):
         logger.info(f"Deleted {vehicles_count} vehicles")
 
 
-@flow
 def run_steps(context: PipelineContext, steps: List[PipelineStep]) -> None:
     """Run a sequence of pipeline steps."""
     for step in steps:
@@ -196,7 +195,7 @@ def run_steps(context: PipelineContext, steps: List[PipelineStep]) -> None:
 # ============================================================================
 
 
-@task(name="Common Pipeline")
+@flow(name="Common Pipeline")
 def run_common_pipeline() -> Path:
     """
     Run the common pipeline that all scenarios branch from.
@@ -224,9 +223,10 @@ def run_common_pipeline() -> Path:
 
     # Configure parameters
     params = {
-        "log_level": "INFO",
+        "log_level": LOG_LEVEL,
         "BVGXMLIngester.multithreading": True,
         "AddTemperatures.temperature_celsius": -12.0,
+        "Settings.use_reduced_data": REDUCED_DATA,
     }
 
     # Add reduction parameters if REDUCED_DATA is True
@@ -311,7 +311,7 @@ def reduce_depots_for_bvg() -> List[Dict[str, Union[int, Tuple[float, float], Li
     return depot_list
 
 
-@task(name="OU Scenario: Original Blocks")
+@flow(name="OU Scenario: Original Blocks")
 def run_ou_scenario(common_db: Path) -> Path:
     """
     Run the OU (Originalumläufe - Original Blocks) scenario.
@@ -331,7 +331,7 @@ def run_ou_scenario(common_db: Path) -> Path:
 
     # Configure parameters
     params = {
-        "log_level": "INFO",
+        "log_level": LOG_LEVEL,
         "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
         "VehicleScheduling.minimum_break_time": timedelta(minutes=10),
         "VehicleScheduling.battery_margin": 0.1,
@@ -368,7 +368,7 @@ def run_ou_scenario(common_db: Path) -> Path:
     return context.current_db  # Needed for DIESEL branching
 
 
-@task(name="DEP Scenario: Depot Only")
+@flow(name="DEP Scenario: Depot Only")
 def run_dep_scenario(common_db: Path) -> None:
     """
     Run the DEP (Depotlader - Depot Only) scenario.
@@ -388,13 +388,13 @@ def run_dep_scenario(common_db: Path) -> None:
 
     # Configure parameters
     params = {
-        "log_level": "INFO",
+        "log_level": LOG_LEVEL,
         "VehicleScheduling.charge_type": ChargeType.DEPOT,
         "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
         "VehicleScheduling.battery_margin": 0.2,  # 20% for delta-SoC safety
         "DepotGenerator.charging_power_kw": 90.0,
         "Simulation.repetition_period": timedelta(days=SIMULATION_DAYS),
-        "Simulation.ignore_unstable_simulation": False,
+        "Simulation.ignore_unstable_simulation": True,
     }
 
     # Create context and copy common database as baseline
@@ -423,7 +423,7 @@ def run_dep_scenario(common_db: Path) -> None:
     logger.info(f"DEP scenario complete. Database: {context.current_db}")
 
 
-@task(name="TERM Scenario: Terminal Focus")
+@flow(name="TERM Scenario: Terminal Focus")
 def run_term_scenario(common_db: Path) -> None:
     """
     Run the TERM (Fokus Endhaltestellen - Terminal Focus) scenario.
@@ -443,7 +443,7 @@ def run_term_scenario(common_db: Path) -> None:
 
     # Configure parameters
     params = {
-        "log_level": "INFO",
+        "log_level": LOG_LEVEL,
         "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
         "VehicleScheduling.minimum_break_time": timedelta(minutes=10),
         "VehicleScheduling.battery_margin": 0.1,
@@ -488,7 +488,7 @@ def run_term_scenario(common_db: Path) -> None:
     logger.info(f"TERM scenario complete. Database: {context.current_db}")
 
 
-@task(name="DIESEL Scenario: Diesel Reference")
+@flow(name="DIESEL Scenario: Diesel Reference")
 def run_diesel_scenario(finished_ou_db: Path) -> None:
     """
     Run the DIESEL scenario (diesel baseline for comparison).
@@ -508,7 +508,7 @@ def run_diesel_scenario(finished_ou_db: Path) -> None:
 
     # Configure diesel-specific parameters
     params = {
-        "log_level": "INFO",
+        "log_level": LOG_LEVEL,
         "RemoveConsumptionLuts.minimal_consumption": 0.001,
         "DepotGenerator.charging_power_kw": 90.0,
         "Simulation.repetition_period": timedelta(days=SIMULATION_DAYS),
@@ -551,26 +551,10 @@ def bvg_three_scenario_flow() -> None:
     # Phase 1: Common pipeline (sequential)
     common_db = run_common_pipeline()
 
-    # Phase 2: Run scenarios in parallel
-    futures = []
-
-    # Submit OU, DEP, TERM in parallel
-    ou_db_path_future = run_ou_scenario.submit(common_db)
-    futures.append(ou_db_path_future)
-    futures.append(run_dep_scenario.submit(common_db))
-    futures.append(run_term_scenario.submit(common_db))
-
-    # Wait for OU to complete before starting DIESEL (branching dependency)
-    logger.info("Waiting for OU scenario to complete before starting DIESEL...")
-    futures[0].wait()
-    logger.info("OU scenario complete, now starting DIESEL scenario")
-
-    # Now submit DIESEL
-    futures.append(run_diesel_scenario.submit(ou_db_path_future.result()))
-
-    # Wait for all scenarios to complete
-    logger.info("Waiting for all scenarios to complete...")
-    wait(futures)
+    # Submit OU, DEP, TERMl
+    run_ou_scenario(common_db)
+    run_dep_scenario(common_db)
+    run_term_scenario(common_db)
 
     logger.info("BVG three-scenario flow complete!")
     logger.info(f"Results available in: {WORK_DIR_BASE}")
