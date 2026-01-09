@@ -333,7 +333,7 @@ def run_ou_scenario(common_db: Path) -> Path:
         "StationElectrification.charging_power_kw": 450.0,
         "DepotGenerator.charging_power_kw": 90.0,
         "Simulation.repetition_period": timedelta(days=SIMULATION_DAYS),
-        "Simulation.ignore_unstable_simulation": False,
+        "Simulation.ignore_unstable_simulation": True,
     }
 
     # Create context and copy common database as baseline
