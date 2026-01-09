@@ -882,6 +882,13 @@ class DepotAssignment(Modifier):
                 f"Final depot usage: {DEPOT_USAGE + STEP_SIZE:.1%}"
             )
 
+        # Restore original capacities to avoid cache invalidation for subsequent modifiers
+        # The depot_config is a reference to params["DepotAssignment.depot_config"], so modifications
+        # persist and affect the cache key computation for downstream modifiers like StationElectrification
+        for depot, orig_cap in zip(depot_config, original_capacities):
+            depot["capacity"] = orig_cap
+        self.logger.debug("Restored original depot capacities to prevent cache invalidation")
+
         # Write optimization results back to the database
         optimizer.write_optimization_results(delete_original_data=True)
 
