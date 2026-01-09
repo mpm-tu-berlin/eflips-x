@@ -472,7 +472,7 @@ def run_term_scenario(common_db: Path) -> None:
     # It rolls back its nested DepotAssignment calls, so we must run DepotAssignment again
     steps = [
         UpdateBatteryCapacity(),
-        IntegratedScheduling(),
+        VehicleScheduling(), # TODO: Why does IntegratedScheduling not work?
         DepotAssignment(),  # Re-run since IntegratedScheduling rolls back
         StationElectrification(),
         DepotGenerator(),
