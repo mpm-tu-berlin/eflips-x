@@ -9,10 +9,12 @@ import logging
 import os
 import typing
 from collections import defaultdict, OrderedDict
-from datetime import timedelta
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Tuple, Counter, Set
 
 import eflips.model
+import networkx as nx
 import pandas as pd
 import sqlalchemy.orm.session
 from eflips.depot.api import (  # type: ignore[import-untyped]
@@ -342,6 +344,11 @@ class VehicleScheduling(Modifier):
         """Get the default charge type."""
         return ChargeType.DEPOT
 
+    @staticmethod
+    def _get_default_save_graphs() -> bool:
+        """Get the default save_graphs setting."""
+        return False
+
     @classmethod
     def document_params(cls) -> Dict[str, str]:
         """
@@ -410,6 +417,33 @@ class VehicleScheduling(Modifier):
             Type: ChargeType
             Example: ChargeType.OPPORTUNITY
             """.strip(),
+            f"{cls.__name__}.save_graphs": """
+            Whether to save optimization graphs to disk for visualization.
+            When enabled, creates GraphML files showing the vehicle scheduling optimization graphs.
+            One file is created per vehicle type.
+
+            Graphs are saved to: PROJECT_ROOT/data/output/scheduling_graphs/<timestamp>/
+            where <timestamp> is in YYYYMMDD_HHMMSS format (e.g., 20260113_145230).
+
+            You can override the output directory by also setting graph_output_dir parameter.
+
+            Default: False
+            Type: bool
+            Example: True
+            """.strip(),
+            f"{cls.__name__}.graph_output_dir": """
+            Optional custom directory path where graph files should be saved.
+            Only used when save_graphs is True.
+
+            If not specified, graphs are saved to:
+            PROJECT_ROOT/data/output/scheduling_graphs/<timestamp>/
+
+            The directory will be created if it doesn't exist.
+
+            Default: None (uses automatic timestamped directory)
+            Type: Optional[str] (path)
+            Example: "/custom/path/to/graphs"
+            """.strip(),
         }
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
@@ -461,6 +495,11 @@ class VehicleScheduling(Modifier):
         charge_type = params.get(
             f"{self.__class__.__name__}.charge_type", self._get_default_charge_type()
         )
+        save_graphs_key = f"{self.__class__.__name__}.save_graphs"
+        graph_output_dir_key = f"{self.__class__.__name__}.graph_output_dir"
+
+        save_graphs = params.get(save_graphs_key, self._get_default_save_graphs())
+        graph_output_dir = params.get(graph_output_dir_key, None)
 
         # Validate parameters
         if not isinstance(minimum_break_time, timedelta):
@@ -489,6 +528,27 @@ class VehicleScheduling(Modifier):
             )
         if not isinstance(charge_type, ChargeType):
             raise ValueError(f"charge_type must be a ChargeType, got {type(charge_type).__name__}")
+
+        # Validate save_graphs parameter
+        if not isinstance(save_graphs, bool):
+            raise ValueError(f"save_graphs must be a boolean, got {type(save_graphs).__name__}")
+
+        # Validate and set up graph_output_dir
+        if save_graphs:
+            if graph_output_dir is None:
+                # Compute default: PROJECT_ROOT/data/output/scheduling_graphs/<timestamp>/
+                project_root = self.find_project_root()
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                graph_output_dir = (
+                    project_root / "data" / "output" / "scheduling_graphs" / timestamp
+                )
+            else:
+                # Validate custom path
+                if not isinstance(graph_output_dir, (str, Path)):
+                    raise ValueError(
+                        f"graph_output_dir must be a string or Path, got {type(graph_output_dir).__name__}"
+                    )
+                graph_output_dir = Path(graph_output_dir)
 
         # Make sure there is just one scenario
         scenario_q = session.query(eflips.model.Scenario)
@@ -533,6 +593,11 @@ class VehicleScheduling(Modifier):
 
         self.logger.info(f"Processing {num_vehicle_types} vehicle type(s)")
 
+        # Create output directory if graph saving is enabled
+        if save_graphs:
+            graph_output_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Saving graphs to: {graph_output_dir}")
+
         # Process each vehicle type separately
         for i, vehicle_type in enumerate(all_vehicle_types):
             self.logger.info(
@@ -561,6 +626,27 @@ class VehicleScheduling(Modifier):
                 f"Created graph for vehicle type {vehicle_type.name_short} "
                 f"with {len(graph.nodes)} nodes and {len(graph.edges)} edges"
             )
+
+            # Save graph if requested
+            if save_graphs:
+                # Create filename: {vehicle_type_name}_scheduling_graph.graphml
+                graph_filename = f"{vehicle_type.name_short}_scheduling_graph.graphml"
+                graph_filepath = graph_output_dir / graph_filename
+
+                # Create a copy of the graph and turn the node weight from a tuple into a string for GraphML compatibility
+                graph_copy = graph.copy()
+                for node in graph_copy.nodes:
+                    node_data = graph_copy.nodes[node]
+                    if "weight" in node_data and isinstance(node_data["weight"], tuple):
+                        node_data["weight"] = f"{node_data['weight'][0]*100:.2f}% ΔSOC"
+
+                # Save graph to GraphML format
+                try:
+                    nx.write_graphml(graph_copy, str(graph_filepath))
+                    self.logger.info(f"Saved graph to {graph_filepath}")
+                except Exception as e:
+                    self.logger.error(f"Failed to save graph for {vehicle_type.name_short}: {e}")
+                    # Don't raise - graph saving is optional, don't block optimization
 
             # Solve the vehicle scheduling problem
             rotation_plan = solve(graph)
