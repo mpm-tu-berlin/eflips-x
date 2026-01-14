@@ -530,19 +530,72 @@ class TestVehicleScheduling:
             fewer_rotations or more_trips_per_rotation or longer_duration
         ), "Opportunity mode should create longer rotations (fewer total, more trips per rotation, or longer duration) than depot mode with small batteries"
 
+    def test_vehicle_scheduling_save_graphs(
+        self, db_session: Session, scenario_with_vehicle_types: Scenario, tmp_path: Path
+    ):
+        """Test that VehicleScheduling can save graphs to disk."""
+        import networkx as nx
+
+        modifier = VehicleScheduling()
+
+        # Use tmp_path for test output
+        output_dir = tmp_path / "graph_output"
+
+        params = {
+            "VehicleScheduling.save_graphs": True,
+            "VehicleScheduling.graph_output_dir": str(output_dir),
+        }
+
+        modifier.modify(session=db_session, params=params)
+
+        # Verify output directory was created
+        assert output_dir.exists()
+
+        # Verify GraphML files were created (one per vehicle type)
+        graphml_files = list(output_dir.glob("*.graphml"))
+        assert len(graphml_files) > 0, "No GraphML files were created"
+
+        # Verify files can be loaded as valid GraphML
+        for graph_file in graphml_files:
+            graph = nx.read_graphml(graph_file)
+            assert len(graph.nodes) > 0, f"Graph {graph_file} has no nodes"
+            assert isinstance(graph, nx.DiGraph), f"Graph {graph_file} is not a DiGraph"
+
+    def test_vehicle_scheduling_no_save_graphs_by_default(
+        self, db_session: Session, scenario_with_vehicle_types: Scenario, tmp_path: Path
+    ):
+        """Test that graphs are NOT saved by default."""
+        modifier = VehicleScheduling()
+
+        output_dir = tmp_path / "graph_output"
+
+        params = {
+            "VehicleScheduling.graph_output_dir": str(output_dir),
+            # save_graphs not set (defaults to False)
+        }
+
+        modifier.modify(session=db_session, params=params)
+
+        # Verify no files were created
+        if output_dir.exists():
+            graphml_files = list(output_dir.glob("*.graphml"))
+            assert len(graphml_files) == 0, "GraphML files created despite save_graphs=False"
+
     def test_document_params(self):
         """Test that document_params returns expected parameters."""
         modifier = VehicleScheduling()
         docs = modifier.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 6
+        assert len(docs) == 8
         assert "VehicleScheduling.minimum_break_time" in docs
         assert "VehicleScheduling.maximum_schedule_duration" in docs
         assert "VehicleScheduling.battery_margin" in docs
         assert "VehicleScheduling.longer_break_time_trips" in docs
         assert "VehicleScheduling.longer_break_time_duration" in docs
         assert "VehicleScheduling.charge_type" in docs
+        assert "VehicleScheduling.save_graphs" in docs
+        assert "VehicleScheduling.graph_output_dir" in docs
 
 
 class TestDepotAssignment:
