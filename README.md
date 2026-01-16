@@ -36,6 +36,12 @@ All steps support:
 - Sequential execution through database state chaining
 - Parameter discovery via the `document_params()` class method
 
+## Recommended Citation
+
+The following publication describes the underlying models and methods used in eFLIPS:
+
+> Heide, L., Guo, S., & Göhlich, D. (2025). From Simulation to Implementation: A Systems Model for Electric Bus Fleet Deployment in Metropolitan Areas. World Electric Vehicle Journal, 16(7), 378. https://doi.org/10.3390/wevj16070378
+
 ## Supported Platforms
 
 - macOS (Intel and Apple Silicon)
