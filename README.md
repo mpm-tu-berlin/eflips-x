@@ -15,7 +15,9 @@ Mechatronics at the Technische Universität Berlin (see https://www.tu.berlin/mp
 With eFLIPS, electric fleets and depots can be simulated, planned and designed.
 This repository contains the workflow orchestrator for running eFLIPS electric city bus network simulations.
 
-<img width="993" height="1404" alt="Poster" src="https://github.com/user-attachments/assets/3b4e821a-e843-455a-b7f8-5c1fc3b2ee9f" />
+<a href="https://github.com/mpm-tu-berlin/eflips-x/blob/main/Poster.pdf">
+  <img style="width: 50%; max-width: 800px; height: auto;" alt="Poster" src="https://github.com/user-attachments/assets/3b4e821a-e843-455a-b7f8-5c1fc3b2ee9f" />
+</a>
 
 
 ## What is eflips-x?
