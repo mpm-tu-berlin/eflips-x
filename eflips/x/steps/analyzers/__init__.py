@@ -5,6 +5,7 @@ This module provides analyzer classes that wrap eflips-eval functionality
 for use within the eflips-x pipeline framework.
 """
 
+from eflips.x.steps.analyzers.bvg_tools import VehicleTypeDepotPlotAnalyzer
 from eflips.x.steps.analyzers.input_analyzers import (
     GeographicTripPlotAnalyzer,
     RotationInfoAnalyzer,
@@ -21,6 +22,8 @@ from eflips.x.steps.analyzers.output_analyzers import (
 )
 
 __all__ = [
+    # BVG-specific analyzers
+    "VehicleTypeDepotPlotAnalyzer",
     # Input analyzers
     "RotationInfoAnalyzer",
     "GeographicTripPlotAnalyzer",
