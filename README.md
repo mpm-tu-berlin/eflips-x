@@ -120,7 +120,9 @@ eflips-x uses Prefect 3 for workflow orchestration. For the best experience, set
 
 ```bash
 # Start a local Prefect server
+poetry run prefect config set PREFECT_API_URL="http://127.0.0.1:4200/api"
 poetry run prefect server start
+# Note that now, you will always have to start the server before running pipelines.
 ```
 
 This will start the Prefect server and UI at http://localhost:4200. The UI provides:
