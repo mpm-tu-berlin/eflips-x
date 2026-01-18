@@ -18,12 +18,14 @@ from pathlib import Path
 from typing import List, Dict, Union, Tuple, Any
 
 from eflips.model import ChargeType, VehicleType
+from matplotlib.figure import Figure
 from prefect import flow
 from sqlalchemy.orm import Session
 
 from eflips.x.flows import run_steps
 from eflips.x.framework import Modifier
 from eflips.x.framework import PipelineContext, PipelineStep
+from eflips.x.steps.analyzers import VehicleTypeDepotPlotAnalyzer
 from eflips.x.steps.generators import BVGXMLIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import (
     MergeStations,
@@ -40,7 +42,6 @@ from eflips.x.steps.modifiers.general_utilities import (
 )
 from eflips.x.steps.modifiers.scheduling import (
     DepotAssignment,
-    IntegratedScheduling,
     StationElectrification,
     VehicleScheduling,
 )
@@ -185,6 +186,30 @@ class CleanSimulationResults(Modifier):
         logger.info(f"Deleted {vehicles_count} vehicles")
 
 
+def save_plot_to_files_in_output_dir(fig: Figure, basename: str) -> None:
+    """
+    Utility mehtod to save a figure to the output directory with given basename.
+
+    :param fig: A Matplotlib Figure object
+    :param basename: The base name for the output files (without extension)
+    :return: None
+    """
+    data_dir = output_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    output_pdf = data_dir / f"{basename}.pdf"
+    fig.savefig(output_pdf, bbox_inches="tight")
+    logger.info(f"Saved plot to: {output_pdf}")
+    output_png = data_dir / f"{basename}.png"
+    fig.savefig(output_png, bbox_inches="tight", dpi=300)
+    logger.info(f"Saved plot to: {output_png}")
+
+
+def output_dir() -> Path:
+    project_root = PipelineStep.find_project_root()
+    data_dir = project_root / "data" / "output" / "bvg"
+    return data_dir
+
+
 # ============================================================================
 # Common Pipeline
 # ============================================================================
@@ -253,6 +278,17 @@ def run_common_pipeline() -> Path:
     # Execute pipeline
     context = PipelineContext(work_dir=work_dir, params=params)
     run_steps(context=context, steps=steps)
+
+    vehicle_type_depot_ploter = (
+        VehicleTypeDepotPlotAnalyzer()
+    )  # Generate vehicle type/depot distribution plot
+    prepared_data = vehicle_type_depot_ploter.execute(context=context)
+    prepared_data.to_excel(
+        output_dir() / "vehicle_km_by_depot_and_vehicle_type.xlsx",
+        index=False,
+    )
+    fig = vehicle_type_depot_ploter.visualize(prepared_data)
+    save_plot_to_files_in_output_dir(fig, "vehicle_km_by_depot_and_vehicle_type")
 
     logger.info(f"Common pipeline complete. Database: {context.current_db}")
     return context.current_db
@@ -472,7 +508,7 @@ def run_term_scenario(common_db: Path) -> None:
     # It rolls back its nested DepotAssignment calls, so we must run DepotAssignment again
     steps = [
         UpdateBatteryCapacity(),
-        VehicleScheduling(), # TODO: Why does IntegratedScheduling not work?
+        VehicleScheduling(),  # TODO: Why does IntegratedScheduling not work?
         DepotAssignment(),  # Re-run since IntegratedScheduling rolls back
         StationElectrification(),
         DepotGenerator(),
