@@ -5,14 +5,19 @@ This module contains analyzers tailored for BVG (Berlin public transport) data a
 """
 
 import warnings
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
+import cartopy.crs as ccrs  # type: ignore[import-untyped]
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns  # type: ignore[import-untyped]
 from eflips.model import Rotation, Route, Station, TripType, VehicleType, Trip
+from geoalchemy2.shape import to_shape
 from matplotlib.figure import Figure
+from matplotlib.patches import Patch
+from matplotlib.ticker import FuncFormatter
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import Analyzer
@@ -266,3 +271,186 @@ Default: 52 weeks
         plt.tight_layout()
 
         return fig
+
+
+# ============================================================================
+# Route Visualization Functions
+# ============================================================================
+
+
+def visualize_routes_by_depot_cartopy(
+    prepared_data: pd.DataFrame, session: Session, projection_type: str = "equidistant"
+) -> Figure:
+    """
+    Create matplotlib/cartopy visualization of routes colored by depot.
+
+    This function creates a publication-quality map showing all routes in the network,
+    with each route colored according to its originating depot. The map uses a
+    locally-centered equidistant projection (or UTM) to provide kilometer-based axes.
+    Depot locations are shown as colored dots matching their respective route colors.
+
+    Args:
+        prepared_data: DataFrame from GeographicTripPlotAnalyzer.analyze()
+                      Expected columns:
+                      - coordinates: List of (lat, lon) tuples for route geometry
+                      - originating_depot_name: Depot name for color grouping
+        session: SQLAlchemy session for querying depot locations
+        projection_type: Type of projection to use
+                        - "equidistant" (default): Azimuthal equidistant centered on network
+                        - "utm": Auto-discovered UTM zone based on network location
+
+    Returns:
+        matplotlib Figure with routes plotted on cartopy axes
+    """
+    # Configure LaTeX plotting
+    configure_latex_plotting()
+
+    # Calculate network centroid from all coordinates
+    all_coords: List[Tuple[float, float]] = []
+    for coords_list in prepared_data["coordinates"]:
+        if coords_list:  # Handle empty coordinate lists
+            all_coords.extend(coords_list)
+
+    if not all_coords:
+        raise ValueError("No coordinate data found in prepared_data")
+
+    # Extract lats and lons for centroid calculation
+    center_lat = np.mean([coord[0] for coord in all_coords])
+    center_lon = np.mean([coord[1] for coord in all_coords])
+
+    # Create projection based on type
+    if projection_type == "utm":
+        # Auto-discover UTM zone from centroid longitude
+        utm_zone = int((center_lon + 180) / 6) + 1
+        southern_hemisphere = center_lat < 0
+        projection = ccrs.UTM(zone=utm_zone, southern_hemisphere=southern_hemisphere)
+    else:  # equidistant (default)
+        # Create azimuthal equidistant projection centered on network
+        projection = ccrs.AzimuthalEquidistant(
+            central_longitude=center_lon, central_latitude=center_lat
+        )
+
+    # Deduplicate routes by unique coordinate sequences
+    # Convert coordinate lists to hashable tuples for grouping
+    prepared_data_copy = prepared_data.copy()
+    prepared_data_copy["coord_hash"] = prepared_data_copy["coordinates"].apply(
+        lambda coords: hash(tuple(coords)) if coords else None
+    )
+
+    # Group by coordinate hash and depot, take first occurrence
+    unique_routes = (
+        prepared_data_copy.groupby(["coord_hash", "originating_depot_name"], dropna=False)
+        .first()
+        .reset_index()
+    )
+
+    # Create color mapping for depots
+    # Separate routes with and without depot assignments
+    unique_depots = sorted(
+        [d for d in prepared_data["originating_depot_name"].unique() if pd.notna(d)]
+    )
+    palette = sns.color_palette("Set2", n_colors=len(unique_depots))
+    depot_colors = dict(zip(unique_depots, palette))
+
+    # Create figure with cartopy projection
+    # Increase height to accommodate legend below
+    fig, ax = plt.subplots(
+        figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), subplot_kw={"projection": projection}
+    )
+
+    # Track if we have routes without depot assignment
+    has_unassigned_routes = False
+
+    # Plot each unique route
+    for idx, row in unique_routes.iterrows():
+        coords = row["coordinates"]
+        if not coords:  # Skip empty coordinate lists
+            continue
+
+        depot_name = row["originating_depot_name"]
+
+        # Extract lats and lons
+        lats = [coord[0] for coord in coords]
+        lons = [coord[1] for coord in coords]
+
+        # Determine color and handle unassigned routes
+        if pd.notna(depot_name):
+            color = depot_colors[depot_name]
+        else:
+            color = "grey"
+            has_unassigned_routes = True
+
+        # Transform from WGS84 to projection coordinates
+        ax.plot(
+            lons,
+            lats,
+            color=color,
+            linewidth=0.8,
+            transform=ccrs.PlateCarree(),  # Input is WGS84
+            alpha=0.7,
+            zorder=2,
+        )
+
+    # Query and plot depot locations
+    for depot_name in unique_depots:
+        # Query the depot station from database
+        depot_station = session.query(Station).filter(Station.name.contains(depot_name)).first()
+
+        if depot_station and depot_station.geom is not None:
+            # Extract latitude and longitude from the station geometry
+            # Assuming geom is a WKBElement with lat/lon
+            point = to_shape(depot_station.geom)  # type: ignore[arg-type]
+            depot_lat = point.y
+            depot_lon = point.x
+
+            # Plot depot location as a colored dot
+            ax.scatter(
+                depot_lon,
+                depot_lat,
+                color=depot_colors[depot_name],
+                s=100,  # Marker size
+                marker="o",
+                edgecolors="black",
+                linewidths=1.5,
+                transform=ccrs.PlateCarree(),
+                zorder=3,  # Place on top of routes
+                alpha=0.9,
+            )
+
+    # Format axes to show kilometers
+    ax.set_xlabel("Distance [km]")
+    ax.set_ylabel("Distance [km]")
+
+    # Convert axis ticks from meters to kilometers
+    def m_to_km_formatter(x: float, pos: int) -> str:
+        return f"{x/1000:.0f}"
+
+    ax.xaxis.set_major_formatter(FuncFormatter(m_to_km_formatter))
+    ax.yaxis.set_major_formatter(FuncFormatter(m_to_km_formatter))
+
+    # Add gridlines with kilometer labels
+    ax.gridlines(draw_labels=True, alpha=0.3, zorder=1)  # type: ignore[attr-defined]
+
+    # Create legend
+    legend_elements = [
+        Patch(facecolor=depot_colors[depot], label=depot, alpha=0.7) for depot in unique_depots
+    ]
+
+    # Add grey lines to legend if they exist
+    if has_unassigned_routes:
+        legend_elements.append(Patch(facecolor="grey", label="No depot assigned", alpha=0.7))
+
+    # Position legend below plot in 3 columns
+    ax.legend(
+        handles=legend_elements,
+        title="Depot",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.15),
+        ncol=3,
+        fontsize=8,
+        framealpha=0.9,
+    )
+
+    plt.tight_layout()
+
+    return fig
