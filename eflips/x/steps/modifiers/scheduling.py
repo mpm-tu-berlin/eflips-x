@@ -410,6 +410,10 @@ class VehicleScheduling(Modifier):
             Type: ChargeType
             Example: ChargeType.OPPORTUNITY
             """.strip(),
+            f"{cls.__name__}.trip_ids": """
+            An (optional) list of trip IDs to consider for scheduling. If provided, only these trips will be included 
+in the scheduling optimization.
+""".strip(),
         }
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
@@ -539,14 +543,40 @@ class VehicleScheduling(Modifier):
                 f"Processing vehicle type {i+1}/{num_vehicle_types}: {vehicle_type.name_short}"
             )
 
-            # Get all passenger trips for this vehicle type
-            trips = (
-                session.query(Trip)
-                .join(Rotation)
-                .filter(Rotation.vehicle_type_id == vehicle_type.id)
-                .filter(Trip.trip_type == TripType.PASSENGER)
-                .all()
-            )
+            if params.get(f"{self.__class__.__name__}.trip_ids") is not None:
+                self.logger.info(
+                    f"Filtering trips for vehicle type {vehicle_type.name_short} based on provided trip IDs"
+                )
+                trip_ids = params[f"{self.__class__.__name__}.trip_ids"]
+                if not isinstance(trip_ids, typing.Iterable):
+                    raise ValueError(
+                        f"Parameter '{self.__class__.__name__}.trip_ids' must be an iterable of trip IDs"
+                    )
+                if not all(isinstance(trip_id, int) for trip_id in trip_ids):
+                    raise ValueError(
+                        f"All elements in parameter '{self.__class__.__name__}.trip_ids' must be integers (trip IDs)"
+                    )
+                # Get all passenger trips for this vehicle type that are in the provided trip IDs
+                trips = (
+                    session.query(Trip)
+                    .join(Rotation)
+                    .filter(Rotation.vehicle_type_id == vehicle_type.id)
+                    .filter(Trip.trip_type == TripType.PASSENGER)
+                    .filter(Trip.id.in_(trip_ids))
+                    .all()
+                )
+            else:
+                self.logger.info(
+                    f"Retrieving all trips for vehicle type {vehicle_type.name_short}"
+                )
+                # Get all passenger trips for this vehicle type
+                trips = (
+                    session.query(Trip)
+                    .join(Rotation)
+                    .filter(Rotation.vehicle_type_id == vehicle_type.id)
+                    .filter(Trip.trip_type == TripType.PASSENGER)
+                    .all()
+                )
 
             # Create the graph of all possible connections between trips
             graph = create_graph(
