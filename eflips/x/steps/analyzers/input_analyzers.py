@@ -17,6 +17,7 @@ import plotly.graph_objs as go  # type: ignore
 import sqlalchemy
 from eflips.eval.input import prepare as eval_input_prepare
 from eflips.eval.input import visualize as eval_input_visualize
+from eflips.eval.input.route_options import RouteCalculationMode
 from eflips.model import Scenario
 from sqlalchemy.orm import Session
 
@@ -126,7 +127,7 @@ class GeographicTripPlotAnalyzer(Analyzer):
     - line_name: the name of the line, which is the first part of the rotation name. Used for sorting
     """
 
-    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v1.0.7", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -139,7 +140,16 @@ Optional parameter to filter rotations. Can be:
 - None to include all rotations (default)
 
 Example: `params[f"{cls.__name__}.rotation_ids"] = [1, 2, 3]`
-            """.strip()
+            """.strip(),
+            f"{cls.__name__}.route_calculation_mode": f"""
+Optional parameter to specify the route calculation mode. Can be one of:
+    - STATIONS_ONLY: Use station points only
+    - ROUTE_SHAPES: Use Route.geom if available, fallback to stations (default)
+    - ROUTE_SHAPES_AND_GEO_LOOKUP: Use Route.geom if available, else lookup via OpenRouteService API
+        """.strip(),
+            f"{cls.__name__}.passenger_trips_only": f"""
+Optional boolean parameter to include only passenger trips. Default is True.
+        """.strip(),
         }
 
     def analyze(
@@ -169,8 +179,23 @@ Example: `params[f"{cls.__name__}.rotation_ids"] = [1, 2, 3]`
         # Extract parameters
         rotation_ids = params.get(f"{self.__class__.__name__}.rotation_ids", None)
 
+        route_calculation_mode = params.get(
+            f"{self.__class__.__name__}.route_calculation_mode",
+            RouteCalculationMode.ROUTE_SHAPES_AND_GEO_LOOKUP,
+        )
+        if isinstance(route_calculation_mode, str):
+            route_calculation_mode = RouteCalculationMode[route_calculation_mode]
+
+        passenger_trips_only = params.get(f"{self.__class__.__name__}.passenger_trips_only", True)
+
         # Call eflips-eval prepare function
-        result = eval_input_prepare.geographic_trip_plot(scenario_id, session, rotation_ids)
+        result = eval_input_prepare.geographic_trip_plot(
+            scenario_id=scenario_id,
+            session=session,
+            rotation_ids=rotation_ids,
+            route_calculation_mode=RouteCalculationMode.ROUTE_SHAPES,
+            passenger_trips_only=True,
+        )
 
         return result
 

@@ -25,7 +25,8 @@ from sqlalchemy.orm import Session
 from eflips.x.flows import run_steps
 from eflips.x.framework import Modifier
 from eflips.x.framework import PipelineContext, PipelineStep
-from eflips.x.steps.analyzers import VehicleTypeDepotPlotAnalyzer
+from eflips.x.steps.analyzers import GeographicTripPlotAnalyzer, VehicleTypeDepotPlotAnalyzer
+from eflips.x.steps.analyzers.bvg_tools import visualize_routes_by_depot_cartopy
 from eflips.x.steps.generators import BVGXMLIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import (
     MergeStations,
@@ -207,6 +208,8 @@ def save_plot_to_files_in_output_dir(fig: Figure, basename: str) -> None:
 def output_dir() -> Path:
     project_root = PipelineStep.find_project_root()
     data_dir = project_root / "data" / "output" / "bvg"
+    if not data_dir.exists():
+        data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 
 
@@ -289,6 +292,13 @@ def run_common_pipeline() -> Path:
     )
     fig = vehicle_type_depot_ploter.visualize(prepared_data)
     save_plot_to_files_in_output_dir(fig, "vehicle_km_by_depot_and_vehicle_type")
+
+    # Geographic route visualization by depot
+    geographic_analyzer = GeographicTripPlotAnalyzer()
+    route_data = geographic_analyzer.execute(context=context)
+    with context.get_session() as session:
+        route_fig = visualize_routes_by_depot_cartopy(route_data, session)
+    save_plot_to_files_in_output_dir(route_fig, "routes_by_depot")
 
     logger.info(f"Common pipeline complete. Database: {context.current_db}")
     return context.current_db

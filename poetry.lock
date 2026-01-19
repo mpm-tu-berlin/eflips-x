@@ -1040,22 +1040,24 @@ xlsxwriter = ">=3.1.9,<4.0.0"
 
 [[package]]
 name = "eflips-eval"
-version = "1.8.0"
+version = "1.9.0"
 description = ""
 optional = false
 python-versions = "<3.14,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_eval-1.8.0-py3-none-any.whl", hash = "sha256:99a0b6605de4a81ab53cc2976de1666436ab93916511bf75a7cf298c7f64308e"},
-    {file = "eflips_eval-1.8.0.tar.gz", hash = "sha256:2c823e4a127691d30749dd9f6ca46fd60b3d09c37d621d38bebb3d916c190842"},
+    { file = "eflips_eval-1.9.0-py3-none-any.whl", hash = "sha256:ad00351173163e4eec2bf1de0684411d93c433849981343ba4366a35d9c3ca8d" },
+    { file = "eflips_eval-1.9.0.tar.gz", hash = "sha256:7d44d9ff17ecfe939b9610c46140cd803f5316e8c5c14325fed9e259384ea8a4" },
 ]
 
 [package.dependencies]
 dash-cytoscape = ">=1.0.1,<2.0.0"
 folium = ">=0.17.0,<0.18.0"
+httpx = ">=0.27.0,<0.28.0"
 matplotlib = ">=3.9.0,<4.0.0"
 pandas = ">=2.2.0,<3.0.0"
 plotly = ">=5.19.0,<6.0.0"
+polyline = ">=2.0.0,<3.0.0"
 seaborn = ">=0.13.2,<0.14.0"
 shapely = ">=2.0.5,<3.0.0"
 
@@ -1801,14 +1803,14 @@ trio = ["trio (>=0.22.0,<1.0)"]
 
 [[package]]
 name = "httpx"
-version = "0.28.1"
+version = "0.27.2"
 description = "The next generation HTTP client."
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"},
-    {file = "httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc"},
+    { file = "httpx-0.27.2-py3-none-any.whl", hash = "sha256:7bb2708e112d8fdd7829cd4243970f0c223274051cb35ee80c03301ee29a3df0" },
+    { file = "httpx-0.27.2.tar.gz", hash = "sha256:f7c2be1d2f3c3c3160d441802406b206c2b76f5947b11115e6df10c6c65e66c2" },
 ]
 
 [package.dependencies]
@@ -1817,6 +1819,7 @@ certifi = "*"
 h2 = {version = ">=3,<5", optional = true, markers = "extra == \"http2\""}
 httpcore = "==1.*"
 idna = "*"
+sniffio = "*"
 
 [package.extras]
 brotli = ["brotli ; platform_python_implementation == \"CPython\"", "brotlicffi ; platform_python_implementation != \"CPython\""]
