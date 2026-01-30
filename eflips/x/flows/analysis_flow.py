@@ -306,9 +306,9 @@ if sys.platform == "darwin":
         "ProcessPoolTaskRunner may have issues on macOS. Using ThreadPoolTaskRunner instead. "
         "Performance will be severy degraded due to GIL."
     )
-    TASK_RUNNER: TaskRunner = ThreadPoolTaskRunner(max_workers=multiprocessing.cpu_count())
+    TASK_RUNNER: TaskRunner = ThreadPoolTaskRunner(max_workers=4)
 else:
-    TASK_RUNNER = ProcessPoolTaskRunner(max_workers=multiprocessing.cpu_count())
+    TASK_RUNNER = ProcessPoolTaskRunner(max_workers=4)
 
 
 @flow(
@@ -430,10 +430,10 @@ def generate_all_plots(
     vehicle_ids = query_all_ids(context, Vehicle)
     logger.info(f"Found {len(vehicle_ids)} vehicles to analyze")
 
-    for vehicle_id in vehicle_ids:
-        output_file = vehicles_dir / f"vehicle_{vehicle_id}.html"
-        future = execute_vehicle_analyzer.submit(vehicle_id, context, output_file)
-        all_futures.append(future)
+    # for vehicle_id in vehicle_ids:
+    #     output_file = vehicles_dir / f"vehicle_{vehicle_id}.html"
+    #     future = execute_vehicle_analyzer.submit(vehicle_id, context, output_file)
+    #     all_futures.append(future)
 
     # Run depot-specific power and occupancy analyzers in parallel
     logger.info("Querying depot information for analysis...")

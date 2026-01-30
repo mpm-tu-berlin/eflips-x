@@ -22,6 +22,9 @@ from eflips.depot.api import (  # type: ignore[import-untyped]
 from eflips.model import (
     Scenario,
     Station,
+    Rotation,
+    Event,
+    Vehicle,
 )
 from sqlalchemy.exc import MultipleResultsFound
 
@@ -390,10 +393,19 @@ Default: False
 
         scenario = session.query(Scenario).one()
 
+        # TODO delete vehicles and events
+
+        rotation_q = session.query(Rotation).filter(Rotation.scenario_id == scenario.id)
+        rotation_q.update({"vehicle_id": None})
+        session.query(Event).filter(Event.scenario_id == scenario.id).delete()
+        session.query(Vehicle).filter(Vehicle.scenario_id == scenario.id).delete()
+
         ##### Step 1: Consumption simulation
         consumption_results = generate_consumption_result(scenario)
         simple_consumption_simulation(
-            scenario, initialize_vehicles=True, consumption_result=consumption_results
+            scenario,
+            initialize_vehicles=True,
+            # consumption_result=consumption_results # TODO this is a temporary change
         )
 
         ##### Step 2: Run the simulation
@@ -408,5 +420,7 @@ Default: False
         ##### Step 3: Consumption simulation
         consumption_results = generate_consumption_result(scenario)
         simple_consumption_simulation(
-            scenario, initialize_vehicles=False, consumption_result=consumption_results
+            scenario,
+            initialize_vehicles=False,
+            # consumption_result=consumption_results # TODO this is a temporary change
         )
