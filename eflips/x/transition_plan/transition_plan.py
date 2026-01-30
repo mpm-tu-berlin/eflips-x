@@ -1,27 +1,29 @@
-import multiprocessing
 import os
 from datetime import datetime
 from pathlib import Path
-from tempfile import gettempdir
+from typing import Any, Dict, List
 
 import sqlalchemy.orm.session
 from eflips.depot.api import SmartChargingStrategy
-from eflips.model import Rotation, VehicleType, Scenario
-from sqlalchemy import func
-
-from eflips.x.framework import PipelineStep, PipelineContext, Modifier
-from eflips.x.flows import run_steps, generate_all_plots
-from eflips.x.steps.modifiers.simulation import Simulation, DepotGenerator
-
+from eflips.model import Rotation, Scenario, VehicleType
 from prefect import flow, task
-
 from prefect.task_runners import ProcessPoolTaskRunner
-from typing import List, Dict, Any
+
+from eflips.x.flows import generate_all_plots
+from eflips.x.framework import Modifier, PipelineContext, PipelineStep
+from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
 
 
-# rewrite Simulation to use a hybrid fleet configuration, and run several flow in parallel with different parameters
 class CreateHybridFleet(Modifier):
+    """
+    Creates a hybrid fleet by adding diesel vehicle types for unelectrified blocks.
 
+    This modifier creates "diesel" versions of existing electric vehicle types
+    with near-zero consumption to represent diesel buses that don't require
+    charging infrastructure.
+    """
+
+    # Mapping: electric_short_name -> (diesel_name, diesel_short_name)
     VEHICLE_TYPE_MAPPING: Dict[str, tuple] = {
         "EN": ("Diesel EN", "D_EN"),
         "GN": ("Diesel GN", "D_GN"),
@@ -77,118 +79,90 @@ class CreateHybridFleet(Modifier):
         session.add(diesel_type)
         return diesel_type
 
+    def _create_all_diesel_types(
+        self,
+        session: sqlalchemy.orm.session.Session,
+        scenario: Scenario,
+    ) -> Dict[str, VehicleType]:
+        """Create diesel versions of all mapped electric vehicle types."""
+        diesel_types: Dict[str, VehicleType] = {}
+
+        for short_name in self.VEHICLE_TYPE_MAPPING.keys():
+            electric_type = (
+                session.query(VehicleType)
+                .filter(
+                    VehicleType.name_short == short_name,
+                    VehicleType.scenario_id == scenario.id,
+                )
+                .one_or_none()
+            )
+
+            if electric_type is not None:
+                diesel_types[short_name] = self._create_diesel_vehicle_type(
+                    session, electric_type, scenario
+                )
+
+        return diesel_types
+
+    def _assign_diesel_types(
+        self,
+        blocks: List[Rotation],
+        diesel_types: Dict[str, VehicleType],
+    ) -> None:
+        """Assign diesel vehicle types to unelectrified blocks."""
+        for block in blocks:
+            original_short = block.vehicle_type.name_short
+            if original_short not in diesel_types:
+                raise ValueError(
+                    f"Unknown vehicle type '{original_short}' for diesel conversion. "
+                    f"Available types: {list(diesel_types.keys())}"
+                )
+            block.vehicle_type = diesel_types[original_short]
+
     def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
         """Apply hybrid fleet simulation configuration to the database."""
         unelectrified_block_ids = params.get(
             f"{self.__class__.__name__}.unelectrified_block_ids", None
         )
 
-        if unelectrified_block_ids is not None or unelectrified_block_ids != []:
-            # Set up hybrid fleet configuration based on electrified blocks
-            # This is a placeholder for the actual implementation
-            print(f"Configuring hybrid fleet with electrified blocks: {unelectrified_block_ids}")
+        if not unelectrified_block_ids:
+            return
 
-            unelectrified_blocks = (
-                session.query(Rotation).filter(Rotation.id.in_(unelectrified_block_ids)).all()
-            )
+        print(f"Configuring hybrid fleet with unelectrified blocks: {unelectrified_block_ids}")
 
-            scenario = unelectrified_blocks[0].scenario
-            # Add diesel vehicle types
+        unelectrified_blocks = (
+            session.query(Rotation).filter(Rotation.id.in_(unelectrified_block_ids)).all()
+        )
 
-            elec_en = (
-                session.query(VehicleType)
-                .filter(VehicleType.name_short == "EN", VehicleType.scenario_id == scenario.id)
-                .one()
-            )
+        if not unelectrified_blocks:
+            return
 
-            diesel_en = VehicleType(
-                scenario=scenario,
-                name="Diesel EN",
-                name_short="D_EN",
-                battery_capacity=elec_en.battery_capacity,
-                charging_curve=elec_en.charging_curve,
-                opportunity_charging_capable=elec_en.opportunity_charging_capable,
-                consumption=0.0001,
-                battery_capacity_reserve=elec_en.battery_capacity_reserve,
-                minimum_charging_power=elec_en.minimum_charging_power,
-                charging_efficiency=elec_en.charging_efficiency,
-            )
+        scenario = unelectrified_blocks[0].scenario
 
-            session.add(diesel_en)
+        # Create diesel vehicle types
+        diesel_types = self._create_all_diesel_types(session, scenario)
 
-            elec_gn = (
-                session.query(VehicleType)
-                .filter(VehicleType.name_short == "GN", VehicleType.scenario_id == scenario.id)
-                .one()
-            )
+        # Assign diesel types to unelectrified blocks
+        self._assign_diesel_types(unelectrified_blocks, diesel_types)
 
-            diesel_gn = VehicleType(
-                scenario=scenario,
-                name="Diesel GN",
-                name_short="D_GN",
-                battery_capacity=elec_gn.battery_capacity,
-                charging_curve=elec_gn.charging_curve,
-                opportunity_charging_capable=elec_gn.opportunity_charging_capable,
-                consumption=0.0001,
-                battery_capacity_reserve=elec_gn.battery_capacity_reserve,
-                minimum_charging_power=elec_gn.minimum_charging_power,
-                charging_efficiency=elec_gn.charging_efficiency,
-            )
-
-            session.add(diesel_gn)
-
-            elec_dd = (
-                session.query(VehicleType)
-                .filter(VehicleType.name_short == "DD", VehicleType.scenario_id == scenario.id)
-                .one()
-            )
-            diesel_dd = VehicleType(
-                scenario=scenario,
-                name="Diesel DD",
-                name_short="D_DD",
-                battery_capacity=elec_dd.battery_capacity,
-                charging_curve=elec_dd.charging_curve,
-                opportunity_charging_capable=elec_dd.opportunity_charging_capable,
-                consumption=0.0001,
-                battery_capacity_reserve=elec_dd.battery_capacity_reserve,
-                minimum_charging_power=elec_dd.minimum_charging_power,
-                charging_efficiency=elec_dd.charging_efficiency,
-            )
-            session.add(diesel_dd)
-
-            for d_block in unelectrified_blocks:
-                if d_block.vehicle_type.name_short == "EN":
-                    d_block.vehicle_type = diesel_en
-                elif d_block.vehicle_type.name_short == "GN":
-                    d_block.vehicle_type = diesel_gn
-                elif d_block.vehicle_type.name_short == "DD":
-                    d_block.vehicle_type = diesel_dd
-                else:
-                    raise ValueError(
-                        f"Unknown vehicle type {d_block.vehicle_type.name_short} for diesel conversion."
-                    )
-
-            session.flush()
+        session.flush()
 
 
 @task
-@flow
-def run_steps_local(context: PipelineContext, steps: List[PipelineStep]) -> None:
-    """Run a sequence of pipeline steps."""
+def run_hybrid_fleet_simulation(
+    context: PipelineContext,
+    steps: List[PipelineStep],
+    plot_output_dir: Path,
+    include_videos: bool,
+    pre_simulation_only: bool,
+) -> None:
+    """Run simulation steps serially, then generate plots."""
     for step in steps:
         step.execute(context=context)
 
-
-@task
-def generate_plots_as_task(
-    context: PipelineContext,
-    output_dir: Path,
-    include_videos: bool = False,
-    pre_simulation_only: bool = False,
-) -> None:
     generate_all_plots(
         context=context,
-        output_dir=output_dir,
+        output_dir=plot_output_dir,
         include_videos=include_videos,
         pre_simulation_only=pre_simulation_only,
     )
@@ -197,110 +171,92 @@ def generate_plots_as_task(
 @flow(
     task_runner=ProcessPoolTaskRunner(max_workers=4),
 )
-def simulate_depot_multi_stage(
-    unelectrified_blocks: List[List], workdir, pipeline_context: PipelineContext
+def simulate_multi_stage_electrification(
+    unelectrified_blocks: List[List[int]],
+    workdir: Path,
+    input_db: Path,
+    log_level: str = "INFO",
+    force_rerun: bool = False,
 ) -> None:
-    """Run multiple simulations with different depot configurations in parallel. The flow is designed as follows:
-    1. For each stage defined by a list of unelectrified blocks:
-        - Create a sub-pipeline context for each flow with a unique working directory.
-        - Configure the CreateHybridFleet step with the current unelectrified blocks.
-        - Add the DepotGenerator and Simulation steps to the pipeline.
-        - Execute the pipeline steps in parallel using Prefect's task runner.
-    2. After all simulations are complete, generate plots for each simulation run.
+    """Run multiple simulations with different depot configurations in parallel.
+
+    Each stage runs serially: CreateHybridFleet -> DepotGenerator -> Simulation -> Plots.
+    Stages run in parallel using ProcessPoolTaskRunner.
+
     Args:
-        unelectrified_blocks (List[List]): A list where each element is a list of unelectrified block IDs for a stage.
-        workdir (Path): The base working directory for the simulations.
-        pipeline_context (PipelineContext): The base pipeline context to be used for each simulation.
-
-
+        unelectrified_blocks: A list where each element is a list of unelectrified block IDs for a stage.
+        workdir: The base working directory for the simulations.
+        input_db: Path to the input database.
+        log_level: Logging level for the pipeline steps.
+        force_rerun: If True, use timestamped directories to force cache miss and re-run all steps.
+                     If False, use deterministic directory names to enable caching.
     """
-
     parallel_flows = []
-    sub_flow_work_dirs = []
 
-    for unelectrified_blocks_per_stage in unelectrified_blocks:
-        sub_pipeline_context = PipelineContext(
-            work_dir=pipeline_context.work_dir,
-            current_db=pipeline_context.current_db,
-            params=pipeline_context.params.copy(),
+    for i, stage_blocks in enumerate(unelectrified_blocks):
+        # Create working directory for this stage
+        if force_rerun:
+            # Timestamp ensures unique dir → cache miss → all steps re-run
+            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            stage_workdir = workdir / f"{run_id}_stage{i}"
+        else:
+            # Deterministic dir name → cache can be used → skip completed steps
+            stage_workdir = workdir / f"stage{i}"
+        os.makedirs(stage_workdir, exist_ok=True)
+
+        # Create fresh params for this stage
+        params: Dict[str, Any] = {
+            "log_level": log_level,
+            "CreateHybridFleet.unelectrified_block_ids": stage_blocks,
+            "DepotGenerator.generate_optimal_depot": False,
+            "Simulation.smart_charging": SmartChargingStrategy.NONE,
+        }
+
+        # Create context for this stage
+        sub_context = PipelineContext(
+            work_dir=stage_workdir,
+            current_db=input_db,
+            params=params,
         )
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # specify another output dir / work dir for each flow
-        sub_pipeline_context.work_dir = workdir / (
-            run_id + "stage" + str(unelectrified_blocks.index(unelectrified_blocks_per_stage))
-        )
-        sub_flow_work_dirs.append(sub_pipeline_context.work_dir)
+        # Build pipeline steps
+        steps: List[PipelineStep] = [
+            CreateHybridFleet(),
+            DepotGenerator(),
+            Simulation(),
+        ]
 
-        os.makedirs(sub_pipeline_context.work_dir, exist_ok=True)
-        steps = []
-        sub_pipeline_context.params["CreateHybridFleet.unelectrified_block_ids"] = (
-            unelectrified_blocks_per_stage
-        )
-        create_hybrid_fleet = CreateHybridFleet()
-        steps.append(create_hybrid_fleet)
-        sub_pipeline_context.params["DepotGenerator.generate_optimal_depot"] = False
-        depot_generator = DepotGenerator()
-        steps.append(depot_generator)
-
-        sub_pipeline_context.params["Simulation.smart_charging"] = SmartChargingStrategy.NONE
-        simulation = Simulation()
-        steps.append(simulation)
-
-        parallel_flows.append(run_steps_local.submit(context=sub_pipeline_context, steps=steps))
-
-        print("Waiting for simulations to complete...")
-
-    for pf in parallel_flows:
-        pf.result()
-
-    plot_flows = []
-
-    for run_dir in sub_flow_work_dirs:
-        plot_pipeline_context = PipelineContext(
-            work_dir=run_dir,
-            current_db=run_dir / "step_003_Simulation.db",
-            # TODO it is a hardcoded step name here, need to improve. And still need to delete all the existing dirs.
-            params=pipeline_context.params,
-        )
-        plot_flows.append(
-            generate_plots_as_task.submit(
-                context=plot_pipeline_context,
-                output_dir=run_dir / "plots",
+        # Submit stage for parallel execution
+        parallel_flows.append(
+            run_hybrid_fleet_simulation.submit(
+                context=sub_context,
+                steps=steps,
+                plot_output_dir=stage_workdir / "plots",
                 include_videos=False,
                 pre_simulation_only=False,
             )
         )
 
-    print("Waiting for plot generation to complete...")
+    print("Waiting for simulations to complete...")
+    for pf in parallel_flows:
+        pf.result()
+    print("All stages completed.")
 
 
 if __name__ == "__main__":
     unelectrified_blocks = [[694, 695, 696, 697, 698, 699, 700, 701, 702, 703, 704], [694]]
 
-    # setting curent db path
-    # pass PipelineConstext into flow
-
     work_dir = Path(__file__).parent.parent.parent / "transition_plan"
-    print(f"Working directory: {work_dir}")
-
     data_dir = Path(__file__).parent.parent.parent.parent / "data"
-    current_db = data_dir / "eflips_demo.db"
+    input_db = data_dir / "eflips_demo.db"
 
-    params: Dict[str, Any] = {
-        "log_level": "INFO",
-    }
+    print(f"Working directory: {work_dir}")
+    print(f"Input database: {input_db}")
 
-    pipeline_context = PipelineContext(
-        work_dir=work_dir,
-        current_db=current_db,
-        params=params,
-    )
-    simulate_depot_multi_stage(
+    simulate_multi_stage_electrification(
         unelectrified_blocks=unelectrified_blocks,
         workdir=work_dir,
-        pipeline_context=pipeline_context,
+        input_db=input_db,
+        log_level="INFO",
+        force_rerun=False,
     )
-    print(pipeline_context.current_db)
-
-    # get all dir under work_dir
