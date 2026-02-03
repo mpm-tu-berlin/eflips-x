@@ -13,7 +13,7 @@ dependencies = [
     "eflips-depot",
     "eflips-ingest",
     "eflips-eval",
-    "eflips-opt",
+    "eflips-opt @ file:///home/shuyao/PycharmProjects/eflips-opt",
     "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@main",
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
     "fuzzywuzzy (>=0.18.0,<0.19.0)",

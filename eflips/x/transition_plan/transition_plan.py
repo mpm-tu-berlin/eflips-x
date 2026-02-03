@@ -1,262 +1,469 @@
-import os
-from datetime import datetime
+from dataclasses import dataclass, field, asdict
+from typing import Dict, Any, Optional, List
 from pathlib import Path
-from typing import Any, Dict, List
 
 import sqlalchemy.orm.session
-from eflips.depot.api import SmartChargingStrategy
-from eflips.model import Rotation, Scenario, VehicleType
-from prefect import flow, task
-from prefect.task_runners import ProcessPoolTaskRunner
 
-from eflips.x.flows import generate_all_plots
-from eflips.x.framework import Modifier, PipelineContext, PipelineStep
-from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
+from eflips.x.framework import Modifier, Analyzer, PipelineStep
+from eflips.x.framework import PipelineContext
+from eflips.opt.transition_planning.transition_planning import (
+    ParameterRegistry,
+    ConstraintRegistry,
+    ExpressionRegistry,
+    TransitionPlannerModel,
+    SetVariableRegistry,
+)
+from eflips.model import Scenario, VehicleType, Area, Station, Depot, Rotation
+from eflips.tco import init_tco_parameters
 
 
-class CreateHybridFleet(Modifier):
-    """
-    Creates a hybrid fleet by adding diesel vehicle types for unelectrified blocks.
+@dataclass
+class VehicleTypeConfig:
+    name_short: str
+    name: str
+    useful_life: int
+    procurement_cost: float
+    cost_escalation: float
+    average_electricity_consumption: float
+    procurement_cost_diesel_equivalent: float
+    cost_escalation_diesel_equivalent: float
+    average_diesel_consumption: float
 
-    This modifier creates "diesel" versions of existing electric vehicle types
-    with near-zero consumption to represent diesel buses that don't require
-    charging infrastructure.
-    """
+    def to_dict(self, vehicle_id: int) -> Dict[str, Any]:
+        return {
+            "id": vehicle_id,
+            "name": self.name,
+            "useful_life": self.useful_life,
+            "procurement_cost": self.procurement_cost,
+            "cost_escalation": self.cost_escalation,
+            "average_electricity_consumption": self.average_electricity_consumption,
+            "procurement_cost_diesel_equivalent": self.procurement_cost_diesel_equivalent,
+            "cost_escalation_diesel_equivalent": self.cost_escalation_diesel_equivalent,
+            "average_diesel_consumption": self.average_diesel_consumption,
+        }
 
-    # Mapping: electric_short_name -> (diesel_name, diesel_short_name)
-    VEHICLE_TYPE_MAPPING: Dict[str, tuple] = {
-        "EN": ("Diesel EN", "D_EN"),
-        "GN": ("Diesel GN", "D_GN"),
-        "DD": ("Diesel DD", "D_DD"),
+
+@dataclass
+class BatteryTypeConfig:
+    name: str
+    procurement_cost: float
+    useful_life: int
+    cost_escalation: float
+
+    def to_dict(self, battery_id: Optional[int] = None) -> Dict[str, Any]:
+        return {
+            "id": battery_id,
+            "name": self.name,
+            "procurement_cost": self.procurement_cost,
+            "useful_life": self.useful_life,
+            "cost_escalation": self.cost_escalation,
+        }
+
+
+@dataclass
+class ChargingPointTypeConfig:
+    type: str
+    name: str
+    procurement_cost: float
+    useful_life: int
+    cost_escalation: float
+
+    def to_dict(self, charger_id: Optional[int] = None) -> Dict[str, Any]:
+        return {
+            "id": charger_id,
+            "type": self.type,
+            "name": self.name,
+            "procurement_cost": self.procurement_cost,
+            "useful_life": self.useful_life,
+            "cost_escalation": self.cost_escalation,
+        }
+
+
+@dataclass
+class ChargingInfrastructureConfig:
+    type: str
+    name: str
+    procurement_cost: float
+    useful_life: int
+    cost_escalation: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ScenarioTCOConfig:
+    project_duration: int = 10
+    interest_rate: float = 0.05
+    inflation_rate: float = 0.02
+    staff_cost: float = 25.0
+    fuel_cost: Dict[str, float] = field(
+        default_factory=lambda: {"diesel": 1, "electricity": 0.1794}
+    )
+    vehicle_maint_cost: Dict[str, float] = field(
+        default_factory=lambda: {"diesel": 0.5, "electricity": 0.35}
+    )
+    infra_maint_cost: float = 1000
+    cost_escalation_rate: Dict[str, float] = field(
+        default_factory=lambda: {
+            "general": 0.02,
+            "staff": 0.03,
+            "diesel": 0.07,
+            "electricity": 0.038,
+        }
+    )
+    annual_budget_limit: float = 2.0e7
+    # TODO add proper keys for depot times
+    depot_time_plan: Dict[str, int] = field(
+        default_factory=lambda: {
+            "BF RL": 2032,
+            "BF KL": 2028,
+            "BF SN": 2027,
+            "BF I": 2030,
+            "BF S": 2030,
+            "BF B": 2030,
+            "BF C": 2034,
+            "BF M": 2035,
+            "BF L": 2030,
+        }
+    )
+    current_year: int = 2026
+    max_station_construction_per_year: int = 5
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class TCOParameterConfigurator(Modifier):
+    # Vehicle type configurations keyed by name_short
+    # Battery prices from "Wirtschaftlichkeit von Elektromobilität in gewerblichen Anwendungen", April 2015
+    # Price is a prognose for 2025 in an optimistic scenario
+    DEFAULT_VEHICLE_CONFIGS: Dict[str, VehicleTypeConfig] = {
+        "EN": VehicleTypeConfig(
+            name_short="EN",
+            name="Ebusco 3.0 12 large battery",
+            useful_life=14,
+            procurement_cost=340000.0,
+            cost_escalation=-0.02,
+            average_electricity_consumption=1.48,
+            procurement_cost_diesel_equivalent=275000.0,
+            cost_escalation_diesel_equivalent=0.02,
+            average_diesel_consumption=0.449,
+        ),
+        "DD": VehicleTypeConfig(
+            name_short="DD",
+            name="Solaris Urbino 18 large battery",
+            useful_life=14,
+            procurement_cost=603000.0,
+            cost_escalation=-0.02,
+            average_electricity_consumption=2.16,
+            procurement_cost_diesel_equivalent=330000.0,
+            cost_escalation_diesel_equivalent=0.02,
+            average_diesel_consumption=0.589,
+        ),
+        "GN": VehicleTypeConfig(
+            name_short="GN",
+            name="Alexander Dennis Enviro500EV large battery",
+            useful_life=14,
+            procurement_cost=650000.0,
+            cost_escalation=-0.02,
+            average_electricity_consumption=2.16,
+            procurement_cost_diesel_equivalent=510000.0,
+            cost_escalation_diesel_equivalent=0.02,
+            average_diesel_consumption=0.589,
+        ),
     }
 
-    DIESEL_CONSUMPTION = 0.0001  # Near-zero consumption for diesel simulation
+    # Battery configurations keyed by vehicle name_short (shares battery with vehicle)
+    DEFAULT_BATTERY_CONFIGS: Dict[str, BatteryTypeConfig] = {
+        "EN": BatteryTypeConfig(
+            name="Ebusco 3.0 12 large battery",
+            procurement_cost=190,
+            useful_life=7,
+            cost_escalation=-0.03,
+        ),
+        "GN": BatteryTypeConfig(
+            name="Solaris Urbino 18 large battery",
+            procurement_cost=190,
+            useful_life=7,
+            cost_escalation=-0.03,
+        ),
+        "DD": BatteryTypeConfig(
+            name="Alexander Dennis Enviro500EV large battery",
+            procurement_cost=190,
+            useful_life=7,
+            cost_escalation=-0.03,
+        ),
+    }
+
+    # Charging point configurations
+    # Prices from Jefferies and Göhlich (2020)
+    DEFAULT_CHARGING_POINT_CONFIGS: Dict[str, ChargingPointTypeConfig] = {
+        "depot": ChargingPointTypeConfig(
+            type="depot",
+            name="Depot Charging Point",
+            procurement_cost=100000.0,
+            useful_life=20,
+            cost_escalation=0,
+        ),
+        "opportunity": ChargingPointTypeConfig(
+            type="opportunity",
+            name="Opportunity Charging Point",
+            procurement_cost=250000.0,
+            useful_life=20,
+            cost_escalation=0,
+        ),
+    }
+
+    # Charging infrastructure configurations
+    # Prices from Jefferies and Göhlich (2020)
+    DEFAULT_CHARGING_INFRA_CONFIGS = [
+        ChargingInfrastructureConfig(
+            type="depot",
+            name="Depot Charging Infrastructure",
+            procurement_cost=2000000.0,
+            useful_life=20,
+            cost_escalation=0,
+        ),
+        ChargingInfrastructureConfig(
+            type="station",
+            name="Opportunity Charging Infrastructure",
+            procurement_cost=500000.0,
+            useful_life=20,
+            cost_escalation=0,
+        ),
+    ]
 
     def __init__(self, code_version: str = "1", **kwargs: Any) -> None:
         super().__init__(code_version=code_version, **kwargs)
 
-    @classmethod
     def document_params(cls) -> Dict[str, str]:
         return {
             **super().document_params(),
-            f"{cls.__name__}.unelectrified_block_ids": """
-    The list of integers representing electrified blocks in this depot simulation. All unelectrified blocks are regarded as 
-    diesel blocks and will be assigned to vehicles with very low energy consumption representing the diesel buses and only 
-    use constant consumption estimation.
-
-    Default: None
-                """.strip(),
         }
 
-    def _create_diesel_vehicle_type(
-        self,
-        session: sqlalchemy.orm.session.Session,
-        electric_type: VehicleType,
-        scenario: Scenario,
-    ) -> VehicleType:
-        """Create a diesel version of an electric vehicle type."""
-        short_name = electric_type.name_short
-        if short_name not in self.VEHICLE_TYPE_MAPPING:
-            raise ValueError(
-                f"No diesel type mapping for vehicle type '{short_name}'. "
-                f"Available mappings: {list(self.VEHICLE_TYPE_MAPPING.keys())}"
-            )
+    def _query_vehicle_and_battery_ids_from_name_short(
+        self, session: sqlalchemy.orm.session.Session, scenario_id: int
+    ) -> Dict[str, tuple[int, Optional[int]]]:
+        """Query vehicle type and battery type IDs from the database.
 
-        diesel_name, diesel_short = self.VEHICLE_TYPE_MAPPING[short_name]
-
-        diesel_type = VehicleType(
-            scenario=scenario,
-            name=diesel_name,
-            name_short=diesel_short,
-            battery_capacity=electric_type.battery_capacity,
-            charging_curve=electric_type.charging_curve,
-            opportunity_charging_capable=electric_type.opportunity_charging_capable,
-            consumption=self.DIESEL_CONSUMPTION,
-            battery_capacity_reserve=electric_type.battery_capacity_reserve,
-            minimum_charging_power=electric_type.minimum_charging_power,
-            charging_efficiency=electric_type.charging_efficiency,
-        )
-        session.add(diesel_type)
-        return diesel_type
-
-    def _create_all_diesel_types(
-        self,
-        session: sqlalchemy.orm.session.Session,
-        scenario: Scenario,
-    ) -> Dict[str, VehicleType]:
-        """Create diesel versions of all mapped electric vehicle types."""
-        diesel_types: Dict[str, VehicleType] = {}
-
-        for short_name in self.VEHICLE_TYPE_MAPPING.keys():
-            electric_type = (
-                session.query(VehicleType)
+        Returns:
+            A dict mapping vehicle type name_short to a tuple of
+            (vehicle_type_id, battery_type_id). battery_type_id is None
+            if the vehicle type has no associated battery.
+        """
+        result = {}
+        for name_short in self.DEFAULT_VEHICLE_CONFIGS.keys():
+            row = (
+                session.query(VehicleType.id, VehicleType.battery_type_id)
                 .filter(
-                    VehicleType.name_short == short_name,
-                    VehicleType.scenario_id == scenario.id,
+                    VehicleType.scenario_id == scenario_id,
+                    VehicleType.name_short == name_short,
                 )
                 .one_or_none()
             )
+            if row:
+                vehicle_id = row[0]
+                battery_id = row[1] if row[1] is not None else None
+                result[name_short] = (vehicle_id, battery_id)
+        return result
 
-            if electric_type is not None:
-                diesel_types[short_name] = self._create_diesel_vehicle_type(
-                    session, electric_type, scenario
-                )
+    def _query_charging_point_ids(
+        self, session: sqlalchemy.orm.session.Session, scenario_id: int
+    ) -> Dict[str, Optional[int]]:
+        """Query charging point type IDs from the database."""
+        depot_row = (
+            session.query(Area.charging_point_type_id)
+            .filter(
+                Area.scenario_id == scenario_id,
+                Area.charging_point_type_id.isnot(None),
+            )
+            .first()
+        )
+        station_row = (
+            session.query(Station.charging_point_type_id)
+            .filter(
+                Station.scenario_id == scenario_id,
+                Station.charging_point_type_id.isnot(None),
+            )
+            .first()
+        )
+        return {
+            "depot": depot_row[0] if depot_row else None,
+            "opportunity": station_row[0] if station_row else None,
+        }
 
-        return diesel_types
+    def _build_tco_parameters(self, session: sqlalchemy.orm.session.Session) -> None:
+        """Build and initialize TCO parameters from configuration."""
+        scenario = session.query(Scenario).all()
+        scenario_id = scenario[0].id
 
-    def _assign_diesel_types(
-        self,
-        blocks: List[Rotation],
-        diesel_types: Dict[str, VehicleType],
-    ) -> None:
-        """Assign diesel vehicle types to unelectrified blocks."""
-        for block in blocks:
-            original_short = block.vehicle_type.name_short
-            if original_short not in diesel_types:
-                raise ValueError(
-                    f"Unknown vehicle type '{original_short}' for diesel conversion. "
-                    f"Available types: {list(diesel_types.keys())}"
-                )
-            block.vehicle_type = diesel_types[original_short]
+        vehicle_and_battery_ids = self._query_vehicle_and_battery_ids_from_name_short(
+            session, scenario_id
+        )
+        charging_point_ids = self._query_charging_point_ids(session, scenario_id)
+
+        vehicle_types = [
+            config.to_dict(vehicle_and_battery_ids[name_short][0])
+            for name_short, config in self.DEFAULT_VEHICLE_CONFIGS.items()
+            if name_short in vehicle_and_battery_ids
+        ]
+
+        battery_types = [
+            config.to_dict(vehicle_and_battery_ids.get(name_short, (None, None))[1])
+            for name_short, config in self.DEFAULT_BATTERY_CONFIGS.items()
+        ]
+
+        charging_point_types = [
+            config.to_dict(charging_point_ids.get(cp_type))
+            for cp_type, config in self.DEFAULT_CHARGING_POINT_CONFIGS.items()
+        ]
+
+        charging_infrastructure = [
+            config.to_dict() for config in self.DEFAULT_CHARGING_INFRA_CONFIGS
+        ]
+
+        scenario_tco_parameters = ScenarioTCOConfig().to_dict()
+
+        init_tco_parameters(
+            scenario=scenario[0],
+            scenario_tco_parameters=scenario_tco_parameters,
+            vehicle_types=vehicle_types,
+            battery_types=battery_types,
+            charging_point_types=charging_point_types,
+            charging_infrastructure=charging_infrastructure,
+        )
 
     def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
-        """Apply hybrid fleet simulation configuration to the database."""
-        unelectrified_block_ids = params.get(
-            f"{self.__class__.__name__}.unelectrified_block_ids", None
+        self._build_tco_parameters(session)
+
+
+class TransitionPlanner(Analyzer):
+
+    def __init__(self, code_version: str = "1", **kwargs: Any) -> None:
+        super().__init__(code_version=code_version, **kwargs)
+        self.result: Optional[Dict[str, Any]] = None
+
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            **super().document_params(),
+            f"{cls.__name__}.name": """
+            Name of the transition planner model instance.
+        
+            Default: None
+                        """.strip(),
+            f"{cls.__name__}.sets": """
+        Registered sets to be used in the transition planner model.
+        Default: None
+                    """.strip(),
+            f"{cls.__name__}.variables": """
+        Registered variables to be used in the transition planner model.
+        Default: None
+                    """.strip(),
+            f"{cls.__name__}.constraints": """
+        Registered constraints to be used in the transition planner model.
+        Default: None
+                    """.strip(),
+            f"{cls.__name__}.expressions": """
+        Registered expressions to be used in the transition planner model.
+        Default: None
+                    """.strip(),
+            f"{cls.__name__}.objective_components": """
+                Components of objective function to be optimized in the transition planner model. Must be included in expressions
+                Default: None
+                            """.strip(),
+        }
+
+    def analyze(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Dict:
+
+        scenario = session.query(Scenario).all()[0]
+        transition_planner_parameters = ParameterRegistry(session, scenario)
+
+        set_variable_registry = SetVariableRegistry(transition_planner_parameters)
+        constraint_registry = ConstraintRegistry(transition_planner_parameters)
+        expression_registry = ExpressionRegistry(transition_planner_parameters)
+
+        model = TransitionPlannerModel(
+            name=params.get("name", "TransitionPlannerModel"),
+            params=transition_planner_parameters,
+            set_variable_registry=set_variable_registry,
+            constraint_registry=constraint_registry,
+            expression_registry=expression_registry,
+            sets=params.get("sets", []),
+            variables=params.get("variables", []),
+            constraints=params.get("constraints", []),
+            expressions=params.get("expressions", []),
+            objective_components=params.get("objective_components", []),
         )
+        model.solve()
+        yearly_vehicle_assignment, yearly_cost_breakdown = (
+            model.visualize()
+        )  # TODO make it align with the framework logging
 
-        if not unelectrified_block_ids:
-            return
+        electrified_blocks = {}
+        unelectrified_blocks = {}
+        accumulated_electrified_blocks = set()
 
-        print(f"Configuring hybrid fleet with unelectrified blocks: {unelectrified_block_ids}")
+        for year in range(1, scenario.tco_parameters["project_duration"] + 1):
+            electrified_blocks[year] = model.get_electrified_blocks(year=year)
+            accumulated_electrified_blocks.update(electrified_blocks[year])
 
-        unelectrified_blocks = (
-            session.query(Rotation).filter(Rotation.id.in_(unelectrified_block_ids)).all()
-        )
+            if accumulated_electrified_blocks:
+                unelectrified_query = session.query(Rotation.id).filter(
+                    Rotation.scenario_id == scenario.id,
+                    Rotation.id.notin_(accumulated_electrified_blocks),
+                )
+            else:
+                unelectrified_query = session.query(Rotation.id).filter(
+                    Rotation.scenario_id == scenario.id,
+                )
+            unelectrified_blocks[year] = [row[0] for row in unelectrified_query.all()]
 
-        if not unelectrified_blocks:
-            return
-
-        scenario = unelectrified_blocks[0].scenario
-
-        # Create diesel vehicle types
-        diesel_types = self._create_all_diesel_types(session, scenario)
-
-        # Assign diesel types to unelectrified blocks
-        self._assign_diesel_types(unelectrified_blocks, diesel_types)
-
-        session.flush()
-
-
-@task
-def run_hybrid_fleet_simulation(
-    context: PipelineContext,
-    steps: List[PipelineStep],
-    plot_output_dir: Path,
-    include_videos: bool,
-    pre_simulation_only: bool,
-) -> None:
-    """Run simulation steps serially, then generate plots."""
-    for step in steps:
-        step.execute(context=context)
-
-    generate_all_plots(
-        context=context,
-        output_dir=plot_output_dir,
-        include_videos=include_videos,
-        pre_simulation_only=pre_simulation_only,
-    )
+        self.result = {
+            # "electrified_blocks": electrified_blocks,
+            "unelectrified_blocks": unelectrified_blocks,
+            "yearly_vehicle_assignment": yearly_vehicle_assignment,
+            "yearly_cost_breakdown": yearly_cost_breakdown,
+        }
+        return self.result
 
 
-@flow(
-    task_runner=ProcessPoolTaskRunner(max_workers=4),
-)
-def simulate_multi_stage_electrification(
-    unelectrified_blocks: List[List[int]],
+def run_transition_planner(
     workdir: Path,
     input_db: Path,
     log_level: str = "INFO",
-    force_rerun: bool = False,
-) -> None:
-    """Run multiple simulations with different depot configurations in parallel.
+    sets: Optional[List[str]] = None,
+    variables: Optional[List[str]] = None,
+    constraints: Optional[List[str]] = None,
+    expressions: Optional[List[str]] = None,
+    objective_components: Optional[List[str]] = None,
+) -> tuple[Path, Optional[Dict[str, Any]]]:
+    """Run the transition planner model.
 
-    Each stage runs serially: CreateHybridFleet -> DepotGenerator -> Simulation -> Plots.
-    Stages run in parallel using ProcessPoolTaskRunner.
-
-    Args:
-        unelectrified_blocks: A list where each element is a list of unelectrified block IDs for a stage.
-        workdir: The base working directory for the simulations.
-        input_db: Path to the input database.
-        log_level: Logging level for the pipeline steps.
-        force_rerun: If True, use timestamped directories to force cache miss and re-run all steps.
-                     If False, use deterministic directory names to enable caching.
+    Returns:
+        A tuple of (output_db_path, transition_planner_result).
+        transition_planner_result contains 'electrified_vehicles' and
+        'electrified_blocks' dicts keyed by year.
     """
-    parallel_flows = []
 
-    for i, stage_blocks in enumerate(unelectrified_blocks):
-        # Create working directory for this stage
-        if force_rerun:
-            # Timestamp ensures unique dir → cache miss → all steps re-run
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            stage_workdir = workdir / f"{run_id}_stage{i}"
-        else:
-            # Deterministic dir name → cache can be used → skip completed steps
-            stage_workdir = workdir / f"stage{i}"
-        os.makedirs(stage_workdir, exist_ok=True)
-
-        # Create fresh params for this stage
-        params: Dict[str, Any] = {
-            "log_level": log_level,
-            "CreateHybridFleet.unelectrified_block_ids": stage_blocks,
-            "DepotGenerator.generate_optimal_depot": False,
-            "Simulation.smart_charging": SmartChargingStrategy.NONE,
-        }
-
-        # Create context for this stage
-        sub_context = PipelineContext(
-            work_dir=stage_workdir,
-            current_db=input_db,
-            params=params,
-        )
-
-        # Build pipeline steps
-        steps: List[PipelineStep] = [
-            CreateHybridFleet(),
-            DepotGenerator(),
-            Simulation(),
-        ]
-
-        # Submit stage for parallel execution
-        parallel_flows.append(
-            run_hybrid_fleet_simulation.submit(
-                context=sub_context,
-                steps=steps,
-                plot_output_dir=stage_workdir / "plots",
-                include_videos=False,
-                pre_simulation_only=False,
-            )
-        )
-
-    print("Waiting for simulations to complete...")
-    for pf in parallel_flows:
-        pf.result()
-    print("All stages completed.")
-
-
-if __name__ == "__main__":
-    unelectrified_blocks = [[694, 695, 696, 697, 698, 699, 700, 701, 702, 703, 704], [694]]
-
-    work_dir = Path(__file__).parent.parent.parent / "transition_plan"
-    data_dir = Path(__file__).parent.parent.parent.parent / "data"
-    input_db = data_dir / "eflips_demo.db"
-
-    print(f"Working directory: {work_dir}")
-    print(f"Input database: {input_db}")
-
-    simulate_multi_stage_electrification(
-        unelectrified_blocks=unelectrified_blocks,
-        workdir=work_dir,
-        input_db=input_db,
-        log_level="INFO",
-        force_rerun=False,
+    context_params: Dict[str, Any] = {
+        "log_level": log_level,
+        "sets": sets if sets is not None else [],
+        "variables": variables if variables is not None else [],
+        "constraints": constraints if constraints is not None else [],
+        "expressions": expressions if expressions is not None else [],
+        "objective_components": objective_components if objective_components is not None else [],
+    }
+    context = PipelineContext(
+        work_dir=workdir,
+        current_db=input_db,
+        params=context_params,
     )
+
+    tco_parameter_config = TCOParameterConfigurator()
+    transition_planner = TransitionPlanner()
+    steps: List[PipelineStep] = [tco_parameter_config, transition_planner]
+    from eflips.x.flows import run_steps
+
+    run_steps(context=context, steps=steps)
+    return context.current_db, transition_planner.result
