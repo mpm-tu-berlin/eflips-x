@@ -2,7 +2,8 @@ import os
 from datetime import datetime
 
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 from pathlib import Path
@@ -116,30 +117,30 @@ if __name__ == "__main__":
 
     # Plot yearly vehicle assignment
     fig, ax = plt.subplots(figsize=(10, 6))
-    yearly_vehicle_assignment.plot(kind='bar', ax=ax)
+    yearly_vehicle_assignment.plot(kind="bar", ax=ax)
     ax.set_xlabel("Year")
     ax.set_ylabel("Number of Vehicles")
     ax.set_title("Yearly Vehicle Assignment")
     ax.legend()
-    fig.savefig(work_dir / "yearly_vehicle_assignment.png", dpi=300, bbox_inches='tight')
+    fig.savefig(work_dir / "yearly_vehicle_assignment.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
     # Plot yearly cost breakdown
     fig, ax = plt.subplots(figsize=(10, 6))
-    yearly_cost_breakdown.plot(kind='bar', stacked=True, ax=ax)
+    yearly_cost_breakdown.plot(kind="bar", stacked=True, ax=ax)
     ax.set_xlabel("Year")
     ax.set_ylabel("Cost")
     ax.set_title("Yearly Cost Breakdown")
     ax.legend()
-    fig.savefig(work_dir / "yearly_cost_breakdown.png", dpi=300, bbox_inches='tight')
+    fig.savefig(work_dir / "yearly_cost_breakdown.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
     print(f"Plots saved to {work_dir}")
 
-    simulate_multi_stage_electrification(
-        unelectrified_blocks=unelectrified_blocks,
-        workdir=work_dir,
-        input_db=current_db,
-        log_level="INFO",
-        # force_rerun=True,
-    )
+    # simulate_multi_stage_electrification(
+    #     unelectrified_blocks=unelectrified_blocks,
+    #     workdir=work_dir,
+    #     input_db=current_db,
+    #     log_level="INFO",
+    #     # force_rerun=True,
+    # )

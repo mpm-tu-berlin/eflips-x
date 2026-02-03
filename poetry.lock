@@ -1158,7 +1158,7 @@ dash-cytoscape = ">=1.0.2,<2.0"
 eflips-eval = ">=1.7.6,<2.0.0"
 eflips-model = ">=3.0.0,<11.0.0"
 eflips-schedule-rust = ">=2.0.1,<3.0"
-eflips-tco = {git = "https://github.com/mpm-tu-berlin/eflips-tco.git", rev = "main"}
+eflips-tco = {git = "https://github.com/mpm-tu-berlin/eflips-tco.git", rev = "personal/shuyao"}
 gurobipy = ">=12.0.1,<13.0"
 kaleido = "0.2.1"
 matplotlib = ">=3.10.7,<4.0.0"
@@ -1167,14 +1167,17 @@ numpy = ">=1.26.4,<3.0"
 openrouteservice = ">=2.3.3,<3.0"
 pandas = ">=2.1,<3.0"
 plotly = ">=5.22.0,<6.0"
+polyline = ">=2.0.4,<3.0.0"
 pyomo = ">=6.7.1,<7.0"
 scipy = ">=1.14.0,<2.0"
 shapely = ">=2.0.3,<3.0"
 tqdm = ">=4.66.4,<5.0"
 
 [package.source]
-type = "directory"
-url = "../eflips-opt"
+type = "git"
+url = "https://github.com/mpm-tu-berlin/eflips-opt.git"
+reference = "feature/transition-planning"
+resolved_reference = "39f489880befbeb13bf951cd351961505025b219"
 
 [[package]]
 name = "eflips-schedule-rust"
@@ -1308,8 +1311,8 @@ pandas = ">=2.3.0,<3.0.0"
 [package.source]
 type = "git"
 url = "https://github.com/mpm-tu-berlin/eflips-tco.git"
-reference = "main"
-resolved_reference = "270b429d73e4369faac87234a0fb072d2ca2362c"
+reference = "personal/shuyao"
+resolved_reference = "c15012d11ab52f3a0a614d8e2dfd6eba9d90b900"
 
 [[package]]
 name = "et-xmlfile"
@@ -6659,4 +6662,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "8247c1314cac36932ab05c2410cdb0ed612c653caa8237521cea106d4b60aeb1"
+content-hash = "bf84409c9af652d121e0fc095ff84a402064dd6943cb84634a535e9bbe4fd554"
