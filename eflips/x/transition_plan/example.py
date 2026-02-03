@@ -26,7 +26,7 @@ if __name__ == "__main__":
     os.makedirs(work_dir, exist_ok=True)
 
     data_dir = Path(__file__).parent.parent.parent.parent / "data"
-    input_db = data_dir / "eflips_demo.db"
+    input_db = data_dir / "step_007_Simulation.db"
 
     print(f"Working directory: {work_dir}")
     print(f"Input database: {input_db}")

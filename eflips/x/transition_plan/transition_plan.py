@@ -46,14 +46,18 @@ class VehicleTypeConfig:
 @dataclass
 class BatteryTypeConfig:
     name: str
+    vehicle_name_short: str
     procurement_cost: float
     useful_life: int
     cost_escalation: float
+    vehicle_type_id: Optional[int] = None
 
     def to_dict(self, battery_id: Optional[int] = None) -> Dict[str, Any]:
         return {
             "id": battery_id,
             "name": self.name,
+            "vehicle_name_short": self.vehicle_name_short,
+            "vehicle_type_id": self.vehicle_type_id,
             "procurement_cost": self.procurement_cost,
             "useful_life": self.useful_life,
             "cost_escalation": self.cost_escalation,
@@ -116,15 +120,16 @@ class ScenarioTCOConfig:
     # TODO add proper keys for depot times
     depot_time_plan: Dict[str, int] = field(
         default_factory=lambda: {
-            "BF RL": 2032,
-            "BF KL": 2028,
-            "BF SN": 2027,
-            "BF I": 2030,
-            "BF S": 2030,
-            "BF B": 2030,
-            "BF C": 2034,
-            "BF M": 2035,
-            "BF L": 2030,
+            "Depot at Betriebshof Rummelsburger Landstraße": 2032,
+            "Depot at Betriebshof Köpenicker Landstraße": 2028,
+            "Depot at Betriebshof Säntisstraße": 2027,
+            "Depot at Betriebshof Indira-Gandhi-Str.": 2030,
+            "Depot at Betriebshof Lichtenberg Spandau": 2030,
+            "Depot at Betriebshof Britz": 2030,
+            "Depot at Betriebshof Cicerostr.": 2034,
+            "Depot at Betriebshof Müllerstr.": 2035,
+            "Depot at Betriebshof Lichtenberg": 2030,
+            "Depot at Betriebshof Spandau": 2030,
         }
     )
     current_year: int = 2026
@@ -178,18 +183,21 @@ class TCOParameterConfigurator(Modifier):
     DEFAULT_BATTERY_CONFIGS: Dict[str, BatteryTypeConfig] = {
         "EN": BatteryTypeConfig(
             name="Ebusco 3.0 12 large battery",
+            vehicle_name_short="EN",
             procurement_cost=190,
             useful_life=7,
             cost_escalation=-0.03,
         ),
         "GN": BatteryTypeConfig(
             name="Solaris Urbino 18 large battery",
+            vehicle_name_short="GN",
             procurement_cost=190,
             useful_life=7,
             cost_escalation=-0.03,
         ),
         "DD": BatteryTypeConfig(
             name="Alexander Dennis Enviro500EV large battery",
+            vehicle_name_short="DD",
             procurement_cost=190,
             useful_life=7,
             cost_escalation=-0.03,
@@ -293,6 +301,22 @@ class TCOParameterConfigurator(Modifier):
             "opportunity": station_row[0] if station_row else None,
         }
 
+    def _populate_battery_vehicle_ids(
+        self, session: sqlalchemy.orm.session.Session, scenario_id: int
+    ) -> None:
+        """Query vehicle IDs and populate them on battery configs."""
+        for name_short, battery_config in self.DEFAULT_BATTERY_CONFIGS.items():
+            row = (
+                session.query(VehicleType.id)
+                .filter(
+                    VehicleType.scenario_id == scenario_id,
+                    VehicleType.name_short == battery_config.vehicle_name_short,
+                )
+                .one_or_none()
+            )
+            if row:
+                battery_config.vehicle_type_id = row[0]
+
     def _build_tco_parameters(self, session: sqlalchemy.orm.session.Session) -> None:
         """Build and initialize TCO parameters from configuration."""
         scenario = session.query(Scenario).all()
@@ -302,6 +326,7 @@ class TCOParameterConfigurator(Modifier):
             session, scenario_id
         )
         charging_point_ids = self._query_charging_point_ids(session, scenario_id)
+        self._populate_battery_vehicle_ids(session, scenario_id)
 
         vehicle_types = [
             config.to_dict(vehicle_and_battery_ids[name_short][0])
