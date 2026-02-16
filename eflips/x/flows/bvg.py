@@ -396,7 +396,6 @@ def run_ou_scenario(common_db: Path) -> Path:
 
     # Continue with non-scheduling steps (can run in parallel with other scenarios)
     steps = [
-        VehicleScheduling(),
         DepotAssignment(),
         StationElectrification(),
         DepotGenerator(),
