@@ -13,8 +13,7 @@ dependencies = [
     "eflips-depot",
     "eflips-ingest",
     "eflips-eval",
-    "eflips-opt @ git+https://github.com/mpm-tu-berlin/eflips-opt.git@feature/transition-planning",
-    "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@personal/shuyao",
+
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
     "fuzzywuzzy (>=0.18.0,<0.19.0)",
     "python-levenshtein (>=0.27.1,<0.28.0)",
@@ -34,7 +33,12 @@ sphinx-paramlinks = "^0.6.0"
 pydocstringformatter = "^0.7.5"
 pytest-xdist = "^3.8.0"
 pytest-split = "^0.10.0"
+eflips-tco = {path = "../eflips-tco", develop = true}
+eflips-opt = {path = "../eflips-opt", develop = true}
 
+
+
+[tool.poetry.dependencies]
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"

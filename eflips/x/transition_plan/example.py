@@ -1,7 +1,10 @@
 import os
 from datetime import datetime
+from typing import Dict, Any
 
 import matplotlib
+
+from eflips.x.framework import PipelineContext
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -9,133 +12,65 @@ import pandas as pd
 from pathlib import Path
 
 from eflips.x.transition_plan.multi_stage_simulation import simulate_multi_stage_electrification
-from eflips.x.transition_plan.transition_plan import run_transition_planner
+from eflips.x.transition_plan.transition_plan import run_transition_planner, run_tco_calculation
 from eflips.x.flows import run_steps
+
+from eflips.x.transition_plan.transition_plan import PlaygroundAnalyzer
 
 
 if __name__ == "__main__":
 
+    data_dir = Path(__file__).parent.parent.parent.parent.parent / "eflips-data"
+    db_name = "Simulation_dep.db"
+    input_db = data_dir / db_name
+
     FORCE_RERUN = True
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     if FORCE_RERUN:
-        work_dir = (
-            Path(__file__).parent.parent.parent / "transition_plan" / f"{run_id}_example_workdir"
-        )
+        work_dir = Path(__file__).parent.parent.parent / "transition_plan" / f"{run_id + db_name}"
     else:
-        work_dir = Path(__file__).parent.parent.parent / "transition_plan" / "example_workdir"
+        work_dir = Path(__file__).parent.parent.parent / "transition_plan" / db_name
     os.makedirs(work_dir, exist_ok=True)
 
-    data_dir = Path(__file__).parent.parent.parent.parent / "data"
-    input_db = data_dir / "step_007_Simulation.db"
+    tco_params_path = (
+        Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "berlin_literature.py"
+    )
 
     print(f"Working directory: {work_dir}")
     print(f"Input database: {input_db}")
 
-    sets = ["V", "VT", "B", "S", "I"]
-    variables = [
-        "X_vehicle_year",
-        "Z_station_year",
-    ]
-    constraints = [
-        "InitialElectricVehicleConstraint",
-        "InitialElectrifiedStationConstraint",
-        "NoStationUninstallationConstraint",
-        "StationBeforeVehicleConstraint",
-        "VehicleDeployTimeLimitConstraint",
-        "StationConstructionPerYearConstraint",
-        # "NoEarlyStationBuildingConstraint",
-        "AssignmentBlockYearConstraint",
-        "FullElectrificationConstraint",
-        "NoDuplicatedVehicleElectrificationConstraint",
-        # "BlockScheduleOnePathConstraint",
-        # "BlockScheduleFlowConservationConstraint",
-        # "BlockScheduleCostConstraint",
-        # "BudgetConstraint",
-    ]
-    expressions = [
-        "Z_block_year",
-        "NewlyBuiltStation",
-        # "ElectricBusDepreciation",
-        # "DieselBusDepreciation",
-        # "BatteryDepreciation",
-        # "StationChargerDepreciation",
-        # "DepotChargerDepreciation",
-        "AnnualEbusProcurement",
-        "AnnualBatteryProcurement",
-        "AnnualVehicleReplacement",
-        "AnnualBatteryReplacement",
-        "AnnualStationWithChargerProcurement",
-        "AnnualDepotChargerProcurement",
-        # "ElectricityCost",
-        # "DieselCost",
-        # "MaintenanceDieselCost",
-        # "MaintenanceElectricCost",
-        "MaintenanceInfraCost",
-        "StaffCostEbus",
-        "StaffCostDiesel",
-        "EbusEnergySaving",
-        "EbusMaintenanceSaving",
-        "EbusExtraStaffCost",
-    ]
-    objective_components = [
-        # "ElectricBusDepreciation",
-        # "DieselBusDepreciation",
-        # "BatteryDepreciation",
-        # "StationChargerDepreciation",
-        # "DepotChargerDepreciation",
-        # "ElectricityCost",
-        # "DieselCost",
-        # "MaintenanceDieselCost",
-        # "MaintenanceElectricCost",
-        "MaintenanceInfraCost",
-        # "StaffCostEbus",
-        # "StaffCostDiesel",
-        "AnnualEbusProcurement",
-        "AnnualBatteryProcurement",
-        "AnnualVehicleReplacement",
-        "AnnualBatteryReplacement",
-        "AnnualStationWithChargerProcurement",
-        "AnnualDepotChargerProcurement",
-        "EbusEnergySaving",
-        "EbusMaintenanceSaving",
-        "EbusExtraStaffCost",
-    ]
+    from eflips.x.flows import generate_all_plots
 
-    current_db, result = run_transition_planner(
-        workdir=work_dir,
-        input_db=input_db,
-        sets=sets,
-        variables=variables,
-        constraints=constraints,
-        expressions=expressions,
-        objective_components=objective_components,
+    context_params: Dict[str, Any] = {
+        "log_level": "INFO",
+    }
+    context = PipelineContext(
+        work_dir=work_dir,
+        current_db=input_db,
+        params=context_params,
     )
+    output_dir = context.work_dir / "plots"
+    output_dir.mkdir(exist_ok=True)
 
-    unelectrified_blocks = result["unelectrified_blocks"]
-    yearly_vehicle_assignment = result["yearly_vehicle_assignment"]
-    yearly_cost_breakdown = result["yearly_cost_breakdown"]
+    playground_analyzer = PlaygroundAnalyzer()
+    playground_flow = [playground_analyzer]
 
-    # Plot yearly vehicle assignment
-    fig, ax = plt.subplots(figsize=(10, 6))
-    yearly_vehicle_assignment.plot(kind="bar", ax=ax)
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Number of Vehicles")
-    ax.set_title("Yearly Vehicle Assignment")
-    ax.legend()
-    fig.savefig(work_dir / "yearly_vehicle_assignment.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
+    for step in playground_flow:
+        result = step.execute(context=context)
+        result.savefig(output_dir / f"{db_name}.png")
 
-    # Plot yearly cost breakdown
-    fig, ax = plt.subplots(figsize=(10, 6))
-    yearly_cost_breakdown.plot(kind="bar", stacked=True, ax=ax)
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Cost")
-    ax.set_title("Yearly Cost Breakdown")
-    ax.legend()
-    fig.savefig(work_dir / "yearly_cost_breakdown.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-    print(f"Plots saved to {work_dir}")
+    # generate_all_plots(
+    #     context=context,
+    #     output_dir=output_dir,
+    #     pre_simulation_only=False,
+    # )
+    #
+    # run_tco_calculation(
+    #     workdir=work_dir,
+    #     input_db=input_db,
+    #     tco_params_path=tco_params_path,
+    #     scenario_name="berlin_literature",
+    # )
 
     # simulate_multi_stage_electrification(
     #     unelectrified_blocks=unelectrified_blocks,

@@ -1,4 +1,3 @@
-from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
@@ -13,354 +12,118 @@ from eflips.opt.transition_planning.transition_planning import (
     TransitionPlannerModel,
     SetVariableRegistry,
 )
-from eflips.model import Scenario, VehicleType, Area, Station, Depot, Rotation
-from eflips.tco import init_tco_parameters
-
-
-@dataclass
-class VehicleTypeConfig:
-    name_short: str
-    name: str
-    useful_life: int
-    procurement_cost: float
-    cost_escalation: float
-    average_electricity_consumption: float
-    procurement_cost_diesel_equivalent: float
-    cost_escalation_diesel_equivalent: float
-    average_diesel_consumption: float
-
-    def to_dict(self, vehicle_id: int) -> Dict[str, Any]:
-        return {
-            "id": vehicle_id,
-            "name": self.name,
-            "useful_life": self.useful_life,
-            "procurement_cost": self.procurement_cost,
-            "cost_escalation": self.cost_escalation,
-            "average_electricity_consumption": self.average_electricity_consumption,
-            "procurement_cost_diesel_equivalent": self.procurement_cost_diesel_equivalent,
-            "cost_escalation_diesel_equivalent": self.cost_escalation_diesel_equivalent,
-            "average_diesel_consumption": self.average_diesel_consumption,
-        }
-
-
-@dataclass
-class BatteryTypeConfig:
-    name: str
-    vehicle_name_short: str
-    procurement_cost: float
-    useful_life: int
-    cost_escalation: float
-    vehicle_type_id: Optional[int] = None
-
-    def to_dict(self, battery_id: Optional[int] = None) -> Dict[str, Any]:
-        return {
-            "id": battery_id,
-            "name": self.name,
-            "vehicle_name_short": self.vehicle_name_short,
-            "vehicle_type_id": self.vehicle_type_id,
-            "procurement_cost": self.procurement_cost,
-            "useful_life": self.useful_life,
-            "cost_escalation": self.cost_escalation,
-        }
-
-
-@dataclass
-class ChargingPointTypeConfig:
-    type: str
-    name: str
-    procurement_cost: float
-    useful_life: int
-    cost_escalation: float
-
-    def to_dict(self, charger_id: Optional[int] = None) -> Dict[str, Any]:
-        return {
-            "id": charger_id,
-            "type": self.type,
-            "name": self.name,
-            "procurement_cost": self.procurement_cost,
-            "useful_life": self.useful_life,
-            "cost_escalation": self.cost_escalation,
-        }
-
-
-@dataclass
-class ChargingInfrastructureConfig:
-    type: str
-    name: str
-    procurement_cost: float
-    useful_life: int
-    cost_escalation: float
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class ScenarioTCOConfig:
-    project_duration: int = 10
-    interest_rate: float = 0.05
-    inflation_rate: float = 0.02
-    staff_cost: float = 25.0
-    fuel_cost: Dict[str, float] = field(
-        default_factory=lambda: {"diesel": 1, "electricity": 0.1794}
-    )
-    vehicle_maint_cost: Dict[str, float] = field(
-        default_factory=lambda: {"diesel": 0.5, "electricity": 0.35}
-    )
-    infra_maint_cost: float = 1000
-    cost_escalation_rate: Dict[str, float] = field(
-        default_factory=lambda: {
-            "general": 0.02,
-            "staff": 0.03,
-            "diesel": 0.07,
-            "electricity": 0.038,
-        }
-    )
-    annual_budget_limit: float = 2.0e7
-    # TODO add proper keys for depot times
-    depot_time_plan: Dict[str, int] = field(
-        default_factory=lambda: {
-            "Depot at Betriebshof Rummelsburger Landstraße": 2032,
-            "Depot at Betriebshof Köpenicker Landstraße": 2028,
-            "Depot at Betriebshof Säntisstraße": 2027,
-            "Depot at Betriebshof Indira-Gandhi-Str.": 2030,
-            "Depot at Betriebshof Lichtenberg Spandau": 2030,
-            "Depot at Betriebshof Britz": 2030,
-            "Depot at Betriebshof Cicerostr.": 2034,
-            "Depot at Betriebshof Müllerstr.": 2035,
-            "Depot at Betriebshof Lichtenberg": 2030,
-            "Depot at Betriebshof Spandau": 2030,
-        }
-    )
-    current_year: int = 2026
-    max_station_construction_per_year: int = 5
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+from eflips.model import Scenario, VehicleType, Area, Station, Rotation
+from eflips.tco import init_tco_parameters, get_params_from_file
+from eflips.tco import TCOCalculator as TCOCalculatorBase
 
 
 class TCOParameterConfigurator(Modifier):
-    # Vehicle type configurations keyed by name_short
-    # Battery prices from "Wirtschaftlichkeit von Elektromobilität in gewerblichen Anwendungen", April 2015
-    # Price is a prognose for 2025 in an optimistic scenario
-    DEFAULT_VEHICLE_CONFIGS: Dict[str, VehicleTypeConfig] = {
-        "EN": VehicleTypeConfig(
-            name_short="EN",
-            name="Ebusco 3.0 12 large battery",
-            useful_life=14,
-            procurement_cost=340000.0,
-            cost_escalation=-0.02,
-            average_electricity_consumption=1.48,
-            procurement_cost_diesel_equivalent=275000.0,
-            cost_escalation_diesel_equivalent=0.02,
-            average_diesel_consumption=0.449,
-        ),
-        "DD": VehicleTypeConfig(
-            name_short="DD",
-            name="Solaris Urbino 18 large battery",
-            useful_life=14,
-            procurement_cost=603000.0,
-            cost_escalation=-0.02,
-            average_electricity_consumption=2.16,
-            procurement_cost_diesel_equivalent=330000.0,
-            cost_escalation_diesel_equivalent=0.02,
-            average_diesel_consumption=0.589,
-        ),
-        "GN": VehicleTypeConfig(
-            name_short="GN",
-            name="Alexander Dennis Enviro500EV large battery",
-            useful_life=14,
-            procurement_cost=650000.0,
-            cost_escalation=-0.02,
-            average_electricity_consumption=2.16,
-            procurement_cost_diesel_equivalent=510000.0,
-            cost_escalation_diesel_equivalent=0.02,
-            average_diesel_consumption=0.589,
-        ),
-    }
+    """Configures TCO parameters from scenario-specific defaults."""
 
-    # Battery configurations keyed by vehicle name_short (shares battery with vehicle)
-    DEFAULT_BATTERY_CONFIGS: Dict[str, BatteryTypeConfig] = {
-        "EN": BatteryTypeConfig(
-            name="Ebusco 3.0 12 large battery",
-            vehicle_name_short="EN",
-            procurement_cost=190,
-            useful_life=7,
-            cost_escalation=-0.03,
-        ),
-        "GN": BatteryTypeConfig(
-            name="Solaris Urbino 18 large battery",
-            vehicle_name_short="GN",
-            procurement_cost=190,
-            useful_life=7,
-            cost_escalation=-0.03,
-        ),
-        "DD": BatteryTypeConfig(
-            name="Alexander Dennis Enviro500EV large battery",
-            vehicle_name_short="DD",
-            procurement_cost=190,
-            useful_life=7,
-            cost_escalation=-0.03,
-        ),
-    }
-
-    # Charging point configurations
-    # Prices from Jefferies and Göhlich (2020)
-    DEFAULT_CHARGING_POINT_CONFIGS: Dict[str, ChargingPointTypeConfig] = {
-        "depot": ChargingPointTypeConfig(
-            type="depot",
-            name="Depot Charging Point",
-            procurement_cost=100000.0,
-            useful_life=20,
-            cost_escalation=0,
-        ),
-        "opportunity": ChargingPointTypeConfig(
-            type="opportunity",
-            name="Opportunity Charging Point",
-            procurement_cost=250000.0,
-            useful_life=20,
-            cost_escalation=0,
-        ),
-    }
-
-    # Charging infrastructure configurations
-    # Prices from Jefferies and Göhlich (2020)
-    DEFAULT_CHARGING_INFRA_CONFIGS = [
-        ChargingInfrastructureConfig(
-            type="depot",
-            name="Depot Charging Infrastructure",
-            procurement_cost=2000000.0,
-            useful_life=20,
-            cost_escalation=0,
-        ),
-        ChargingInfrastructureConfig(
-            type="station",
-            name="Opportunity Charging Infrastructure",
-            procurement_cost=500000.0,
-            useful_life=20,
-            cost_escalation=0,
-        ),
-    ]
-
-    def __init__(self, code_version: str = "1", **kwargs: Any) -> None:
-        super().__init__(code_version=code_version, **kwargs)
+    def __init__(
+        self,
+        tco_params_path: Path,
+        scenario_name: str = "berlin",
+        code_version: str = "1",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(code_version=code_version, tco_params_path=tco_params_path, **kwargs)
+        self.scenario_name = scenario_name
+        self.tco_params_path = tco_params_path
 
     def document_params(cls) -> Dict[str, str]:
         return {
             **super().document_params(),
         }
 
-    def _query_vehicle_and_battery_ids_from_name_short(
-        self, session: sqlalchemy.orm.session.Session, scenario_id: int
-    ) -> Dict[str, tuple[int, Optional[int]]]:
-        """Query vehicle type and battery type IDs from the database.
+    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
 
-        Returns:
-            A dict mapping vehicle type name_short to a tuple of
-            (vehicle_type_id, battery_type_id). battery_type_id is None
-            if the vehicle type has no associated battery.
-        """
-        result = {}
-        for name_short in self.DEFAULT_VEHICLE_CONFIGS.keys():
-            row = (
-                session.query(VehicleType.id, VehicleType.battery_type_id)
-                .filter(
-                    VehicleType.scenario_id == scenario_id,
-                    VehicleType.name_short == name_short,
-                )
-                .one_or_none()
-            )
-            if row:
-                vehicle_id = row[0]
-                battery_id = row[1] if row[1] is not None else None
-                result[name_short] = (vehicle_id, battery_id)
-        return result
+        params = get_params_from_file(self.tco_params_path)
 
-    def _query_charging_point_ids(
-        self, session: sqlalchemy.orm.session.Session, scenario_id: int
-    ) -> Dict[str, Optional[int]]:
-        """Query charging point type IDs from the database."""
-        depot_row = (
-            session.query(Area.charging_point_type_id)
-            .filter(
-                Area.scenario_id == scenario_id,
-                Area.charging_point_type_id.isnot(None),
-            )
-            .first()
-        )
-        station_row = (
-            session.query(Station.charging_point_type_id)
-            .filter(
-                Station.scenario_id == scenario_id,
-                Station.charging_point_type_id.isnot(None),
-            )
-            .first()
-        )
-        return {
-            "depot": depot_row[0] if depot_row else None,
-            "opportunity": station_row[0] if station_row else None,
-        }
-
-    def _populate_battery_vehicle_ids(
-        self, session: sqlalchemy.orm.session.Session, scenario_id: int
-    ) -> None:
-        """Query vehicle IDs and populate them on battery configs."""
-        for name_short, battery_config in self.DEFAULT_BATTERY_CONFIGS.items():
-            row = (
-                session.query(VehicleType.id)
-                .filter(
-                    VehicleType.scenario_id == scenario_id,
-                    VehicleType.name_short == battery_config.vehicle_name_short,
-                )
-                .one_or_none()
-            )
-            if row:
-                battery_config.vehicle_type_id = row[0]
-
-    def _build_tco_parameters(self, session: sqlalchemy.orm.session.Session) -> None:
-        """Build and initialize TCO parameters from configuration."""
-        scenario = session.query(Scenario).all()
-        scenario_id = scenario[0].id
-
-        vehicle_and_battery_ids = self._query_vehicle_and_battery_ids_from_name_short(
-            session, scenario_id
-        )
-        charging_point_ids = self._query_charging_point_ids(session, scenario_id)
-        self._populate_battery_vehicle_ids(session, scenario_id)
-
-        vehicle_types = [
-            config.to_dict(vehicle_and_battery_ids[name_short][0])
-            for name_short, config in self.DEFAULT_VEHICLE_CONFIGS.items()
-            if name_short in vehicle_and_battery_ids
-        ]
-
-        battery_types = [
-            config.to_dict(vehicle_and_battery_ids.get(name_short, (None, None))[1])
-            for name_short, config in self.DEFAULT_BATTERY_CONFIGS.items()
-        ]
-
-        charging_point_types = [
-            config.to_dict(charging_point_ids.get(cp_type))
-            for cp_type, config in self.DEFAULT_CHARGING_POINT_CONFIGS.items()
-        ]
-
-        charging_infrastructure = [
-            config.to_dict() for config in self.DEFAULT_CHARGING_INFRA_CONFIGS
-        ]
-
-        scenario_tco_parameters = ScenarioTCOConfig().to_dict()
+        scenario = session.query(Scenario).all()[0]
 
         init_tco_parameters(
-            scenario=scenario[0],
-            scenario_tco_parameters=scenario_tco_parameters,
-            vehicle_types=vehicle_types,
-            battery_types=battery_types,
-            charging_point_types=charging_point_types,
-            charging_infrastructure=charging_infrastructure,
+            scenario=scenario,
+            scenario_params=params.SCENARIO_TCO,
+            vehicle_type_params=params.VEHICLE_TYPES,
+            battery_type_params=params.BATTERY_TYPES,
+            charging_point_type_params=params.CHARGING_POINT_TYPES,
+            charging_infra_params=params.CHARGING_INFRASTRUCTURE,
         )
 
-    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
-        self._build_tco_parameters(session)
+
+class PlaygroundAnalyzer(Analyzer):
+
+    def __init__(self, code_version: str = "1", **kwargs: Any) -> None:
+        super().__init__(code_version=code_version, **kwargs)
+        self.result: Optional[Dict[str, float]] = None
+
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            **super().document_params(),
+        }
+
+    def analyze(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Any:
+
+        import pandas as pd
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        all_rotations = session.query(Rotation).all()
+        rotation_ids = []
+        rotation_trip_counts = []
+        rotation_mileages = []
+
+        for rotation in all_rotations:
+            rotation_ids.append(rotation.id)
+            rotation_trip_counts.append(len(rotation.trips))
+            rotation_mileages.append(sum(trip.route.distance for trip in rotation.trips))
+
+        df = pd.DataFrame(
+            {
+                "rotation_id": rotation_ids,
+                "trip_count": rotation_trip_counts,
+                "mileage": rotation_mileages,
+            }
+        )
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        axes[0].hist(df["trip_count"], bins=20)
+        axes[0].set_xlabel("Trip Count")
+        axes[0].set_ylabel("Frequency")
+        axes[0].set_title("Distribution of Trip Counts")
+
+        axes[1].hist(df["mileage"], bins=20)
+        axes[1].set_xlabel("Mileage (m)")
+        axes[1].set_ylabel("Frequency")
+        axes[1].set_title("Distribution of Mileages")
+
+        fig.tight_layout()
+
+        self.fig = fig
+        return self.fig
+
+
+class TCOCalculator(Analyzer):
+
+    def __init__(self, code_version: str = "1", **kwargs: Any) -> None:
+        super().__init__(code_version=code_version, **kwargs)
+        self.result: Optional[Dict[str, float]] = None
+
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            **super().document_params(),
+        }
+
+    def analyze(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Dict:
+        scenario = session.query(Scenario).all()[0]
+        tco_calculator = TCOCalculatorBase(scenario)
+        tco_calculator.calculate()
+        tco_calculator.visualize()  # TODO make it align with the framework logging
+        self.result = tco_calculator.tco_by_type
+        return self.result
 
 
 class TransitionPlanner(Analyzer):
@@ -374,7 +137,7 @@ class TransitionPlanner(Analyzer):
             **super().document_params(),
             f"{cls.__name__}.name": """
             Name of the transition planner model instance.
-        
+
             Default: None
                         """.strip(),
             f"{cls.__name__}.sets": """
@@ -456,6 +219,7 @@ class TransitionPlanner(Analyzer):
 def run_transition_planner(
     workdir: Path,
     input_db: Path,
+    scenario_name: str = "berlin",
     log_level: str = "INFO",
     sets: Optional[List[str]] = None,
     variables: Optional[List[str]] = None,
@@ -464,6 +228,17 @@ def run_transition_planner(
     objective_components: Optional[List[str]] = None,
 ) -> tuple[Path, Optional[Dict[str, Any]]]:
     """Run the transition planner model.
+
+    Args:
+        workdir: Working directory for pipeline outputs.
+        input_db: Path to input database.
+        scenario_name: Name of scenario defaults to use (e.g., "berlin").
+        log_level: Logging level.
+        sets: Registered sets for the transition planner model.
+        variables: Registered variables for the transition planner model.
+        constraints: Registered constraints for the transition planner model.
+        expressions: Registered expressions for the transition planner model.
+        objective_components: Components of objective function to optimize.
 
     Returns:
         A tuple of (output_db_path, transition_planner_result).
@@ -485,10 +260,51 @@ def run_transition_planner(
         params=context_params,
     )
 
-    tco_parameter_config = TCOParameterConfigurator()
+    tco_parameter_config = TCOParameterConfigurator(scenario_name=scenario_name)
     transition_planner = TransitionPlanner()
     steps: List[PipelineStep] = [tco_parameter_config, transition_planner]
     from eflips.x.flows import run_steps
 
     run_steps(context=context, steps=steps)
     return context.current_db, transition_planner.result
+
+
+def run_tco_calculation(
+    workdir: Path,
+    input_db: Path,
+    tco_params_path: Path,
+    scenario_name: str = "berlin",
+    log_level: str = "INFO",
+) -> tuple[Path, Optional[Dict[str, float]]]:
+    """Run the TCO analysis.
+
+    Args:
+        workdir: Working directory for pipeline outputs.
+        input_db: Path to input database.
+        scenario_name: Name of scenario defaults to use (e.g., "berlin").
+        log_level: Logging level.
+
+    Returns:
+        A tuple of (output_db_path, tco_result).
+        tco_result is a dict with TCO values categorized by type.
+    """
+
+    context_params: Dict[str, Any] = {
+        "log_level": log_level,
+    }
+    context = PipelineContext(
+        work_dir=workdir,
+        current_db=input_db,
+        params=context_params,
+    )
+
+    tco_parameter_config = TCOParameterConfigurator(
+        scenario_name=scenario_name,
+        tco_params_path=tco_params_path,
+    )
+    tco_calculator = TCOCalculator()
+    steps: List[PipelineStep] = [tco_parameter_config, tco_calculator]
+    from eflips.x.flows import run_steps
+
+    run_steps(context=context, steps=steps)
+    return context.current_db, tco_calculator.result
