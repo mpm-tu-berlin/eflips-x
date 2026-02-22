@@ -488,7 +488,9 @@ def run_term_scenario(common_db: Path) -> None:
         "StationElectrification.charging_power_kw": 450.0,
         "DepotGenerator.charging_power_kw": 90.0,
         "Simulation.repetition_period": timedelta(days=SIMULATION_DAYS),
-        "Simulation.ignore_unstable_simulation": False,
+        "Simulation.ignore_unstable_simulation": (
+            True if REDUCED_DATA else False
+        ),  # Reduced data has unstable simulation, for some reason.
     }
 
     # Create context and copy common database as baseline

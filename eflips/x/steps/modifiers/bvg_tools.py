@@ -9,8 +9,10 @@ electric vehicle types.
 import logging
 import warnings
 from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union, Optional
+from zoneinfo import ZoneInfo
 
 import eflips.model
 import numpy as np
@@ -1109,6 +1111,20 @@ Uses the Levenshtein distance ratio (0-100) to compare station names.
         return None
 
 
+def _service_day(dt: datetime, tz: ZoneInfo, day_start_hour: int) -> date:
+    """Return the operator service day for *dt*.
+
+    Converts *dt* to *tz* (naive datetimes are treated as UTC), then shifts back
+    one calendar day when the local hour is before *day_start_hour*.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(tz)
+    if local.hour < day_start_hour:
+        local -= timedelta(days=1)
+    return local.date()
+
+
 class ReduceToNDaysNDepots(Modifier):
     """
     Reduce a dataset to a configurable number of days and depots.
@@ -1122,9 +1138,16 @@ class ReduceToNDaysNDepots(Modifier):
     2. Identifies the M depots (start/end stations) with the fewest rotations
     3. Removes all rotations that don't start on one of the selected days
     4. Removes all rotations that don't start at one of the selected depots
+
+    **Service day semantics**: All date assignments use a configurable timezone (default
+    ``Europe/Berlin``) and operator day-start hour (default 3 AM). A trip at 01:00 local time
+    belongs to the *previous* service day, matching standard transit-operations conventions.
+    This prevents overnight rotations starting just after midnight from being retained when
+    only the next calendar day is requested, which would cause simulation schedule spans
+    exceeding the repetition period.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.3.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1171,6 +1194,41 @@ depot stations (where rotations start/end) with the fewest rotations and keep on
 **Note:** Depots are identified by the stations where rotations start. The modifier keeps depots
 with the fewest rotations to create smaller, more manageable test datasets.
             """.strip(),
+            f"{cls.__name__}.timezone": """
+IANA timezone name used for service day calculations. All datetime comparisons convert
+timestamps to this timezone before determining which service day a trip belongs to.
+
+**Format:** `str` (IANA timezone identifier)
+
+**Default:** ``"Europe/Berlin"``
+
+**Example:** ``"Europe/Berlin"``, ``"America/New_York"``
+            """.strip(),
+            f"{cls.__name__}.day_start_hour": """
+Hour of day (0–23, local timezone) at which the operator's service day begins. Trips whose
+local departure time falls before this hour are attributed to the *previous* calendar day's
+service. This reflects the standard transit-industry convention that the operational day
+starts in the early morning (typically 3:00–4:00 AM) rather than at midnight.
+
+**Format:** `int` (0–23)
+
+**Default:** 3
+            """.strip(),
+            f"{cls.__name__}.preferred_weekdays": """
+List of ISO weekday numbers (1=Monday … 7=Sunday) to prefer when selecting which service
+days to keep. The modifier picks the days with the most trips whose weekday is in this list;
+only if no such day exists does it fall back to the overall most-frequent day.
+
+Use this to avoid days that straddle schedule-change boundaries (e.g. Friday night →
+Saturday long night service), which can produce rotations spanning more than 24 hours and
+cause depot-simulation instability with a 1-day repetition period.
+
+**Format:** ``List[int]`` (ISO weekday numbers, 1–7)
+
+**Default:** ``[2, 3]`` (Tuesday, Wednesday)
+
+**Example:** ``[2, 3]`` for Tue/Wed; ``[]`` to disable preference and use the busiest day.
+            """.strip(),
         }
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
@@ -1208,12 +1266,14 @@ with the fewest rotations to create smaller, more manageable test datasets.
         if num_depots <= 0:
             raise ValueError(f"num_depots must be positive, got {num_depots}")
 
+        tz_name: str = params.get(f"{self.__class__.__name__}.timezone", "Europe/Berlin")
+        day_start_hour: int = params.get(f"{self.__class__.__name__}.day_start_hour", 3)
+        tz = ZoneInfo(tz_name)
+
         # Find the days with the most trips
         # We can't use the days with the fewest trips since those might be just overflow
         # into the wee hours of the following day
-        # Count trips by date
-        from datetime import date
-
+        # Count trips by date (using operator service day, not UTC date)
         day_count_dict: Dict[date, int] = defaultdict(int)
         all_trips = (
             session.query(Trip)
@@ -1222,7 +1282,7 @@ with the fewest rotations to create smaller, more manageable test datasets.
         )
 
         for trip in all_trips:
-            trip_date = trip.departure_time.date()
+            trip_date = _service_day(trip.departure_time, tz, day_start_hour)
             day_count_dict[trip_date] += 1
 
         if not day_count_dict:
@@ -1232,28 +1292,51 @@ with the fewest rotations to create smaller, more manageable test datasets.
         # Convert to list of tuples and sort by trip count descending
         day_counts = [(day, count) for day, count in day_count_dict.items()]
         days_sorted = sorted(day_counts, key=lambda x: x[1], reverse=True)
-        days_to_keep = [day for day, count in days_sorted[:num_days]]
+
+        # Prefer specific weekdays (e.g. Tue/Wed) to avoid schedule-boundary days like Friday
+        preferred_weekdays: List[int] = params.get(
+            f"{self.__class__.__name__}.preferred_weekdays", [2, 3]
+        )
+        if preferred_weekdays:
+            preferred = [(d, c) for d, c in days_sorted if d.isoweekday() in preferred_weekdays]
+        else:
+            preferred = []
+
+        def _fmt(d: date, c: int) -> str:
+            return f"{d} ({d.strftime('%A')}, {c} trips)"
+
+        if preferred:
+            candidates = preferred
+            self.logger.info(
+                f"Using preferred weekdays {preferred_weekdays}; "
+                f"candidate days: {', '.join(_fmt(d, c) for d, c in candidates[:num_days])}"
+            )
+        else:
+            candidates = days_sorted
+            self.logger.info("No preferred-weekday days found; falling back to busiest day(s).")
+
+        days_to_keep = [day for day, count in candidates[:num_days]]
 
         self.logger.info(
-            f"Keeping {len(days_to_keep)} day(s) with most trips: "
-            f"{', '.join(f'{day} ({count} trips)' for day, count in days_sorted[:num_days])}"
+            f"Keeping {len(days_to_keep)} day(s): "
+            f"{', '.join(_fmt(day, count) for day, count in candidates[:num_days])}"
         )
 
-        # Identify all the places where rotations start or end and count them
-        all_start_end_stations: Dict[Station, int] = defaultdict(int)
-        all_rotations_on_kept_days = (
+        # Load all rotations once (used for both depot counting and deletion)
+        all_rotations = (
             session.query(Rotation)
-            .join(Trip)
-            .filter(func.date(Trip.departure_time).in_(days_to_keep))
             .filter(Rotation.scenario_id == scenario_id)
             .options(joinedload(Rotation.trips).joinedload(Trip.route))
             .all()
         )
 
-        for rotation in all_rotations_on_kept_days:
+        # Identify all the places where rotations start or end and count them
+        all_start_end_stations: Dict[Station, int] = defaultdict(int)
+        for rotation in all_rotations:
             if len(rotation.trips) == 0:
                 raise ValueError(f"Rotation {rotation.name} has no trips")
-            all_start_end_stations[rotation.trips[0].route.departure_station] += 1
+            if _service_day(rotation.trips[0].departure_time, tz, day_start_hour) in days_to_keep:
+                all_start_end_stations[rotation.trips[0].route.departure_station] += 1
 
         # Keep only the N depots with the fewest rotations starting or ending there
         if num_depots > len(all_start_end_stations):
@@ -1275,34 +1358,30 @@ with the fewest rotations to create smaller, more manageable test datasets.
         )
 
         # Process all rotations and remove those that don't meet the criteria
-        all_rotations_on_kept_days = (
-            session.query(Rotation)
-            .filter(Rotation.scenario_id == scenario_id)
-            .options(joinedload(Rotation.trips).joinedload(Trip.route))
-            .all()
-        )
 
         to_delete: List[eflips.model.Base] = []
         rotations_kept = 0
 
-        for rotation in all_rotations_on_kept_days:
+        for rotation in all_rotations:
             if len(rotation.trips) == 0:
                 raise ValueError(f"Rotation {rotation.name} has no trips")
 
             first_station_id = rotation.trips[0].route.departure_station_id
-            rotation_date = rotation.trips[0].departure_time.date()
+            rotation_service_day = _service_day(
+                rotation.trips[0].departure_time, tz, day_start_hour
+            )
 
             # Remove rotation if it doesn't start at a depot we're keeping or on a day we're keeping
             if (
                 first_station_id not in depot_station_ids_to_keep
-                or rotation_date not in days_to_keep
+                or rotation_service_day not in days_to_keep
             ):
                 self.logger.debug(
                     f"Removing rotation {rotation.name}, "
                     f"vehicle type {rotation.vehicle_type.name_short}, "
                     f"start {rotation.trips[0].route.departure_station.name}, "
                     f"end {rotation.trips[-1].route.arrival_station.name}, "
-                    f"date {rotation_date}"
+                    f"service day {rotation_service_day}"
                 )
                 for trip in rotation.trips:
                     for stop_time in trip.stop_times:
