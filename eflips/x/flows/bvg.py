@@ -373,9 +373,6 @@ def run_ou_scenario(common_db: Path) -> Path:
     # Configure parameters
     params = {
         "log_level": LOG_LEVEL,
-        "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
-        "VehicleScheduling.minimum_break_time": timedelta(minutes=10),
-        "VehicleScheduling.battery_margin": 0.1,
         "StationElectrification.charging_power_kw": 450.0,
         "DepotGenerator.charging_power_kw": 90.0,
         "Simulation.repetition_period": timedelta(days=SIMULATION_DAYS),
@@ -485,7 +482,7 @@ def run_term_scenario(common_db: Path) -> None:
     params = {
         "log_level": LOG_LEVEL,
         "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
-        "VehicleScheduling.minimum_break_time": timedelta(minutes=10),
+        "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
         "VehicleScheduling.battery_margin": 0.1,
         "IntegratedScheduling.max_iterations": 2,
         "StationElectrification.charging_power_kw": 450.0,
