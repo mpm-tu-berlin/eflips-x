@@ -9,14 +9,22 @@ license = {text = "AGPL-3.0-or-later"}
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "eflips-model",
-    "eflips-depot",
     "eflips-ingest",
-    "eflips-eval",
+    "eflips-depot",
 
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
     "fuzzywuzzy (>=0.18.0,<0.19.0)",
     "python-levenshtein (>=0.27.1,<0.28.0)",
+
+    "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@feature/refactor-parameter-inputs",
+    "eflips-opt @ git+https://github.com/mpm-tu-berlin/eflips-opt.git@feature/transition-planning",
+    "eflips-model @ git+https://github.com/mpm-tu-berlin/eflips-model.git@personal/shuyao_heterogeneous_fleet",
+    "eflips-eval @ git+https://github.com/mpm-tu-berlin/eflips-eval.git@personal/shuyao_heterogeneous_fleet",
+
+
+
+
+
 ]
 
 [tool.poetry]
@@ -33,8 +41,15 @@ sphinx-paramlinks = "^0.6.0"
 pydocstringformatter = "^0.7.5"
 pytest-xdist = "^3.8.0"
 pytest-split = "^0.10.0"
-eflips-tco = {path = "../eflips-tco", develop = true}
-eflips-opt = {path = "../eflips-opt", develop = true}
+
+
+
+
+#eflips-tco = {path = "../eflips-tco", develop = true}
+#eflips-opt = {path = "../eflips-opt", develop = true}
+#eflips-eval = {path = "../eflips-eval", develop = true}
+#eflips-model = {path = "../eflips-model", develop = true}
+#eflips-depot = {path = "../eflips-depot", develop = true}
 
 
 
