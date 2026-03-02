@@ -2,16 +2,28 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+import logging
 
 import sqlalchemy.orm.session
 from eflips.depot.api import SmartChargingStrategy
-from eflips.model import Rotation, Scenario, VehicleType
+from eflips.model import Rotation, Scenario, VehicleType, DrivetrainType, Station
 from prefect import flow, task
+from prefect.futures import wait
 from prefect.task_runners import ProcessPoolTaskRunner
 
-from eflips.x.flows import generate_all_plots
+from eflips.x.flows.analysis_flow import execute_simple_analyzer
 from eflips.x.framework import Modifier, PipelineContext, PipelineStep
+from eflips.x.steps.analyzers import (
+    RotationInfoAnalyzer,
+    GeographicTripPlotAnalyzer,
+    DepartureArrivalSocAnalyzer,
+    DepotEventAnalyzer,
+    SpecificEnergyConsumptionAnalyzer,
+)
 from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
+
+
+logger = logging.getLogger(__name__)
 
 
 class CreateHybridFleet(Modifier):
@@ -75,6 +87,7 @@ class CreateHybridFleet(Modifier):
             battery_capacity_reserve=electric_type.battery_capacity_reserve,
             minimum_charging_power=electric_type.minimum_charging_power,
             charging_efficiency=electric_type.charging_efficiency,
+            drivetrain_type=DrivetrainType.ICE,
         )
         session.add(diesel_type)
         return diesel_type
@@ -125,6 +138,12 @@ class CreateHybridFleet(Modifier):
             f"{self.__class__.__name__}.unelectrified_block_ids", None
         )
 
+        current_vehicle_types = session.query(VehicleType).all()
+        for vt in current_vehicle_types:
+            if vt.drivetrain_type != DrivetrainType.BEV:
+                vt.drivetrain_type = DrivetrainType.BEV
+            session.add(vt)
+
         if not unelectrified_block_ids:
             return
 
@@ -153,19 +172,59 @@ def run_hybrid_fleet_simulation(
     context: PipelineContext,
     steps: List[PipelineStep],
     plot_output_dir: Path,
-    include_videos: bool,
-    pre_simulation_only: bool,
 ) -> None:
     """Run simulation steps serially, then generate plots."""
     for step in steps:
         step.execute(context=context)
 
-    generate_all_plots(
+    generate_simple_plots(
         context=context,
         output_dir=plot_output_dir,
-        include_videos=include_videos,
-        pre_simulation_only=pre_simulation_only,
     )
+
+
+def generate_simple_plots(
+    context: PipelineContext,
+    output_dir: Path,
+) -> None:
+    """Generate plots for the transition plan results."""
+    # Placeholder for actual plot generation logic based on results
+    # For example, you could generate a plot showing the unelectrified blocks and depot locations
+
+    logger.info(f"Starting analysis flow, outputs will be saved to: {output_dir}")
+
+    # Define output directories
+    simple_dir = output_dir / "simple"
+
+    simple_dir.mkdir(parents=True, exist_ok=True)
+
+    # Define simple analyzers by category
+    pre_simulation_analyzers = [
+        RotationInfoAnalyzer,
+        GeographicTripPlotAnalyzer,
+    ]
+
+    post_simulation_analyzers = [
+        DepartureArrivalSocAnalyzer,
+        DepotEventAnalyzer,
+        SpecificEnergyConsumptionAnalyzer,
+    ]
+
+    analyzers_to_run = pre_simulation_analyzers + post_simulation_analyzers
+
+    all_futures = []
+    for analyzer_class in analyzers_to_run:
+        output_file = simple_dir / f"{analyzer_class.__name__}.html"
+        future = execute_simple_analyzer.submit(analyzer_class, context, output_file)  # type: ignore[type-abstract]
+        all_futures.append(future)
+
+    # Execute InteractiveMapAnalyzer with depot and station plot directories
+    logger.info("Submitting InteractiveMapAnalyzer...")
+    map_output_file = output_dir / "InteractiveMapAnalyzer.html"
+
+    logger.info("All analysis tasks submitted. Waiting for completion...")
+    wait(all_futures)
+    logger.info("Analysis flow complete. All outputs saved.")
 
 
 @flow(
@@ -188,20 +247,15 @@ def simulate_multi_stage_electrification(
         workdir: The base working directory for the simulations.
         input_db: Path to the input database.
         log_level: Logging level for the pipeline steps.
-        force_rerun: If True, use timestamped directories to force cache miss and re-run all steps.
-                     If False, use deterministic directory names to enable caching.
     """
     parallel_flows = []
 
     for i, stage_blocks in unelectrified_blocks.items():
-        # # Create working directory for this stage
-        # if force_rerun:
-        #     # Timestamp ensures unique dir → cache miss → all steps re-run
-        #     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        #     stage_workdir = workdir / f"{run_id}_stage{i}"
-        # else:
-        #     # Deterministic dir name → cache can be used → skip completed steps
-        stage_workdir = workdir / f"stage{i}"
+        if force_rerun:
+            run_id = f"stage_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        else:
+            run_id = f"stage_{i}"
+        stage_workdir = workdir / run_id
         os.makedirs(stage_workdir, exist_ok=True)
 
         # Create fresh params for this stage
@@ -219,6 +273,15 @@ def simulate_multi_stage_electrification(
             params=params,
         )
 
+        from eflips.x.flows.analysis_flow import query_all_ids
+
+        all_rotation_ids = query_all_ids(sub_context, Rotation)
+
+        all_electrified_ids = [b_id for b_id in all_rotation_ids if b_id not in stage_blocks]
+        params["GeographicTripPlotAnalyzer.rotation_ids"] = all_electrified_ids
+        params["GeographicTripPlotAnalyzer.plot_charging_station"] = True
+        params["GeographicTripPlotAnalyzer.plot_depot_charger_count"] = True
+
         # Build pipeline steps
         steps: List[PipelineStep] = [
             CreateHybridFleet(),
@@ -232,8 +295,6 @@ def simulate_multi_stage_electrification(
                 context=sub_context,
                 steps=steps,
                 plot_output_dir=stage_workdir / "plots",
-                include_videos=False,
-                pre_simulation_only=False,
             )
         )
 

@@ -1,6 +1,8 @@
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import pandas as pd
 import sqlalchemy.orm.session
 
 from eflips.x.framework import Modifier, Analyzer, PipelineStep
@@ -12,7 +14,14 @@ from eflips.opt.transition_planning.transition_planning import (
     TransitionPlannerModel,
     SetVariableRegistry,
 )
-from eflips.model import Scenario, VehicleType, Area, Station, Rotation
+from eflips.model import (
+    Scenario,
+    Rotation,
+    Event,
+    EventType,
+    Trip,
+    Depot,
+)
 from eflips.tco import init_tco_parameters, get_params_from_file
 from eflips.tco import TCOCalculator as TCOCalculatorBase
 
@@ -65,45 +74,29 @@ class PlaygroundAnalyzer(Analyzer):
 
     def analyze(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Any:
 
-        import pandas as pd
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        all_rotations = session.query(Rotation).all()
-        rotation_ids = []
-        rotation_trip_counts = []
-        rotation_mileages = []
-
-        for rotation in all_rotations:
-            rotation_ids.append(rotation.id)
-            rotation_trip_counts.append(len(rotation.trips))
-            rotation_mileages.append(sum(trip.route.distance for trip in rotation.trips))
-
-        df = pd.DataFrame(
-            {
-                "rotation_id": rotation_ids,
-                "trip_count": rotation_trip_counts,
-                "mileage": rotation_mileages,
-            }
+        charging_stations = (
+            session.query(Event.station_id)
+            .filter(Event.event_type == EventType.CHARGING_OPPORTUNITY)
+            .distinct()
+            .all()
         )
+        charging_stations = [row[0] for row in charging_stations]
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        axes[0].hist(df["trip_count"], bins=20)
-        axes[0].set_xlabel("Trip Count")
-        axes[0].set_ylabel("Frequency")
-        axes[0].set_title("Distribution of Trip Counts")
+        station_depot_mapping = {}
+        all_trips = session.query(Trip).all()
+        for trip in all_trips:
+            departure_station_id = trip.route.departure_station_id
+            if departure_station_id in charging_stations:
+                depot_station = trip.rotation.trips[0].route.departure_station
+                if departure_station_id not in station_depot_mapping:
 
-        axes[1].hist(df["mileage"], bins=20)
-        axes[1].set_xlabel("Mileage (m)")
-        axes[1].set_ylabel("Frequency")
-        axes[1].set_title("Distribution of Mileages")
+                    station_depot_mapping[trip.route.departure_station_id] = [depot_station.id]
+                else:
+                    station_depot_mapping[trip.route.departure_station_id].append(depot_station.id)
 
-        fig.tight_layout()
-
-        self.fig = fig
-        return self.fig
+        for station_id, depot_ids in station_depot_mapping.items():
+            station_depot_mapping[station_id] = list(set(depot_ids))  # Remove duplicates
+        return station_depot_mapping
 
 
 class TCOCalculator(Analyzer):
@@ -171,22 +164,34 @@ class TransitionPlanner(Analyzer):
         constraint_registry = ConstraintRegistry(transition_planner_parameters)
         expression_registry = ExpressionRegistry(transition_planner_parameters)
 
+        cn = self.__class__.__name__
         model = TransitionPlannerModel(
-            name=params.get("name", "TransitionPlannerModel"),
+            name=params.get(f"{cn}.name", "TransitionPlannerModel"),
             params=transition_planner_parameters,
             set_variable_registry=set_variable_registry,
             constraint_registry=constraint_registry,
             expression_registry=expression_registry,
-            sets=params.get("sets", []),
-            variables=params.get("variables", []),
-            constraints=params.get("constraints", []),
-            expressions=params.get("expressions", []),
-            objective_components=params.get("objective_components", []),
+            sets=params.get(f"{cn}.sets", []),
+            variables=params.get(f"{cn}.variables", []),
+            constraints=params.get(f"{cn}.constraints", []),
+            expressions=params.get(f"{cn}.expressions", []),
+            objective_components=params.get(f"{cn}.objective_components", []),
         )
         model.solve()
-        yearly_vehicle_assignment, yearly_cost_breakdown = (
-            model.visualize()
-        )  # TODO make it align with the framework logging
+        (
+            yearly_vehicle_assignment,
+            yearly_cost_breakdown,
+            station_built_year,
+            depot_charger_count_year,
+        ) = model.get_results()  # TODO make it align with the framework logging
+
+        depot_name_map = {
+            depot.station_id: depot.name
+            for depot in session.query(Depot).filter(Depot.scenario_id == scenario.id).all()
+        }
+        depot_charger_count_year["depot_name"] = depot_charger_count_year["depot_id"].map(
+            depot_name_map
+        )
 
         electrified_blocks = {}
         unelectrified_blocks = {}
@@ -212,33 +217,27 @@ class TransitionPlanner(Analyzer):
             "unelectrified_blocks": unelectrified_blocks,
             "yearly_vehicle_assignment": yearly_vehicle_assignment,
             "yearly_cost_breakdown": yearly_cost_breakdown,
+            "station_built_year": station_built_year,
+            "depot_charger_count_year": depot_charger_count_year,
         }
         return self.result
 
 
 def run_transition_planner(
-    workdir: Path,
-    input_db: Path,
-    scenario_name: str = "berlin",
-    log_level: str = "INFO",
-    sets: Optional[List[str]] = None,
-    variables: Optional[List[str]] = None,
-    constraints: Optional[List[str]] = None,
-    expressions: Optional[List[str]] = None,
-    objective_components: Optional[List[str]] = None,
+    context: PipelineContext,
 ) -> tuple[Path, Optional[Dict[str, Any]]]:
     """Run the transition planner model.
 
     Args:
-        workdir: Working directory for pipeline outputs.
-        input_db: Path to input database.
-        scenario_name: Name of scenario defaults to use (e.g., "berlin").
-        log_level: Logging level.
-        sets: Registered sets for the transition planner model.
-        variables: Registered variables for the transition planner model.
-        constraints: Registered constraints for the transition planner model.
-        expressions: Registered expressions for the transition planner model.
-        objective_components: Components of objective function to optimize.
+        context: Pipeline context containing all parameters under namespaced keys:
+            - ``TCOParameterConfigurator.tco_params_path``: Path to TCO params file.
+            - ``TCOParameterConfigurator.scenario_name``: Scenario name (e.g. "berlin").
+            - ``TransitionPlanner.name``: Model instance name.
+            - ``TransitionPlanner.sets``: Registered sets.
+            - ``TransitionPlanner.variables``: Registered variables.
+            - ``TransitionPlanner.constraints``: Registered constraints.
+            - ``TransitionPlanner.expressions``: Registered expressions.
+            - ``TransitionPlanner.objective_components``: Objective components.
 
     Returns:
         A tuple of (output_db_path, transition_planner_result).
@@ -246,27 +245,110 @@ def run_transition_planner(
         'electrified_blocks' dicts keyed by year.
     """
 
-    context_params: Dict[str, Any] = {
-        "log_level": log_level,
-        "sets": sets if sets is not None else [],
-        "variables": variables if variables is not None else [],
-        "constraints": constraints if constraints is not None else [],
-        "expressions": expressions if expressions is not None else [],
-        "objective_components": objective_components if objective_components is not None else [],
-    }
-    context = PipelineContext(
-        work_dir=workdir,
-        current_db=input_db,
-        params=context_params,
-    )
+    tco_params_path = context.params["TCOParameterConfigurator.tco_params_path"]
+    scenario_name = context.params.get("TCOParameterConfigurator.scenario_name", "berlin")
 
-    tco_parameter_config = TCOParameterConfigurator(scenario_name=scenario_name)
+    tco_parameter_config = TCOParameterConfigurator(
+        scenario_name=scenario_name, tco_params_path=tco_params_path
+    )
     transition_planner = TransitionPlanner()
     steps: List[PipelineStep] = [tco_parameter_config, transition_planner]
     from eflips.x.flows import run_steps
 
     run_steps(context=context, steps=steps)
     return context.current_db, transition_planner.result
+
+
+def generate_transition_plan_plots(
+    results: Dict[str, Any],
+    output_dir: Path,
+) -> None:
+    """Generate and save plots from the results of run_transition_planner.
+
+    Produces four plots:
+    - yearly_electrification.png: cumulative and newly electrified vehicles per year
+    - yearly_cost_breakdown.png: stacked bar of cost components per year
+    - station_build_timeline.png: number of stations built per year
+    - depot_charger_count.png: charger count per depot over time
+
+    Args:
+        results: The result dict returned by run_transition_planner (second element of tuple).
+        output_dir: Directory to save the plots into.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    yearly_vehicle_assignment: pd.Series = results["yearly_vehicle_assignment"]
+    yearly_cost_breakdown: pd.DataFrame = results["yearly_cost_breakdown"]
+    station_built_year: pd.Series = results["station_built_year"]
+    depot_charger_count_year: pd.DataFrame = results["depot_charger_count_year"]
+
+    # save the data for debugging
+    yearly_vehicle_assignment.to_csv(output_dir / "yearly_vehicle_assignment.csv")
+    yearly_cost_breakdown.to_csv(output_dir / "yearly_cost_breakdown.csv")
+    station_built_year.to_csv(output_dir / "station_built_year.csv")
+    depot_charger_count_year.to_csv(output_dir / "depot_charger_count_year.csv")
+
+    # --- 1. Yearly & cumulative vehicle electrification ---
+    fig, ax = plt.subplots(figsize=(10, 5))
+    years = yearly_vehicle_assignment.index
+    ax.bar(years, yearly_vehicle_assignment.values, label="Newly electrified", alpha=0.7)
+    ax.plot(
+        years,
+        yearly_vehicle_assignment.cumsum().values,
+        marker="o",
+        color="tab:red",
+        label="Cumulative electrified",
+    )
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Number of vehicles")
+    ax.set_title("Vehicle electrification over time")
+    ax.legend()
+    ax.set_xticks(years)
+    fig.tight_layout()
+    fig.savefig(output_dir / "yearly_electrification.png", dpi=150)
+    plt.close(fig)
+
+    # --- 2. Yearly cost breakdown (stacked bar) ---
+    fig, ax = plt.subplots(figsize=(12, 6))
+    yearly_cost_breakdown.plot(kind="bar", stacked=True, ax=ax, colormap="tab20")
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Cost (EUR)")
+    ax.set_title("Yearly cost breakdown")
+    ax.legend(loc="upper left", fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(output_dir / "yearly_cost_breakdown.png", dpi=150)
+    plt.close(fig)
+
+    # --- 3. Station build timeline ---
+    if not station_built_year.empty:
+        builds_per_year = station_built_year.value_counts().sort_index()
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.bar(builds_per_year.index, builds_per_year.values)
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Stations built")
+        ax.set_title("Charging stations built per year")
+        ax.set_xticks(builds_per_year.index)
+        fig.tight_layout()
+        fig.savefig(output_dir / "station_build_timeline.png", dpi=150)
+        plt.close(fig)
+
+    # --- 4. Depot charger count over time ---
+    if not depot_charger_count_year.empty:
+        fig, ax = plt.subplots(figsize=(12, 5))
+        label_col = (
+            "depot_name" if "depot_name" in depot_charger_count_year.columns else "depot_id"
+        )
+        for label, group in depot_charger_count_year.groupby(label_col):
+            group = group.sort_values("year")
+            ax.step(group["year"], group["charger_count"], where="post", label=str(label))
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Charger count")
+        ax.set_title("Depot charger count over time")
+        ax.legend(fontsize=7, ncol=2)
+        fig.tight_layout()
+        fig.savefig(output_dir / "depot_charger_count.png", dpi=150)
+        plt.close(fig)
 
 
 def run_tco_calculation(
