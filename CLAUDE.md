@@ -304,6 +304,14 @@ The framework automatically:
 - Moves failed databases to `.{timestamp}.failed` extension (Modifiers only)
 - Rolls back analyzer sessions (read-only)
 
+### Manual Cache Invalidation
+
+A user can force a step to re-run by deleting its output database file from `work_dir`
+(e.g., `step_002_VehicleScheduling.db`). After a Prefect cache hit, `PipelineStep.execute()`
+checks whether the output database actually exists. If the file is missing, it logs an `INFO`
+message and calls `execute_impl()` directly to regenerate it. All downstream steps will then
+re-run naturally because their cache keys depend on the (now changed) input database hash.
+
 ### Prefect Artifacts
 
 Steps automatically create Prefect artifacts via `_create_artifact_markdown()`. Override this method to provide custom

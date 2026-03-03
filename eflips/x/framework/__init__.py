@@ -166,6 +166,16 @@ class PipelineStep(ABC):
         assert self._prefect_task is not None
         self._prefect_task(context=context, output_db=output_db)
 
+        # After a Prefect cache hit, the output database may have been deleted by the user.
+        # Treat a missing output database as a cache invalidation decision and re-run.
+        if not output_db.exists():
+            self.logger.info(
+                f"{self.__class__.__name__}: output database not found at '{output_db}' after a "
+                f"Prefect cache hit. The file was likely deleted by the user, which is interpreted "
+                f"as a cache invalidation decision. Re-running the step now."
+            )
+            self.execute_impl(context=context, output_db=output_db)
+
         context.set_current_db(output_db)
 
     def _create_prefect_task(self) -> None:
