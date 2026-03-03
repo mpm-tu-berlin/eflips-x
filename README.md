@@ -292,6 +292,11 @@ for vehicle_id in vehicle_ids:
 - Python dependencies (poetry.lock)
 - Pipeline parameters
 
+To force a specific step to re-run, delete its output database file from `work_dir`
+(e.g., `step_002_VehicleScheduling.db`). The framework detects the missing file after a cache
+hit and re-executes the step automatically. All downstream steps re-run as a consequence,
+since their cache keys depend on the input database hash.
+
 **Database Chaining**: Each step automatically receives the database from the previous step through the
 `PipelineContext`. Use `context.get_session()` to access the current database:
 
