@@ -198,7 +198,7 @@ class IntegratedScheduling(Modifier):
     ) -> set[int]:
         """
         Identify trips within the given rotations that should have longer breaks added. We have conflicting goals of
-        1) Minizing the number of trips that need longer breaks added and
+        1) Minimizing the number of trips that need longer breaks added and
         2) Putting the longer breaks at useful locations (i.e., where the vehicle can charge).
 
         The heuristic approach does the following:
