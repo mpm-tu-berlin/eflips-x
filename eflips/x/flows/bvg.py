@@ -71,7 +71,10 @@ else:
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 INPUT_DATA_DIR = PROJECT_ROOT / "data" / "input" / "Berlin 2025-06"
-WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvg"
+if REDUCED_DATA:
+    WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvgmini"
+else:
+    WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvg"
 
 
 # ============================================================================
@@ -483,6 +486,9 @@ def run_term_scenario(common_db: Path) -> None:
         "log_level": LOG_LEVEL,
         "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
         "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
+        "VehicleScheduling.maximum_schedule_duration": (
+            timedelta(hours=24) if not REDUCED_DATA else timedelta(hours=4)
+        ),  # Shorter schedules for reduced data
         "VehicleScheduling.battery_margin": 0.1,
         "IntegratedScheduling.max_iterations": 2,
         "StationElectrification.charging_power_kw": 450.0,
