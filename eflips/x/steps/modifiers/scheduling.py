@@ -310,7 +310,7 @@ class VehicleScheduling(Modifier):
     in the scenario.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.0.1", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -638,7 +638,11 @@ class VehicleScheduling(Modifier):
                 for node in graph_copy.nodes:
                     node_data = graph_copy.nodes[node]
                     if "weight" in node_data and isinstance(node_data["weight"], tuple):
-                        node_data["weight"] = f"{node_data['weight'][0]*100:.2f}% ΔSOC"
+                        node_data["weight"] = (
+                            f"{node_data['weight'][0]*100:.2f}% ΔSOC"
+                            if node_data["weight"][0] is not None
+                            else "N/A"
+                        )
 
                 # Save graph to GraphML format
                 try:
@@ -649,7 +653,11 @@ class VehicleScheduling(Modifier):
                     # Don't raise - graph saving is optional, don't block optimization
 
             # Solve the vehicle scheduling problem
-            rotation_plan = solve(graph)
+            rotation_plan = solve(
+                graph,
+                write_to_file=True if save_graphs else False,
+                maximum_schedule_duration=maximum_schedule_duration,
+            )
             self.logger.info(
                 f"Solved vehicle scheduling for vehicle type {vehicle_type.name_short}"
             )
