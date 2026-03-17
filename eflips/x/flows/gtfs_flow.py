@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+
+"""
+Generalized GTFS Simulation Flow
+
+Reads agency/depot configuration from an Excel file (depot_locations.xlsx) and runs
+both DEPOT and OPPORTUNITY charging variants for each configured agency. Exports a
+JSON scenario after depot assignment (before terminus charger placement).
+
+Usage:
+    python -m eflips.x.flows.gtfs_flow [--plots] [--agency FILTER] [--gtfs-dir DIR] [--parallel]
+"""
+
+import argparse
+import logging
+import math
+import multiprocessing
+import re
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import pandas as pd
+from eflips.depot.api import SmartChargingStrategy  # type: ignore[import-untyped]
+from eflips.model import ChargeType
+from prefect import flow
+
+from eflips.x.flows import generate_all_plots, run_steps
+from eflips.x.framework import PipelineContext, PipelineStep
+from eflips.x.steps.analyzers.json_export import ScenarioJsonExporter
+from eflips.x.steps.generators import GTFSIngester, CopyCreator
+from eflips.x.steps.modifiers.bvg_tools import MergeStations
+from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData
+from eflips.x.steps.modifiers.gtfs_utilities import ConfigureVehicleTypes
+from eflips.x.steps.modifiers.scheduling import (
+    VehicleScheduling,
+    DepotAssignment,
+    StationElectrification,
+)
+from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
+
+logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DepotConfig:
+    name: str
+    coords: Tuple[float, float]  # (lon, lat)
+    capacity: int  # NaN → 9999
+
+
+@dataclass
+class AgencyConfig:
+    gtfs_file: Path
+    agency_name: str
+    agency_id: int
+    depots: List[DepotConfig]
+    battery_capacity: float = 360.0
+    consumption: float = 1.5
+    charging_curve: List[List[float]] = field(default_factory=lambda: [[0.0, 450.0], [1.0, 450.0]])
+
+    @property
+    def slug(self) -> str:
+        """Sanitized agency name for directory naming."""
+        s = self.agency_name.lower()
+        s = re.sub(r"[^a-z0-9]+", "_", s)
+        s = s.strip("_")
+        return s[:60]
+
+
+# ---------------------------------------------------------------------------
+# Excel parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_depot_locations(excel_path: Path) -> List[AgencyConfig]:
+    """Parse the depot_locations Excel file into a list of AgencyConfig.
+
+    Only agencies with at least one named depot are included.
+    """
+    df = pd.read_excel(excel_path)
+
+    # Filter to rows with a depot name
+    filled = df[df["name"].notna()].copy()
+    if filled.empty:
+        raise ValueError(f"No depot entries found in {excel_path}")
+
+    configs: List[AgencyConfig] = []
+    grouped = filled.groupby(["file_name", "agency_id", "agency_name"])
+    for (file_name, agency_id, agency_name), group in grouped:
+        depots: List[DepotConfig] = []
+        for _, row in group.iterrows():
+            # Parse "lat, lon" string → (lon, lat) tuple
+            parts = str(row["coords"]).split(",")
+            lat, lon = float(parts[0].strip()), float(parts[1].strip())
+            capacity = 9999 if math.isnan(float(row["capacity"])) else int(row["capacity"])
+            depots.append(DepotConfig(name=row["name"], coords=(lon, lat), capacity=capacity))
+        configs.append(
+            AgencyConfig(
+                gtfs_file=excel_path.parent / file_name,
+                agency_name=agency_name,
+                agency_id=int(agency_id),
+                depots=depots,
+            )
+        )
+    return configs
+
+
+def build_depot_config(depots: List[DepotConfig]) -> List[Dict[str, Any]]:
+    """Convert DepotConfig list to the dict format expected by DepotAssignment."""
+    return [
+        {
+            "depot_station": depot.coords,
+            "name": depot.name,
+            "vehicle_type": ["default_bus"],
+            "capacity": depot.capacity,
+        }
+        for depot in depots
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline phases (subflows)
+# ---------------------------------------------------------------------------
+
+
+@flow(
+    name="GTFS Common Phase",
+    flow_run_name="{agency_name} - common",
+)
+def run_common_phase(
+    agency: AgencyConfig,
+    cache_base: Path,
+    agency_name: str,  # used for flow_run_name only
+) -> Path:
+    """Run the common pipeline phase (ingest → merge → cleanup → configure).
+
+    Returns the path to the common DB for branching.
+    """
+    work_dir = cache_base / "common"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    params: Dict[str, Any] = {
+        "log_level": "INFO",
+        "GTFSIngester.bus_only": True,
+        "GTFSIngester.duration": "WEEK",
+        "GTFSIngester.agency_name": agency.agency_name,
+        "ConfigureVehicleTypes.battery_capacity": agency.battery_capacity,
+        "ConfigureVehicleTypes.consumption": agency.consumption,
+        "ConfigureVehicleTypes.charging_curve": agency.charging_curve,
+    }
+
+    steps: List[PipelineStep] = [
+        GTFSIngester(input_files=[agency.gtfs_file]),
+        MergeStations(),
+        RemoveUnusedData(),
+        ConfigureVehicleTypes(),
+    ]
+
+    context = PipelineContext(work_dir=work_dir, params=params)
+    run_steps(steps=steps, context=context)
+
+    assert context.current_db is not None
+    return context.current_db
+
+
+@flow(
+    name="GTFS Depot Variant",
+    flow_run_name="{agency_name} - depot",
+)
+def run_depot_variant(
+    agency: AgencyConfig,
+    common_db: Path,
+    cache_base: Path,
+    output_base: Path,
+    agency_name: str,  # used for flow_run_name only
+    enable_plots: bool = False,
+) -> None:
+    """Run the DEPOT charging variant."""
+    work_dir = cache_base / "depot"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = output_base / "depot"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    params: Dict[str, Any] = {
+        "log_level": "INFO",
+        "VehicleScheduling.charge_type": ChargeType.DEPOT,
+        "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
+        "VehicleScheduling.maximum_schedule_duration": timedelta(hours=24),
+        "DepotAssignment.depot_config": build_depot_config(agency.depots),
+        "Simulation.repetition_period": timedelta(weeks=1),
+        "Simulation.smart_charging": SmartChargingStrategy.EVEN,
+        "ScenarioJsonExporter.output_path": str(output_dir / "scenario.json"),
+    }
+
+    context = PipelineContext(work_dir=work_dir, params=params)
+    CopyCreator(input_files=[common_db]).execute(context=context)
+
+    steps: List[PipelineStep] = [
+        VehicleScheduling(),
+        DepotAssignment(),
+    ]
+    run_steps(steps=steps, context=context)
+
+    # Export JSON scenario (read-only, does not advance current_db)
+    ScenarioJsonExporter().execute(context=context)
+
+    post_steps: List[PipelineStep] = [
+        DepotGenerator(),
+        Simulation(),
+    ]
+    run_steps(steps=post_steps, context=context)
+
+    if enable_plots:
+        plots_dir = output_dir / "visualizations"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        generate_all_plots(
+            context=context, output_dir=plots_dir, include_videos=False, pre_simulation_only=False
+        )
+
+
+@flow(
+    name="GTFS Opportunity Variant",
+    flow_run_name="{agency_name} - opportunity",
+)
+def run_opportunity_variant(
+    agency: AgencyConfig,
+    common_db: Path,
+    cache_base: Path,
+    output_base: Path,
+    agency_name: str,  # used for flow_run_name only
+    enable_plots: bool = False,
+) -> None:
+    """Run the OPPORTUNITY charging variant."""
+    work_dir = cache_base / "opportunity"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = output_base / "opportunity"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    params: Dict[str, Any] = {
+        "log_level": "INFO",
+        "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
+        "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
+        "VehicleScheduling.maximum_schedule_duration": timedelta(hours=24),
+        "DepotAssignment.depot_config": build_depot_config(agency.depots),
+        "StationElectrification.max_stations_to_electrify": 9999,
+        "Simulation.repetition_period": timedelta(weeks=1),
+        "Simulation.smart_charging": SmartChargingStrategy.EVEN,
+        "ScenarioJsonExporter.output_path": str(output_dir / "scenario.json"),
+    }
+
+    context = PipelineContext(work_dir=work_dir, params=params)
+    CopyCreator(input_files=[common_db]).execute(context=context)
+
+    steps: List[PipelineStep] = [
+        VehicleScheduling(),
+        DepotAssignment(),
+    ]
+    run_steps(steps=steps, context=context)
+
+    # Export JSON scenario (read-only, does not advance current_db)
+    ScenarioJsonExporter().execute(context=context)
+
+    post_steps: List[PipelineStep] = [
+        StationElectrification(),
+        DepotGenerator(),
+        Simulation(),
+    ]
+    run_steps(steps=post_steps, context=context)
+
+    if enable_plots:
+        plots_dir = output_dir / "visualizations"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        generate_all_plots(
+            context=context, output_dir=plots_dir, include_videos=False, pre_simulation_only=False
+        )
+
+
+@flow(
+    name="GTFS Agency",
+    flow_run_name="{agency_name}",
+)
+def run_agency_flow(
+    agency: AgencyConfig,
+    cache_base_root: Path,
+    output_base_root: Path,
+    agency_name: str,  # used for flow_run_name only
+    enable_plots: bool = False,
+) -> None:
+    """Run the full pipeline (common → depot + opportunity) for a single agency."""
+    gtfs_stem = agency.gtfs_file.stem
+    slug = agency.slug
+
+    cache_base = cache_base_root / gtfs_stem / slug
+    output_base = output_base_root / gtfs_stem / slug
+
+    logger.info(f"Processing agency: {agency.agency_name} ({gtfs_stem}/{slug})")
+
+    common_db = run_common_phase(
+        agency=agency,
+        cache_base=cache_base,
+        agency_name=agency.agency_name,
+    )
+
+    run_depot_variant(
+        agency=agency,
+        common_db=common_db,
+        cache_base=cache_base,
+        output_base=output_base,
+        agency_name=agency.agency_name,
+        enable_plots=enable_plots,
+    )
+
+    run_opportunity_variant(
+        agency=agency,
+        common_db=common_db,
+        cache_base=cache_base,
+        output_base=output_base,
+        agency_name=agency.agency_name,
+        enable_plots=enable_plots,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main flow
+# ---------------------------------------------------------------------------
+
+
+@flow(name="Generalized GTFS Flow")
+def gtfs_flow(
+    enable_plots: bool = False,
+    agency_filter: str | None = None,
+    gtfs_dir: Path | None = None,
+    parallel: bool = False,
+) -> None:
+    """Run DEPOT and OPPORTUNITY charging variants for all configured GTFS agencies."""
+    if gtfs_dir is None:
+        gtfs_dir = PROJECT_ROOT / "data" / "input" / "GTFS"
+
+    excel_path = gtfs_dir / "depot_locations.xlsx"
+    if not excel_path.exists():
+        raise FileNotFoundError(f"Depot locations Excel not found: {excel_path}")
+
+    agencies = parse_depot_locations(excel_path)
+
+    if agency_filter:
+        filter_lower = agency_filter.lower()
+        agencies = [a for a in agencies if filter_lower in a.agency_name.lower()]
+        if not agencies:
+            raise ValueError(f"No agencies matched filter '{agency_filter}'")
+
+    cache_base_root = PROJECT_ROOT / "data" / "cache" / "gtfs"
+    output_base_root = PROJECT_ROOT / "data" / "output" / "gtfs"
+
+    if parallel:
+        max_workers = min(len(agencies), multiprocessing.cpu_count())
+        logger.info(f"Running {len(agencies)} agencies in parallel (max_workers={max_workers})")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    run_agency_flow,
+                    agency=agency,
+                    cache_base_root=cache_base_root,
+                    output_base_root=output_base_root,
+                    agency_name=agency.agency_name,
+                    enable_plots=enable_plots,
+                ): agency
+                for agency in agencies
+            }
+            for future in as_completed(futures):
+                agency = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.error(f"Agency '{agency.agency_name}' failed: {exc}")
+                    raise
+    else:
+        for agency in agencies:
+            run_agency_flow(
+                agency=agency,
+                cache_base_root=cache_base_root,
+                output_base_root=output_base_root,
+                agency_name=agency.agency_name,
+                enable_plots=enable_plots,
+            )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generalized GTFS Simulation Flow")
+    parser.add_argument("--plots", action="store_true", help="Enable plot generation")
+    parser.add_argument(
+        "--agency",
+        type=str,
+        default=None,
+        help="Case-insensitive substring filter on agency name",
+    )
+    parser.add_argument(
+        "--gtfs-dir",
+        type=Path,
+        default=None,
+        help="Override input directory (must contain depot_locations.xlsx and GTFS zips)",
+    )
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Run agencies in parallel using threads (one thread per agency)",
+    )
+    args = parser.parse_args()
+
+    gtfs_flow(
+        enable_plots=args.plots,
+        agency_filter=args.agency,
+        gtfs_dir=args.gtfs_dir,
+        parallel=args.parallel,
+    )
