@@ -688,7 +688,7 @@ class DepotAssignment(Modifier):
     4. Logs comparison of before/after assignments
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.1.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1004,6 +1004,8 @@ class DepotAssignment(Modifier):
         self.logger.info("Completed logging post-optimization depot assignments")
 
         # Go through all depots (union of pre and post optimization keys) in alphabetical order and list the changes
+        # Also make sure the ChargeType for all active depots is set to DEPOT, as the optimizer assumes this and the StationElectrification modifier relies on it
+        # Unset for depots that are no longer active, to avoid confusion
         all_stations = set(pre_optimization_assignments.keys()).union(
             post_optimization_assignments.keys()
         )
@@ -1011,6 +1013,44 @@ class DepotAssignment(Modifier):
             station = session.query(Station).filter(Station.id == station_id).one()
             pre_rotations = pre_optimization_assignments.get(station.id, [])
             post_rotations = post_optimization_assignments.get(station.id, [])
+
+            with session.no_autoflush:
+                if len(post_rotations) > 0:
+                    station.is_electrified = True
+                    station.amount_charging_places = (
+                        station.amount_charging_places
+                        if station.amount_charging_places is not None
+                        else 9999
+                    )
+                    station.power_per_charger = (
+                        station.power_per_charger
+                        if station.power_per_charger is not None
+                        else 1000
+                    )
+                    station.charge_type = ChargeType.DEPOT
+                    station.power_total = (
+                        station.power_total if station.power_total is not None else 1000000
+                    )
+                    station.voltage_level = (
+                        station.voltage_level
+                        if station.voltage_level is not None
+                        else VoltageLevel.MV
+                    )
+                else:
+                    # Unset charge type for stations that are no longer active depots, to avoid confusion.
+                    # If - for some reason - they have terminus charging, leave the charge type as is, since they are still
+                    # charging stations, just not depots.
+                    station.charge_type = (
+                        None if station.charge_type == ChargeType.DEPOT else station.charge_type
+                    )
+                    # If we nullified the charge type, also nullify the power and voltage level to avoid confusion
+                    if station.charge_type is None:
+                        station.amount_charging_places = None
+                        station.power_per_charger = None
+                        station.power_total = None
+                        station.voltage_level = None
+                        station.is_electrified = False
+            session.flush()
 
             pre_count = len(pre_rotations)
             post_count = len(post_rotations)
