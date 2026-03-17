@@ -16,8 +16,7 @@ import logging
 import math
 import multiprocessing
 import re
-import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed, ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -286,6 +285,15 @@ def run_opportunity_variant(
         )
 
 
+# ---------------------------------------------------------------------------
+# Plain wrapper functions for ProcessPoolExecutor (must be module-level to be picklable)
+# ---------------------------------------------------------------------------
+
+
+def _run_agency_flow_worker(**kwargs: Any) -> None:
+    run_agency_flow(**kwargs)
+
+
 @flow(
     name="GTFS Agency",
     flow_run_name="{agency_name}",
@@ -312,7 +320,7 @@ def run_agency_flow(
         agency_name=agency.agency_name,
     )
 
-    run_depot_variant(
+    variant_kwargs = dict(
         agency=agency,
         common_db=common_db,
         cache_base=cache_base,
@@ -320,15 +328,8 @@ def run_agency_flow(
         agency_name=agency.agency_name,
         enable_plots=enable_plots,
     )
-
-    run_opportunity_variant(
-        agency=agency,
-        common_db=common_db,
-        cache_base=cache_base,
-        output_base=output_base,
-        agency_name=agency.agency_name,
-        enable_plots=enable_plots,
-    )
+    run_depot_variant(**variant_kwargs)
+    run_opportunity_variant(**variant_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -365,10 +366,10 @@ def gtfs_flow(
     if parallel:
         max_workers = min(len(agencies), multiprocessing.cpu_count())
         logger.info(f"Running {len(agencies)} agencies in parallel (max_workers={max_workers})")
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
-                    run_agency_flow,
+                    _run_agency_flow_worker,
                     agency=agency,
                     cache_base_root=cache_base_root,
                     output_base_root=output_base_root,
@@ -417,7 +418,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--parallel",
         action="store_true",
-        help="Run agencies in parallel using threads (one thread per agency)",
+        help="Run agencies in parallel using processes (one process per agency)",
     )
     args = parser.parse_args()
 
