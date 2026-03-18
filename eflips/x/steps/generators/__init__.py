@@ -23,7 +23,15 @@ from eflips.ingest.legacy.bvgxml import (
     recenter_station,
 )
 from eflips.ingest.legacy.xmldata import Linienfahrplan
-from eflips.model import Scenario, Route, ConsistencyWarning, Station, AssocRouteStation, Trip, Rotation
+from eflips.model import (
+    Scenario,
+    Route,
+    ConsistencyWarning,
+    Station,
+    AssocRouteStation,
+    Trip,
+    Rotation,
+)
 from geoalchemy2.functions import ST_Distance
 from prefect.artifacts import create_progress_artifact, update_progress_artifact
 from sqlalchemy import func, text
@@ -595,7 +603,9 @@ class GTFSIngester(Generator):
             progress=100.0,
             description="GTFS ingestion completed successfully",
         )
-        logger.info(f"GTFS ingestion completed successfully: {trip_count} trips, {rotation_count} rotations")
+        logger.info(
+            f"GTFS ingestion completed successfully: {trip_count} trips, {rotation_count} rotations"
+        )
 
 
 class CopyCreator(Generator):
