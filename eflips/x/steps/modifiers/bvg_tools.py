@@ -1147,7 +1147,7 @@ class ReduceToNDaysNDepots(Modifier):
     exceeding the repetition period.
     """
 
-    def __init__(self, code_version: str = "v1.3.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.4.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1305,10 +1305,21 @@ cause depot-simulation instability with a 1-day repetition period.
         def _fmt(d: date, c: int) -> str:
             return f"{d} ({d.strftime('%A')}, {c} trips)"
 
-        if preferred:
+        if preferred and len(preferred) >= num_days:
             candidates = preferred
             self.logger.info(
                 f"Using preferred weekdays {preferred_weekdays}; "
+                f"candidate days: {', '.join(_fmt(d, c) for d, c in candidates[:num_days])}"
+            )
+        elif preferred:
+            # Not enough preferred days — backfill from busiest non-preferred days
+            non_preferred = [
+                (d, c) for d, c in days_sorted if d not in {p[0] for p in preferred}
+            ]
+            candidates = preferred + non_preferred
+            self.logger.info(
+                f"Only {len(preferred)} preferred-weekday day(s) available, "
+                f"backfilling to {num_days} from busiest remaining days; "
                 f"candidate days: {', '.join(_fmt(d, c) for d, c in candidates[:num_days])}"
             )
         else:
