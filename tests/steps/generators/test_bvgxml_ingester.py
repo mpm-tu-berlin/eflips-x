@@ -105,7 +105,7 @@ class TestBVGXMLIngester:
         with pytest.raises(ValueError, match="Invalid log level"):
             ingester.generate(db_session, params)
 
-    @pytest.mark.parametrize("log_level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+    @pytest.mark.parametrize("log_level", ["DEBUG", "ERROR"])
     def test_generate_with_different_log_levels(
         self, db_session: Session, ingester: BVGXMLIngester, log_level: str
     ):

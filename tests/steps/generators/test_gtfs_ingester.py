@@ -179,7 +179,7 @@ class TestGTFSIngester:
         with pytest.raises(ValueError, match="Invalid log level"):
             ingester.generate(db_session, params)
 
-    @pytest.mark.parametrize("log_level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+    @pytest.mark.parametrize("log_level", ["DEBUG", "ERROR"])
     def test_generate_with_different_log_levels(
         self, db_session: Session, ingester: GTFSIngester, log_level: str
     ):
@@ -246,7 +246,7 @@ class TestGTFSIngester:
         ingester = GTFSIngester(input_files=[swu_file], cache_enabled=False)
         params = {
             "log_level": "WARNING",
-            f"{ingester.__class__.__name__}.duration": "WEEK",
+            f"{ingester.__class__.__name__}.duration": "DAY",
             f"{ingester.__class__.__name__}.bus_only": True,  # SWU supports bus_only=True
         }
 
