@@ -42,9 +42,6 @@ pytest-cov = "^7.0.0"
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.pytest.ini_options]
-addopts = "--cov=eflips/x --cov-report=term-missing"
-
 [tool.coverage.run]
 source = ["eflips/x"]
 omit = ["eflips/x/flows/*"]
