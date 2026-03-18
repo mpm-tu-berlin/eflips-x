@@ -688,7 +688,7 @@ class DepotAssignment(Modifier):
     4. Logs comparison of before/after assignments
     """
 
-    def __init__(self, code_version: str = "v1.1.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.2.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1014,44 +1014,6 @@ class DepotAssignment(Modifier):
             pre_rotations = pre_optimization_assignments.get(station.id, [])
             post_rotations = post_optimization_assignments.get(station.id, [])
 
-            with session.no_autoflush:
-                if len(post_rotations) > 0:
-                    station.is_electrified = True
-                    station.amount_charging_places = (
-                        station.amount_charging_places
-                        if station.amount_charging_places is not None
-                        else 9999
-                    )
-                    station.power_per_charger = (
-                        station.power_per_charger
-                        if station.power_per_charger is not None
-                        else 1000
-                    )
-                    station.charge_type = ChargeType.DEPOT
-                    station.power_total = (
-                        station.power_total if station.power_total is not None else 1000000
-                    )
-                    station.voltage_level = (
-                        station.voltage_level
-                        if station.voltage_level is not None
-                        else VoltageLevel.MV
-                    )
-                else:
-                    # Unset charge type for stations that are no longer active depots, to avoid confusion.
-                    # If - for some reason - they have terminus charging, leave the charge type as is, since they are still
-                    # charging stations, just not depots.
-                    station.charge_type = (
-                        None if station.charge_type == ChargeType.DEPOT else station.charge_type
-                    )
-                    # If we nullified the charge type, also nullify the power and voltage level to avoid confusion
-                    if station.charge_type is None:
-                        station.amount_charging_places = None
-                        station.power_per_charger = None
-                        station.power_total = None
-                        station.voltage_level = None
-                        station.is_electrified = False
-            session.flush()
-
             pre_count = len(pre_rotations)
             post_count = len(post_rotations)
 
@@ -1087,6 +1049,22 @@ class DepotAssignment(Modifier):
             )
 
 
+def _electrify_station(
+    station: Station,
+    charge_type: ChargeType,
+    power_per_charger: float,
+    amount_charging_places: int = 1000,
+    voltage_level: VoltageLevel = VoltageLevel.MV,
+) -> None:
+    """Electrify a single station with the given charging parameters."""
+    station.is_electrified = True
+    station.charge_type = charge_type
+    station.amount_charging_places = amount_charging_places
+    station.power_per_charger = power_per_charger
+    station.power_total = amount_charging_places * power_per_charger
+    station.voltage_level = voltage_level
+
+
 class InsufficientChargingTimeAnalyzer(Analyzer):
     """
     Analyze whether rotations have sufficient charging time throughout the day.
@@ -1100,7 +1078,7 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
     or a list of rotation IDs that end with SOC below zero.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.1.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1178,38 +1156,24 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
         )
 
         # Electrify Depots
-        depot_q = (
+        depot_stations = (
             session.query(Station)
             .filter(Station.scenario_id == scenario.id)
             .filter(Station.charge_type == ChargeType.DEPOT)
+            .all()
         )
-        depot_q.update(
-            {
-                "is_electrified": True,
-                "amount_charging_places": 1000,
-                "power_per_charger": charging_power,
-                "power_total": 1000 * charging_power,
-                "charge_type": ChargeType.DEPOT,
-                "voltage_level": VoltageLevel.MV,
-            }
-        )
+        for s in depot_stations:
+            _electrify_station(s, ChargeType.DEPOT, charging_power)
 
         # Electrify All termini
-        station_q = (
+        terminus_stations = (
             session.query(Station)
             .filter(Station.scenario_id == scenario.id)
             .filter(or_(Station.charge_type == None, Station.charge_type != ChargeType.DEPOT))
+            .all()
         )
-        station_q.update(
-            {
-                "is_electrified": True,
-                "amount_charging_places": 1000,
-                "power_per_charger": charging_power,
-                "power_total": 1000 * charging_power,
-                "charge_type": ChargeType.OPPORTUNITY,
-                "voltage_level": VoltageLevel.MV,
-            }
-        )
+        for s in terminus_stations:
+            _electrify_station(s, ChargeType.OPPORTUNITY, charging_power)
 
         # Generate consumption results
         consumption_results = generate_consumption_result(scenario)
@@ -1285,7 +1249,7 @@ class StationElectrification(Modifier):
     and the utility functions from util_station_electrification module.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.1.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -1395,12 +1359,9 @@ class StationElectrification(Modifier):
             if start != end:
                 raise ValueError(f"Start and end station are not the same: {start} != {end}")
             if not start.is_electrified:
-                start.is_electrified = True
-                start.amount_charging_places = 100
-                start.power_per_charger = 300
-                start.power_total = start.amount_charging_places * start.power_per_charger
-                start.charge_type = ChargeType.DEPOT
-                start.voltage_level = VoltageLevel.MV
+                _electrify_station(
+                    start, ChargeType.DEPOT, power_per_charger=300, amount_charging_places=100
+                )
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
         """
