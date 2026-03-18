@@ -226,8 +226,12 @@ class TestGeographicTripPlotAnalyzer:
         first_rotation = db_session.query(Rotation).first()
         rotation_id = first_rotation.id
 
-        # Count trips in this rotation
-        expected_trip_count = len(first_rotation.trips)
+        # Count only passenger trips (analyzer defaults to passenger_trips_only=True)
+        from eflips.model import TripType
+
+        expected_trip_count = len(
+            [t for t in first_rotation.trips if t.trip_type == TripType.PASSENGER]
+        )
 
         # Analyze with filter
         result = analyzer.analyze(
