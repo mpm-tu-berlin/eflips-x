@@ -194,7 +194,7 @@ Optional boolean parameter to include only passenger trips. Default is True.
             session=session,
             rotation_ids=rotation_ids,
             route_calculation_mode=RouteCalculationMode.ROUTE_SHAPES,
-            passenger_trips_only=True,
+            passenger_trips_only=passenger_trips_only,
         )
 
         return result
