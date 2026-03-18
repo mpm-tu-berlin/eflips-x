@@ -35,10 +35,22 @@ sphinx-paramlinks = "^0.6.0"
 pydocstringformatter = "^0.7.5"
 pytest-xdist = "^3.8.0"
 pytest-split = "^0.10.0"
+coverage = "^7.13.5"
+pytest-cov = "^7.0.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+addopts = "--cov=eflips/x --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["eflips/x"]
+omit = ["eflips/x/flows/*"]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.black]
 line-length = 99
