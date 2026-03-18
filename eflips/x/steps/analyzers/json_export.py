@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import sqlalchemy.orm
-from eflips.model import Scenario, Trip, TripType
+from eflips.model import Scenario
 from eflips.model.util.export_json import export_scenario_to_json
 
 from eflips.x.framework import Analyzer
@@ -26,7 +26,7 @@ class ScenarioJsonExporter(Analyzer):
     """
 
     def __init__(
-        self, code_version: str = "1", cache_enabled: bool = False, **kwargs: Any
+        self, code_version: str = "2", cache_enabled: bool = False, **kwargs: Any
     ) -> None:
         super().__init__(code_version=code_version, cache_enabled=cache_enabled, **kwargs)
 
@@ -43,12 +43,6 @@ class ScenarioJsonExporter(Analyzer):
         scenario = session.query(Scenario).first()
         if scenario is None:
             raise ValueError("No scenario found in database")
-
-        # We need to update the loaded mass for thh trips to something sensible
-        session.query(Trip).filter(Trip.trip_type == TripType.EMPTY).update({"loaded_mass": 0})
-        session.query(Trip).filter(Trip.trip_type == TripType.PASSENGER).update(
-            {"loaded_mass": 1360}
-        )
 
         json_data = export_scenario_to_json(scenario_id=scenario.id, session=session)
 
