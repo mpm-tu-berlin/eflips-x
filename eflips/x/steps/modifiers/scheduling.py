@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Counter, Set
 
 import eflips.model
-import networkx as nx
+import networkx as nx  # type: ignore[import-untyped]
 import pandas as pd
 import sqlalchemy.orm.session
 from eflips.depot.api import (  # type: ignore[import-untyped]
@@ -595,6 +595,7 @@ class VehicleScheduling(Modifier):
 
         # Create output directory if graph saving is enabled
         if save_graphs:
+            assert graph_output_dir is not None
             graph_output_dir.mkdir(parents=True, exist_ok=True)
             self.logger.info(f"Saving graphs to: {graph_output_dir}")
 
@@ -631,6 +632,7 @@ class VehicleScheduling(Modifier):
             if save_graphs:
                 # Create filename: {vehicle_type_name}_scheduling_graph.graphml
                 graph_filename = f"{vehicle_type.name_short}_scheduling_graph.graphml"
+                assert graph_output_dir is not None  # For type checking
                 graph_filepath = graph_output_dir / graph_filename
 
                 # Create a copy of the graph and turn the node weight from a tuple into a string for GraphML compatibility

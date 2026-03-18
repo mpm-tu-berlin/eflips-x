@@ -134,7 +134,7 @@ def query_all_ids(
 
 
 @flow(name="BVG Flow Example")
-def main():
+def main() -> None:
     ### Step 1: Initialize Pipeline ###
     # Create a unique working directory for this pipeline run
     work_dir = Path(gettempdir()) / (

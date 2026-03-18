@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import logging
 import socket
 import warnings
 from datetime import datetime, timedelta
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import TYPE_CHECKING, Dict, Any, List, Tuple
 from uuid import UUID
 
 import gtfs_kit as gk  # type: ignore[import-untyped]
@@ -37,6 +39,9 @@ from prefect.artifacts import create_progress_artifact, update_progress_artifact
 from sqlalchemy import func, text
 
 from eflips.x.framework import Generator
+
+if TYPE_CHECKING:
+    from eflips.x.framework import PipelineContext
 
 
 class BVGXMLIngester(Generator):
@@ -656,7 +661,7 @@ class CopyCreator(Generator):
         """
         return {}
 
-    def execute_impl(self, context, output_db: Path) -> None:
+    def execute_impl(self, context: "PipelineContext", output_db: Path) -> None:
         """
         Override execute_impl to perform a simple file copy without opening a session.
 
