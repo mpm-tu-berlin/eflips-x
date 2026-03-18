@@ -23,7 +23,7 @@ from eflips.ingest.legacy.bvgxml import (
     recenter_station,
 )
 from eflips.ingest.legacy.xmldata import Linienfahrplan
-from eflips.model import Scenario, Route, ConsistencyWarning, Station, AssocRouteStation
+from eflips.model import Scenario, Route, ConsistencyWarning, Station, AssocRouteStation, Trip, Rotation
 from geoalchemy2.functions import ST_Distance
 from prefect.artifacts import create_progress_artifact, update_progress_artifact
 from sqlalchemy import func, text
@@ -578,13 +578,24 @@ class GTFSIngester(Generator):
             uuid=ingestion_uuid, always_flush=False, progress_callback=ingest_progress_callback
         )
 
+        # Verify that the ingestion actually produced trips
+        trip_count = session.query(Trip).count()
+        rotation_count = session.query(Rotation).count()
+        if trip_count == 0:
+            raise ValueError(
+                f"GTFS ingestion produced 0 trips for agency '{agency_name}' "
+                f"with start_date={start_date}, duration={duration}. "
+                f"The selected date range may fall outside this agency's active service period. "
+                f"({rotation_count} empty rotations were created.)"
+            )
+
         # Mark as 100% complete
         update_progress_artifact(
             artifact_id=progress_artifact_id,
             progress=100.0,
             description="GTFS ingestion completed successfully",
         )
-        logger.info("GTFS ingestion completed successfully")
+        logger.info(f"GTFS ingestion completed successfully: {trip_count} trips, {rotation_count} rotations")
 
 
 class CopyCreator(Generator):
