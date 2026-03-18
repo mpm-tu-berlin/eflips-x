@@ -328,8 +328,8 @@ def run_agency_flow(
         agency_name=agency.agency_name,
         enable_plots=enable_plots,
     )
-    run_depot_variant(**variant_kwargs)
-    run_opportunity_variant(**variant_kwargs)
+    run_depot_variant(**variant_kwargs)  # type: ignore[call-overload]
+    run_opportunity_variant(**variant_kwargs)  # type: ignore[call-overload]
 
 
 # ---------------------------------------------------------------------------

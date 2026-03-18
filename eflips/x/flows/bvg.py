@@ -15,7 +15,7 @@ The scenarios run in parallel after a common pipeline
 import logging
 from datetime import timedelta
 from pathlib import Path
-from typing import List, Dict, Union, Tuple, Any
+from typing import List, Dict, Any
 
 from eflips.model import ChargeType, VehicleType
 from matplotlib.figure import Figure
@@ -59,6 +59,8 @@ REDUCED_DATA = False  # Set to True for quick testing
 LOG_LEVEL = "INFO"
 
 # Derived configuration
+NUM_DAYS: int | None
+NUM_DEPOTS: int | None
 if REDUCED_DATA:
     NUM_DAYS = 1
     NUM_DEPOTS = 2
@@ -90,7 +92,7 @@ class UpdateBatteryCapacity(Modifier):
     preserving their consumption LUTs that were created by CalculateConsumptionScaling.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
 
     @classmethod
@@ -146,7 +148,7 @@ class CleanSimulationResults(Modifier):
     Assumes exactly one scenario exists in the database.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs):
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
 
     @classmethod
@@ -304,6 +306,7 @@ def run_common_pipeline() -> Path:
     save_plot_to_files_in_output_dir(route_fig, "routes_by_depot")
 
     logger.info(f"Common pipeline complete. Database: {context.current_db}")
+    assert context.current_db is not None
     return context.current_db
 
 
@@ -312,7 +315,7 @@ def run_common_pipeline() -> Path:
 # ============================================================================
 
 
-def reduce_depots_for_bvg() -> List[Dict[str, Union[int, Tuple[float, float], List[int], str]]]:
+def reduce_depots_for_bvg() -> List[Dict[str, Any]]:
     """
     If we're running in REDUCED_DATA mode, we cannot assign to 9 depots. So we take the
     default depots_for_bvg and reduce them to only the last three.
@@ -405,6 +408,7 @@ def run_ou_scenario(common_db: Path) -> Path:
 
     logger.info(f"OU scenario complete. Database: {context.current_db}")
 
+    assert context.current_db is not None
     return context.current_db  # Needed for DIESEL branching
 
 

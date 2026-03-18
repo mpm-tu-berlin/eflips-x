@@ -367,7 +367,7 @@ class CalculateConsumptionScaling(Modifier):
             Consumption in kWh/km
         """
         import numpy as np
-        from scipy import interpolate
+        from scipy import interpolate  # type: ignore[import-untyped]
 
         # Calculate trip parameters
         total_distance = trip.route.distance / 1000.0  # km
@@ -533,7 +533,9 @@ class CalculateConsumptionScaling(Modifier):
 
         # Calculate consumption for each temperature profile
         # Structure: {month_name: {vehicle_type: [consumptions]}}
-        consumption_by_month_and_type = defaultdict(lambda: defaultdict(list))
+        consumption_by_month_and_type: Dict[str, Dict[str, List[float]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
 
         for month_name, temperature in monthly_temperatures.items():
             self.logger.info(f"Processing {month_name} ({temperature}°C)...")
@@ -550,13 +552,13 @@ class CalculateConsumptionScaling(Modifier):
                     consumption_by_month_and_type[month_name][vt_name].append(consumption_per_km)
 
         # Calculate mean consumption per vehicle type per month
-        mean_consumption = {}
+        mean_consumption: Dict[str, Dict[str, float]] = {}
         for month_name in monthly_temperatures.keys():
             mean_consumption[month_name] = {}
             for vt_name in vehicle_type_luts.keys():
                 consumptions = consumption_by_month_and_type[month_name][vt_name]
                 if consumptions:
-                    mean_consumption[month_name][vt_name] = np.mean(consumptions)
+                    mean_consumption[month_name][vt_name] = float(np.mean(consumptions))
                 else:
                     mean_consumption[month_name][vt_name] = 0.0
 
@@ -577,7 +579,7 @@ class CalculateConsumptionScaling(Modifier):
                 if month in mean_consumption and "EN" in mean_consumption[month]
             ]
             if quarter_consumptions:
-                model_quarterly_consumption.append(np.mean(quarter_consumptions))
+                model_quarterly_consumption.append(float(np.mean(quarter_consumptions)))
             else:
                 model_quarterly_consumption.append(0.0)
 
