@@ -1313,9 +1313,7 @@ cause depot-simulation instability with a 1-day repetition period.
             )
         elif preferred:
             # Not enough preferred days — backfill from busiest non-preferred days
-            non_preferred = [
-                (d, c) for d, c in days_sorted if d not in {p[0] for p in preferred}
-            ]
+            non_preferred = [(d, c) for d, c in days_sorted if d not in {p[0] for p in preferred}]
             candidates = preferred + non_preferred
             self.logger.info(
                 f"Only {len(preferred)} preferred-weekday day(s) available, "
