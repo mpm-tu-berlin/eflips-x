@@ -9,6 +9,7 @@ from typing import Any, Dict
 
 import sqlalchemy.orm.session
 from eflips.depot.api import (  # type: ignore[import-untyped]
+    apply_even_smart_charging,
     generate_consumption_result,
     simple_consumption_simulation,
     group_rotations_by_start_end_stop,
@@ -406,6 +407,71 @@ Default: False
         )
 
         ##### Step 3: Consumption simulation
+        consumption_results = generate_consumption_result(scenario)
+        simple_consumption_simulation(
+            scenario, initialize_vehicles=False, consumption_result=consumption_results
+        )
+
+
+class SmartCharging(Modifier):
+    """
+    Applies smart charging to an already-simulated database.
+
+    This modifier takes a database that has already been through a full simulation
+    (DepotGenerator + Simulation) and applies a smart charging strategy to modify
+    the charging event timeseries in-place. It then re-runs the consumption simulation
+    to update energy values.
+
+    This is more efficient than re-running the entire simulation when only the charging
+    strategy needs to change.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.smart_charging_strategy": """
+The smart charging strategy to apply. Must be a SmartChargingStrategy enum value.
+
+- SmartChargingStrategy.EVEN: Distributes charging evenly across the available time window.
+- SmartChargingStrategy.MIN_PRICE: Not yet implemented.
+
+No default — must be explicitly specified.
+            """.strip(),
+        }
+
+    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
+        """
+        Apply smart charging to an already-simulated scenario.
+
+        :param session: An open SQLAlchemy session with simulation results.
+        :param params: Must contain 'SmartCharging.smart_charging_strategy'.
+        """
+        strategy = params.get(f"{self.__class__.__name__}.smart_charging_strategy", None)
+
+        if strategy is None:
+            raise ValueError(
+                f"Parameter '{self.__class__.__name__}.smart_charging_strategy' is required."
+            )
+
+        scenario = session.query(Scenario).one()
+
+        if strategy == SmartChargingStrategy.EVEN:
+            self.logger.info("Applying EVEN smart charging strategy.")
+            apply_even_smart_charging(scenario, delete_existing_charging_timeseries=True)
+        elif strategy == SmartChargingStrategy.NONE:
+            self.logger.info("No smart charging strategy applied (NONE).")
+            return
+        else:
+            raise NotImplementedError(
+                f"Smart charging strategy '{strategy}' is not yet implemented."
+            )
+
+        # Re-run consumption simulation to update energy values
+        self.logger.info("Re-running consumption simulation after smart charging.")
         consumption_results = generate_consumption_result(scenario)
         simple_consumption_simulation(
             scenario, initialize_vehicles=False, consumption_result=consumption_results

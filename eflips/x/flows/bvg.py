@@ -15,9 +15,11 @@ The scenarios run in parallel after a common pipeline
 import logging
 from datetime import timedelta
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, cast
 
-from eflips.model import ChargeType, VehicleType
+import pandas as pd
+from eflips.depot.api import SmartChargingStrategy  # type: ignore[import-untyped]
+from eflips.model import ChargeType, Depot, Station, VehicleType
 from matplotlib.figure import Figure
 from prefect import flow
 from sqlalchemy.orm import Session
@@ -25,8 +27,21 @@ from sqlalchemy.orm import Session
 from eflips.x.flows import run_steps
 from eflips.x.framework import Modifier
 from eflips.x.framework import PipelineContext, PipelineStep
-from eflips.x.steps.analyzers import GeographicTripPlotAnalyzer, VehicleTypeDepotPlotAnalyzer
-from eflips.x.steps.analyzers.bvg_tools import visualize_routes_by_depot_cartopy
+from eflips.x.steps.analyzers import (
+    GeographicTripPlotAnalyzer,
+    PowerAndOccupancyAnalyzer,
+    RevenueServiceTimelineAnalyzer,
+    SchedulingEfficiencyAnalyzer,
+    VehicleTypeDepotPlotAnalyzer,
+)
+from eflips.x.steps.analyzers.bvg_tools import (
+    RepresentativeVehicleSocAnalyzer,
+    ScenarioComparisonAnalyzer,
+    merge_scenario_comparisons,
+    visualize_depot_and_terminus_power,
+    visualize_power_comparison,
+    visualize_routes_by_depot_cartopy,
+)
 from eflips.x.steps.generators import BVGXMLIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import (
     MergeStations,
@@ -46,7 +61,7 @@ from eflips.x.steps.modifiers.scheduling import (
     StationElectrification,
     VehicleScheduling,
 )
-from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
+from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation, SmartCharging
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +231,13 @@ def output_dir() -> Path:
     return data_dir
 
 
+def _save_timeseries_to_excel(df: pd.DataFrame, filename: str) -> None:
+    """Save a DataFrame with a 'time' column to Excel, formatting time as string."""
+    copy = df.copy()
+    copy["time"] = copy["time"].dt.strftime("%Y-%m-%d %H:%M")
+    copy.to_excel(output_dir() / filename, index=False)
+
+
 # ============================================================================
 # Common Pipeline
 # ============================================================================
@@ -303,6 +325,16 @@ def run_common_pipeline() -> Path:
         route_fig = visualize_routes_by_depot_cartopy(route_data, session)
     save_plot_to_files_in_output_dir(route_fig, "routes_by_depot")
 
+    # Revenue service timeline visualization
+    revenue_analyzer = RevenueServiceTimelineAnalyzer()
+    revenue_data = revenue_analyzer.execute(context=context)
+    revenue_data_copy = revenue_data.copy()
+    revenue_data_copy.index = [idx.strftime("%Y-%m-%d %H:%M") for idx in revenue_data_copy.index]
+
+    revenue_data_copy.to_excel(output_dir() / "revenue_service_timeline.xlsx", index=True)
+    fig = RevenueServiceTimelineAnalyzer.visualize(revenue_data)
+    save_plot_to_files_in_output_dir(fig, "revenue_service_timeline")
+
     logger.info(f"Common pipeline complete. Database: {context.current_db}")
     assert context.current_db is not None
     return context.current_db
@@ -356,8 +388,59 @@ def reduce_depots_for_bvg() -> List[Dict[str, Any]]:
     return depot_list
 
 
+def _run_power_analyzer(
+    context: PipelineContext,
+    area_ids: "List[int] | None" = None,
+    station_ids: "List[int] | None" = None,
+) -> pd.DataFrame:
+    """Execute PowerAndOccupancyAnalyzer with given area/station IDs."""
+    params = context.params.copy()
+    if area_ids is not None:
+        params["PowerAndOccupancyAnalyzer.area_id"] = area_ids
+    if station_ids is not None:
+        params["PowerAndOccupancyAnalyzer.station_id"] = station_ids
+        if area_ids is None:
+            params["PowerAndOccupancyAnalyzer.area_id"] = None
+    analysis_context = PipelineContext(
+        work_dir=context.work_dir, params=params, current_db=context.current_db
+    )
+    return cast(pd.DataFrame, PowerAndOccupancyAnalyzer().execute(context=analysis_context))
+
+
+def extract_power_for_depot(context: PipelineContext, depot_short_name: str) -> pd.DataFrame:
+    """Extract power timeseries for a single depot by its short name."""
+    with context.get_session() as session:
+        station = session.query(Station).filter(Station.name_short == depot_short_name).one()
+        depot = session.query(Depot).filter(Depot.station_id == station.id).one()
+        area_ids = [area.id for area in depot.areas]
+    return _run_power_analyzer(context, area_ids=area_ids)
+
+
+def extract_power_for_all_depots(context: PipelineContext) -> pd.DataFrame:
+    """Extract summed power timeseries across all depots."""
+    with context.get_session() as session:
+        all_area_ids = [area.id for depot in session.query(Depot).all() for area in depot.areas]
+    return _run_power_analyzer(context, area_ids=all_area_ids)
+
+
+def extract_power_for_all_termini(context: PipelineContext) -> pd.DataFrame:
+    """Extract summed power timeseries across all electrified terminus stations."""
+    with context.get_session() as session:
+        depot_station_ids = {d.station_id for d in session.query(Depot).all()}
+        terminus_stations = (
+            session.query(Station)
+            .filter(
+                Station.is_electrified == True,  # noqa: E712
+                ~Station.id.in_(depot_station_ids),
+            )
+            .all()
+        )
+        station_ids = [s.id for s in terminus_stations]
+    return _run_power_analyzer(context, station_ids=station_ids)
+
+
 @flow(name="OU Scenario: Original Blocks")
-def run_ou_scenario(common_db: Path) -> Path:
+def run_ou_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame, pd.DataFrame]:
     """
     Run the OU (Originalumläufe - Original Blocks) scenario.
 
@@ -375,12 +458,13 @@ def run_ou_scenario(common_db: Path) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # Configure parameters
-    params = {
+    params: Dict[str, Any] = {
         "log_level": LOG_LEVEL,
         "StationElectrification.charging_power_kw": 450.0,
         "DepotGenerator.charging_power_kw": 90.0,
         "Simulation.repetition_period": timedelta(days=SIMULATION_DAYS),
         "Simulation.ignore_unstable_simulation": True,
+        "SchedulingEfficiencyAnalyzer.scenario_name": "OU",
     }
 
     # Create context and copy common database as baseline
@@ -404,14 +488,21 @@ def run_ou_scenario(common_db: Path) -> Path:
     ]
     run_steps(context=context, steps=steps)
 
+    efficiency_data = cast(pd.DataFrame, SchedulingEfficiencyAnalyzer().execute(context=context))
+    efficiency_data.to_excel(output_dir() / "ou_scheduling_efficiency.xlsx", index=False)
+
+    # Extract BFI power for comparison with OU-EVEN
+    bfi_power_none = extract_power_for_depot(context, "BFI")
+    _save_timeseries_to_excel(bfi_power_none, "ou_bfi_power_none.xlsx")
+
     logger.info(f"OU scenario complete. Database: {context.current_db}")
 
     assert context.current_db is not None
-    return context.current_db  # Needed for DIESEL branching
+    return context.current_db, efficiency_data, bfi_power_none
 
 
 @flow(name="DEP Scenario: Depot Only")
-def run_dep_scenario(common_db: Path) -> None:
+def run_dep_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
     """
     Run the DEP (Depotlader - Depot Only) scenario.
 
@@ -429,7 +520,7 @@ def run_dep_scenario(common_db: Path) -> None:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # Configure parameters
-    params = {
+    params: Dict[str, Any] = {
         "log_level": LOG_LEVEL,
         "VehicleScheduling.charge_type": ChargeType.DEPOT,
         "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
@@ -437,6 +528,7 @@ def run_dep_scenario(common_db: Path) -> None:
         "DepotGenerator.charging_power_kw": 90.0,
         "Simulation.repetition_period": timedelta(days=SIMULATION_DAYS),
         "Simulation.ignore_unstable_simulation": True,
+        "SchedulingEfficiencyAnalyzer.scenario_name": "DEP",
     }
 
     # Create context and copy common database as baseline
@@ -462,11 +554,16 @@ def run_dep_scenario(common_db: Path) -> None:
 
     run_steps(context=context, steps=steps)
 
+    efficiency_data = cast(pd.DataFrame, SchedulingEfficiencyAnalyzer().execute(context=context))
+    efficiency_data.to_excel(output_dir() / "dep_scheduling_efficiency.xlsx", index=False)
+
     logger.info(f"DEP scenario complete. Database: {context.current_db}")
+    assert context.current_db is not None
+    return context.current_db, efficiency_data
 
 
 @flow(name="TERM Scenario: Terminal Focus")
-def run_term_scenario(common_db: Path) -> None:
+def run_term_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
     """
     Run the TERM (Fokus Endhaltestellen - Terminal Focus) scenario.
 
@@ -484,7 +581,7 @@ def run_term_scenario(common_db: Path) -> None:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # Configure parameters
-    params = {
+    params: Dict[str, Any] = {
         "log_level": LOG_LEVEL,
         "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
         "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
@@ -499,6 +596,7 @@ def run_term_scenario(common_db: Path) -> None:
         "Simulation.ignore_unstable_simulation": (
             True if REDUCED_DATA else False
         ),  # Reduced data has unstable simulation, for some reason.
+        "SchedulingEfficiencyAnalyzer.scenario_name": "TERM",
     }
 
     # Create context and copy common database as baseline
@@ -532,11 +630,82 @@ def run_term_scenario(common_db: Path) -> None:
     ]
     run_steps(context=context, steps=steps)
 
+    efficiency_data = cast(pd.DataFrame, SchedulingEfficiencyAnalyzer().execute(context=context))
+    efficiency_data.to_excel(output_dir() / "term_scheduling_efficiency.xlsx", index=False)
+
     logger.info(f"TERM scenario complete. Database: {context.current_db}")
+    assert context.current_db is not None
+    return context.current_db, efficiency_data
+
+
+@flow(name="OU-EVEN Scenario: Original Blocks with Even Charging")
+def run_ou_even_scenario(
+    finished_ou_db: Path,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Run the OU-EVEN scenario: re-simulate OU with SmartChargingStrategy.EVEN.
+
+    Branches from the finished OU database, cleans simulation results,
+    and re-runs the simulation with even smart charging.
+
+    Parameters:
+    -----------
+    finished_ou_db : Path
+        Path to the finished OU scenario database
+
+    Returns:
+    --------
+    Tuple of (bfi_power, all_depots_power, all_termini_power) DataFrames
+    """
+    logger.info("Starting OU-EVEN scenario...")
+
+    work_dir = WORK_DIR_BASE / "ou_even"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    params: Dict[str, Any] = {
+        "log_level": LOG_LEVEL,
+        "SmartCharging.smart_charging_strategy": SmartChargingStrategy.EVEN,
+    }
+
+    context = PipelineContext(work_dir=work_dir, params=params)
+    CopyCreator(input_files=[finished_ou_db]).execute(context=context)
+
+    steps = [
+        SmartCharging(),
+    ]
+    run_steps(context=context, steps=steps)
+
+    # Extract power data
+    bfi_power = extract_power_for_depot(context, "BFI")
+    _save_timeseries_to_excel(bfi_power, "ou_bfi_power_even.xlsx")
+
+    all_depots_power = extract_power_for_all_depots(context)
+    _save_timeseries_to_excel(all_depots_power, "ou_even_all_depots_power.xlsx")
+
+    all_termini_power = extract_power_for_all_termini(context)
+    _save_timeseries_to_excel(all_termini_power, "ou_even_all_termini_power.xlsx")
+
+    # Representative vehicle SoC day plots (terminus + depot modes)
+    soc_analyzer = RepresentativeVehicleSocAnalyzer()
+    for mode, filename in [
+        ("terminus", "representative_vehicle_soc_day"),
+        ("depot", "representative_depot_vehicle_soc_day"),
+    ]:
+        soc_ctx = PipelineContext(
+            work_dir=context.work_dir,
+            params={**context.params, "RepresentativeVehicleSocAnalyzer.mode": mode},
+            current_db=context.current_db,
+        )
+        soc_data, event_spans, day_start, day_end = soc_analyzer.execute(context=soc_ctx)
+        fig = RepresentativeVehicleSocAnalyzer.visualize(soc_data, event_spans, day_start, day_end)
+        save_plot_to_files_in_output_dir(fig, filename)
+
+    logger.info(f"OU-EVEN scenario complete. Database: {context.current_db}")
+    return bfi_power, all_depots_power, all_termini_power
 
 
 @flow(name="DIESEL Scenario: Diesel Reference")
-def run_diesel_scenario(finished_ou_db: Path) -> None:
+def run_diesel_scenario(finished_ou_db: Path) -> Path:
     """
     Run the DIESEL scenario (diesel baseline for comparison).
 
@@ -576,6 +745,8 @@ def run_diesel_scenario(finished_ou_db: Path) -> None:
     run_steps(context=context, steps=steps)
 
     logger.info(f"DIESEL scenario complete. Database: {context.current_db}")
+    assert context.current_db is not None
+    return context.current_db
 
 
 # ============================================================================
@@ -598,10 +769,55 @@ def bvg_three_scenario_flow() -> None:
     # Phase 1: Common pipeline (sequential)
     common_db = run_common_pipeline()
 
-    # Submit OU, DEP, TERMl
-    run_ou_scenario(common_db)
-    run_dep_scenario(common_db)
-    run_term_scenario(common_db)
+    # Submit OU, DEP, TERM and collect efficiency data
+    ou_db, ou_eff, bfi_power_none = run_ou_scenario(common_db)
+    dep_db, dep_eff = run_dep_scenario(common_db)
+    term_db, term_eff = run_term_scenario(common_db)
+
+    # DIESEL: diesel baseline branching from finished OU
+    diesel_db = run_diesel_scenario(ou_db)
+
+    # OU-EVEN: re-simulate OU with SmartChargingStrategy.EVEN
+    bfi_power_even, all_depots_power, all_termini_power = run_ou_even_scenario(ou_db)
+
+    # BFI power comparison plot (NONE vs EVEN)
+    fig = visualize_power_comparison(bfi_power_none, bfi_power_even, depot_name="BFI")
+    save_plot_to_files_in_output_dir(fig, "bfi_power_none_vs_even")
+
+    # Depot vs terminus total power plot (EVEN only)
+    fig = visualize_depot_and_terminus_power(all_depots_power, all_termini_power)
+    save_plot_to_files_in_output_dir(fig, "ou_even_depot_vs_terminus_power")
+
+    # Aggregate and save combined scheduling efficiency report
+    all_eff = pd.concat([ou_eff, dep_eff, term_eff], ignore_index=True)
+    all_eff.to_excel(output_dir() / "scheduling_efficiency.xlsx", index=False)
+    fig = SchedulingEfficiencyAnalyzer.visualize(all_eff)
+    save_plot_to_files_in_output_dir(fig, "scheduling_efficiency")
+    fig_hist = SchedulingEfficiencyAnalyzer.visualize_histogram(all_eff)
+    save_plot_to_files_in_output_dir(fig_hist, "scheduling_efficiency_histogram")
+
+    # Scenario comparison table (fleet size, chargers, additional vehicles vs DIESEL)
+    comparison_analyzer = ScenarioComparisonAnalyzer()
+    comparison_rows: List[pd.DataFrame] = []
+    for scenario_name, db_path, work_dir in [
+        ("OU", ou_db, WORK_DIR_BASE / "ou"),
+        ("DEP", dep_db, WORK_DIR_BASE / "dep"),
+        ("TERM", term_db, WORK_DIR_BASE / "term"),
+        ("DIESEL", diesel_db, WORK_DIR_BASE / "diesel"),
+    ]:
+        ctx = PipelineContext(
+            work_dir=work_dir,
+            params={"ScenarioComparisonAnalyzer.scenario_name": scenario_name},
+            current_db=db_path,
+        )
+        row = cast(pd.DataFrame, comparison_analyzer.execute(context=ctx))
+        comparison_rows.append(row)
+
+    comparison_table = merge_scenario_comparisons(comparison_rows)
+    comparison_table.to_excel(output_dir() / "scenario_comparison.xlsx", index=False)
+    logger.info("Scenario comparison table saved to scenario_comparison.xlsx")
+    fig = ScenarioComparisonAnalyzer.visualize(comparison_table)
+    save_plot_to_files_in_output_dir(fig, "scenario_comparison")
 
     logger.info("BVG three-scenario flow complete!")
     logger.info(f"Results available in: {WORK_DIR_BASE}")
