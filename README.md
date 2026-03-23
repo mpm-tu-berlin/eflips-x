@@ -28,7 +28,7 @@ cacheable pipeline workflows.
 
 The framework provides three types of pipeline steps (defined in `eflips.x.framework`):
 
-- **Generators**: Create new databases from input files (e.g., ingesting BVG XML schedules)
+- **Generators**: Create new databases from input files (e.g., ingesting GTFS or BVG XML schedules)
 - **Modifiers**: Transform existing databases (e.g., vehicle scheduling, depot assignment, simulation)
 - **Analyzers**: Extract insights and generate reports without modifying the database
 
@@ -82,6 +82,38 @@ export SPATIALITE_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/mod_spatialite.so
 **Tip**: Add the `SPATIALITE_LIBRARY_PATH` export to your shell configuration file (e.g., `~/.bashrc`, `~/.zshrc`) to
 make it permanent.
 
+#### Gurobi (Required for Depot Assignment)
+
+The depot assignment step depends on [eflips-opt](https://github.com/mpm-tu-berlin/eflips-opt), which uses the
+[Gurobi](https://www.gurobi.com/) mathematical optimization solver. Gurobi is a commercial solver that requires a
+license.
+
+**Free academic licenses** are available for researchers, faculty, and students at recognized institutions through the
+[Gurobi Academic Program](https://www.gurobi.com/academia/academic-program-and-licenses/).
+
+After obtaining a license, activate it:
+```bash
+# The gurobipy Python package is installed automatically as a dependency.
+# You only need to activate your license:
+grbgetkey YOUR-LICENSE-KEY
+```
+
+Without a valid Gurobi license, pipelines that include the `DepotAssignment` step will fail.
+
+#### OpenRouteService
+
+eflips-x requires OpenRouteService for routing operations (e.g., calculating deadhead trips between depots and
+stations):
+
+```bash
+export OPENROUTESERVICE_BASE_URL="https://api.openrouteservice.org/"
+export OPENROUTESERVICE_API_KEY="your-api-key-here"
+```
+
+You can obtain a free API key by registering at [openrouteservice.org](https://openrouteservice.org/). If using
+a [self-hosted instance](https://giscience.github.io/openrouteservice/run-instance/), the `OPENROUTESERVICE_BASE_URL`
+should point to your instance and the `OPENROUTESERVICE_API_KEY` may be left unset.
+
 ### Installing eflips-x
 
 1. Clone this git repository (or [download a specific release](https://github.com/mpm-tu-berlin/eflips-x/releases))
@@ -100,17 +132,6 @@ make it permanent.
     poetry env use 3.12  # or 3.13
     poetry install
     ```
-
-3. Set up environment variables for OpenRouteService (required for routing operations):
-
-    ```bash
-    export OPENROUTESERVICE_BASE_URL="https://api.openrouteservice.org/"
-    export OPENROUTESERVICE_API_KEY="your-api-key-here"
-    ```
-
-   You can obtain a free API key by registering at [openrouteservice.org](https://openrouteservice.org/). If using
-   a [self-hosted instance](https://giscience.github.io/openrouteservice/run-instance/), the `OPENROUTESERVICE_BASE_URL`
-   should point to your instance and the `OPENROUTESERVICE_API_KEY` may be left unset.
 
 ## Usage
 
@@ -134,98 +155,149 @@ This will start the Prefect server and UI at http://localhost:4200. The UI provi
 For more information, see
 the [Prefect self-hosted server documentation](https://docs-3.prefect.io/v3/how-to-guides/self-hosted/server-cli).
 
-### Creating a Pipeline
+### Included Example Flows
 
-eflips-x provides a framework for building custom pipelines. Here's a basic example:
+The repository includes ready-to-run example flows in `eflips/x/flows/`. These use
+[GTFS](https://gtfs.org/) (General Transit Feed Specification) data, a standard open format that is
+available for most public transit agencies worldwide.
+
+#### Potsdam (ViP) Flow
+
+A complete pipeline for the Verkehrsbetrieb Potsdam (ViP) bus network with opportunity charging.
+Demonstrates GTFS ingestion, vehicle scheduling, depot assignment, station electrification, and
+simulation with visualization output.
+
+```bash
+poetry run python -m eflips.x.flows.potsdam_opportunity_gtfs_flow
+```
+
+See [`eflips/x/flows/potsdam_opportunity_gtfs_flow.py`](eflips/x/flows/potsdam_opportunity_gtfs_flow.py) for the full
+source.
+
+#### Ulm (SWU) Flow
+
+A similar pipeline for the Stadtwerke Ulm (SWU) bus network with opportunity charging.
+
+```bash
+poetry run python -m eflips.x.flows.swu_gtfs_flow
+```
+
+See [`eflips/x/flows/swu_gtfs_flow.py`](eflips/x/flows/swu_gtfs_flow.py) for the full source.
+
+#### Generalized Multi-Agency GTFS Flow
+
+A configurable flow that reads agency and depot configuration from an Excel file
+(`data/input/GTFS/depot_locations.xlsx`) and runs both depot and opportunity charging variants for
+each configured agency. Supports parallel execution across agencies.
+
+```bash
+# Run all configured agencies
+poetry run python -m eflips.x.flows.gtfs_flow
+
+# Filter to a specific agency
+poetry run python -m eflips.x.flows.gtfs_flow --agency "Potsdam"
+
+# Enable plot generation
+poetry run python -m eflips.x.flows.gtfs_flow --plots
+
+# Run agencies in parallel
+poetry run python -m eflips.x.flows.gtfs_flow --parallel
+```
+
+See [`eflips/x/flows/gtfs_flow.py`](eflips/x/flows/gtfs_flow.py) for the full source.
+
+### Building Your Own Pipeline
+
+eflips-x provides a framework for building custom pipelines. Here is a GTFS-based example that works
+with any transit agency's public GTFS data:
 
 ```python
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 
+from eflips.depot.api import SmartChargingStrategy
 from eflips.model import ChargeType
 from prefect import flow
 
+from eflips.x.flows import run_steps
 from eflips.x.framework import PipelineStep, PipelineContext
-from eflips.x.steps.generators import BVGXMLIngester
-from eflips.x.steps.modifiers.bvg_tools import (
-   SetUpBvgVehicleTypes,
-   RemoveUnusedRotations,
-   MergeStations,
-)
-from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData, AddTemperatures
+from eflips.x.steps.generators import GTFSIngester
+from eflips.x.steps.modifiers.bvg_tools import MergeStations
+from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData
+from eflips.x.steps.modifiers.gtfs_utilities import ConfigureVehicleTypes
 from eflips.x.steps.modifiers.scheduling import VehicleScheduling, DepotAssignment
 from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
 
 
-def run_steps(context: PipelineContext, steps: List[PipelineStep]) -> None:
-   """Run a sequence of pipeline steps."""
-   for step in steps:
-      step.execute(context=context)
-
-
-@flow(name="my-eflips-pipeline")
+@flow(name="my-gtfs-pipeline")
 def my_pipeline():
-   # Create a working directory and set up parameters
     work_dir = Path("./output")
     work_dir.mkdir(exist_ok=True)
 
-   params: Dict[str, Any] = {
-      "log_level": "INFO",
-      "VehicleScheduling.charge_type": ChargeType.DEPOT,
-      "VehicleScheduling.minimum_break_time": timedelta(minutes=10),
-      "VehicleScheduling.maximum_schedule_duration": timedelta(hours=8),
-   }
+    params: Dict[str, Any] = {
+        "log_level": "INFO",
+        # GTFS ingestion settings
+        "GTFSIngester.bus_only": True,
+        "GTFSIngester.duration": "WEEK",
+        "GTFSIngester.agency_name": "My Transit Agency",
+        # Vehicle configuration
+        "ConfigureVehicleTypes.battery_capacity": 360.0,  # kWh
+        "ConfigureVehicleTypes.consumption": 1.5,  # kWh/km
+        # Scheduling settings
+        "VehicleScheduling.charge_type": ChargeType.DEPOT,
+        "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
+        "VehicleScheduling.maximum_schedule_duration": timedelta(hours=24),
+        # Depot configuration (lon, lat)
+        "DepotAssignment.depot_config": [
+            {
+                "depot_station": (13.3509, 52.5145),  # (lon, lat)
+                "name": "Main Depot",
+                "vehicle_type": ["default_bus"],
+                "capacity": 9999,
+            },
+        ],
+        # Simulation settings
+        "Simulation.repetition_period": timedelta(weeks=1),
+        "Simulation.smart_charging": SmartChargingStrategy.EVEN,
+    }
 
-   # Build the step list
-   steps: List[PipelineStep] = []
+    steps: List[PipelineStep] = [
+        # Phase 1: Ingest and prepare data
+        GTFSIngester(input_files=[Path("./data/my_agency.zip")]),
+        MergeStations(),
+        RemoveUnusedData(),
+        ConfigureVehicleTypes(),
+        # Phase 2: Schedule and simulate
+        VehicleScheduling(),
+        DepotAssignment(),
+        DepotGenerator(),
+        Simulation(),
+    ]
 
-    # Step 1: Ingest schedule data
-    xml_files = list(Path("./data/input").glob("*.xml"))
-   steps.append(BVGXMLIngester(input_files=xml_files))
+    context = PipelineContext(work_dir=work_dir, params=params)
+    run_steps(steps=steps, context=context)
 
-   # Step 2: Set up BVG vehicle types
-   steps.append(SetUpBvgVehicleTypes())
-
-   # Step 3: Clean up data
-   steps.append(RemoveUnusedRotations())
-   steps.append(MergeStations())
-   steps.append(RemoveUnusedData())
-
-   # Step 4: Add temperature data (required for extended consumption simulation)
-   steps.append(AddTemperatures())
-
-   # Step 5: Run vehicle scheduling
-   steps.append(VehicleScheduling())
-
-   # Step 6: Assign depots
-   steps.append(DepotAssignment())
-
-   # Step 7: Generate depot objects and run simulation
-   steps.append(DepotGenerator())
-   steps.append(Simulation())
-
-   # Create context and run pipeline
-   context = PipelineContext(work_dir=work_dir, params=params)
-   run_steps(steps=steps, context=context)
-
-   return context
+    return context
 
 
 if __name__ == "__main__":
     my_pipeline()
 ```
 
+For pipelines using BVG XML data (a proprietary format), see the BVG-specific example in
+[`eflips/x/flows/example.py`](eflips/x/flows/example.py).
+
 ### Discovering Parameters
 
 Each step documents its configurable parameters through the `document_params()` class method:
 
 ```python
-from eflips.x.steps.generators import BVGXMLIngester
+from eflips.x.steps.generators import GTFSIngester
 
 # Print available parameters for a step
-for param, description in BVGXMLIngester.document_params().items():
-   print(f" - {param}: {description}")
+for param, description in GTFSIngester.document_params().items():
+    print(f" - {param}: {description}")
 ```
 
 Parameters are passed through the `PipelineContext.params` dictionary. Step-specific parameters are prefixed with the
@@ -233,9 +305,9 @@ class name:
 
 ```python
 params = {
-   "log_level": "INFO",  # Global parameter
-   "BVGXMLIngester.multithreading": True,  # Step-specific parameter
-   "VehicleScheduling.charge_type": ChargeType.DEPOT,
+    "log_level": "INFO",  # Global parameter
+    "GTFSIngester.bus_only": True,  # Step-specific parameter
+    "VehicleScheduling.charge_type": ChargeType.DEPOT,
 }
 ```
 
@@ -247,10 +319,10 @@ Analyzers return results from `execute()` and provide a `visualize()` method for
 import plotly
 import folium
 from eflips.x.steps.analyzers import (
-   RotationInfoAnalyzer,
-   DepartureArrivalSocAnalyzer,
-   GeographicTripPlotAnalyzer,
-   SpecificEnergyConsumptionAnalyzer,
+    RotationInfoAnalyzer,
+    DepartureArrivalSocAnalyzer,
+    GeographicTripPlotAnalyzer,
+    SpecificEnergyConsumptionAnalyzer,
 )
 
 # Run analyzers after the simulation pipeline
@@ -258,20 +330,20 @@ output_directory = work_dir / "analysis"
 output_directory.mkdir(parents=True, exist_ok=True)
 
 for analyzer_class in (
-      RotationInfoAnalyzer,
-      GeographicTripPlotAnalyzer,
-      DepartureArrivalSocAnalyzer,
-      SpecificEnergyConsumptionAnalyzer,
+        RotationInfoAnalyzer,
+        GeographicTripPlotAnalyzer,
+        DepartureArrivalSocAnalyzer,
+        SpecificEnergyConsumptionAnalyzer,
 ):
-   analyzer = analyzer_class()
-   result = analyzer.execute(context=pipeline)
-   vis = analyzer.visualize(result)
+    analyzer = analyzer_class()
+    result = analyzer.execute(context=pipeline)
+    vis = analyzer.visualize(result)
 
-   output_file = output_directory / f"{analyzer_class.__name__}.html"
-   if isinstance(vis, plotly.graph_objs._figure.Figure):
-      vis.write_html(output_file)
-   elif isinstance(vis, folium.Map):
-      vis.save(str(output_file))
+    output_file = output_directory / f"{analyzer_class.__name__}.html"
+    if isinstance(vis, plotly.graph_objs._figure.Figure):
+        vis.write_html(output_file)
+    elif isinstance(vis, folium.Map):
+        vis.save(str(output_file))
 ```
 
 Some analyzers require additional parameters. For example, `VehicleSocAnalyzer` needs a vehicle ID:
@@ -282,15 +354,23 @@ from eflips.x.steps.analyzers import VehicleSocAnalyzer
 
 # Get vehicle IDs from the database
 with pipeline.get_session() as session:
-   vehicle_ids = [v.id for v in session.query(Vehicle).all()]
+    vehicle_ids = [v.id for v in session.query(Vehicle).all()]
 
 # Analyze each vehicle
 for vehicle_id in vehicle_ids:
-   pipeline.params["VehicleSocAnalyzer.vehicle_id"] = vehicle_id
-   analyzer = VehicleSocAnalyzer()
-   result = analyzer.execute(context=pipeline)
-   vis = analyzer.visualize(*result)
-   vis.write_html(f"vehicle_{vehicle_id}_soc.html")
+    pipeline.params["VehicleSocAnalyzer.vehicle_id"] = vehicle_id
+    analyzer = VehicleSocAnalyzer()
+    result = analyzer.execute(context=pipeline)
+    vis = analyzer.visualize(*result)
+    vis.write_html(f"vehicle_{vehicle_id}_soc.html")
+```
+
+For a convenient way to generate all available plots at once, use the built-in analysis flow:
+
+```python
+from eflips.x.flows import generate_all_plots
+
+generate_all_plots(context=pipeline, output_dir=work_dir / "visualizations")
 ```
 
 ### Pipeline Features
@@ -311,44 +391,70 @@ since their cache keys depend on the input database hash.
 
 ```python
 with pipeline.get_session() as session:
-   depots = session.query(Depot).all()
-   for depot in depots:
-      print(f"Depot: {depot.name}, Areas: {len(depot.areas)}")
+    depots = session.query(Depot).all()
+    for depot in depots:
+        print(f"Depot: {depot.name}, Areas: {len(depot.areas)}")
 ```
 
 ### Available Steps
 
 #### Generators
 
-- `BVGXMLIngester`: Ingest BVG XML schedule files
+| Step | Description |
+|---|---|
+| `GTFSIngester` | Ingest GTFS (General Transit Feed Specification) data |
+| `BVGXMLIngester` | Ingest BVG XML schedule files (proprietary format) |
+| `CopyCreator` | Copy an existing database to start a branching workflow |
 
 #### Modifiers
 
-- **BVG Tools**: `SetUpBvgVehicleTypes`, `RemoveUnusedRotations`, `MergeStations`
-- **General Utilities**: `RemoveUnusedData`, `AddTemperatures`
-- **Scheduling**: `VehicleScheduling`, `DepotAssignment`
-- **Simulation**: `DepotGenerator`, `Simulation`
+| Step | Description |
+|---|---|
+| **Scheduling** | |
+| `VehicleScheduling` | Create optimal vehicle rotation plans |
+| `DepotAssignment` | Assign vehicles to depots (requires Gurobi) |
+| `IntegratedScheduling` | Iterative scheduling + depot assignment for feasible opportunity charging schedules (requires Gurobi) |
+| `StationElectrification` | Determine which stations to electrify for opportunity charging |
+| **General Utilities** | |
+| `RemoveUnusedData` | Remove orphaned database objects |
+| `AddTemperatures` | Add temperature data for consumption simulation |
+| `ConfigureVehicleTypes` | Set battery capacity, consumption, and charging curves (GTFS utility) |
+| `CalculateConsumptionScaling` | Calculate consumption scaling factors |
+| `RemoveConsumptionLuts` | Remove consumption lookup tables |
+| **BVG-Specific** | |
+| `SetUpBvgVehicleTypes` | Configure BVG vehicle types |
+| `RemoveUnusedRotations` | Remove unused rotations from BVG data |
+| `MergeStations` | Merge duplicate or nearby stations |
+| `ReduceToNDaysNDepots` | Reduce dataset to N days and N depots |
+| **Simulation** | |
+| `DepotGenerator` | Generate depot infrastructure objects |
+| `Simulation` | Run the vehicle and charging simulation |
 
 #### Analyzers
 
-- `RotationInfoAnalyzer`: Overview of rotation data
-- `SingleRotationInfoAnalyzer`: Detailed view of a single rotation (Cytoscape graph)
-- `DepartureArrivalSocAnalyzer`: State of charge at departures/arrivals
-- `SpecificEnergyConsumptionAnalyzer`: Energy consumption analysis
-- `VehicleSocAnalyzer`: Vehicle state of charge over time
-- `DepotActivityAnalyzer`: Depot activity visualization (animated)
-- `DepotEventAnalyzer`: Depot event analysis
-- `GeographicTripPlotAnalyzer`: Geographic visualization of trips (Folium map)
-- `PowerAndOccupancyAnalyzer`: Power demand and occupancy analysis
+| Step | Description |
+|---|---|
+| **Pre-Simulation** (work before simulation) | |
+| `RotationInfoAnalyzer` | Overview of rotation data |
+| `GeographicTripPlotAnalyzer` | Geographic visualization of trips (Folium map) |
+| `SingleRotationInfoAnalyzer` | Detailed view of a single rotation (Cytoscape graph) |
+| **Post-Simulation** (require simulation results) | |
+| `DepartureArrivalSocAnalyzer` | State of charge at departures/arrivals |
+| `SpecificEnergyConsumptionAnalyzer` | Energy consumption analysis |
+| `VehicleSocAnalyzer` | Vehicle state of charge over time |
+| `DepotEventAnalyzer` | Depot event analysis |
+| `DepotActivityAnalyzer` | Depot activity visualization (animated video) |
+| `PowerAndOccupancyAnalyzer` | Power demand and occupancy analysis |
+| `InteractiveMapAnalyzer` | Interactive map with links to depot/station plots |
+| **Export** | |
+| `ScenarioJsonExporter` | Export scenario data as JSON |
+| `VehicleTypeDepotPlotAnalyzer` | Vehicle type distribution across depots (BVG-specific) |
+| `InsufficientChargingTimeAnalyzer` | Identify rotations with insufficient charging time |
 
 ## Testing
 
 Testing is done using the `pytest` framework with tests located in the `tests` directory.
-
-**Important**: Tests will use the database specified in the `DATABASE_URL` environment variable. By default, tests use
-an in-memory SQLite database, but you should ensure your configuration is correct.
-
-To run the tests:
+Tests use in-memory SQLite databases by default.
 
 ```bash
 export PYTHONPATH=tests:.
@@ -356,17 +462,12 @@ export SPATIALITE_LIBRARY_PATH=/opt/homebrew/lib/mod_spatialite.dylib  # macOS
 # or
 export SPATIALITE_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/mod_spatialite.so  # Linux
 
-export OPENROUTESERVICE_BASE_URL="https://api.openrouteservice.org/"
-export OPENROUTESERVICE_API_KEY="your-api-key"
-
 poetry run pytest
 ```
 
 ## Documentation
 
 Documentation is automatically generated from docstrings using Sphinx and sphinx-autoapi.
-
-### Building Documentation Locally
 
 To build the documentation locally:
 
@@ -376,10 +477,6 @@ poetry run sphinx-build -b html . _build
 ```
 
 The generated HTML documentation will be in `doc/_build/index.html`.
-
-### Online Documentation
-
-Documentation is available on Read the Docs (if configured for this repository).
 
 ## Development
 
