@@ -59,11 +59,9 @@ REDUCED_DATA = False  # Set to True for quick testing
 LOG_LEVEL = "INFO"
 
 # Derived configuration
-NUM_DAYS: int | None
-NUM_DEPOTS: int | None
 if REDUCED_DATA:
-    NUM_DAYS = 1
-    NUM_DEPOTS = 2
+    NUM_DAYS: int | None = 1
+    NUM_DEPOTS: int | None = 2
     SIMULATION_DAYS = 1
 else:
     NUM_DAYS = None  # All days
