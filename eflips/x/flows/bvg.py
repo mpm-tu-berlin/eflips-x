@@ -381,7 +381,7 @@ def reduce_depots_for_bvg() -> List[Dict[str, Any]]:
         {
             "depot_station": (13.5401389, 52.5123056),
             "name": "Betriebshof Alt Friedrichsfelde",
-            "capacity": 200,
+            "capacity": 0,
             "vehicle_type": ALL_VEHICLE_TYPES,
         }
     )
