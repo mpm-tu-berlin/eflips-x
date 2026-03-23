@@ -645,8 +645,8 @@ def run_ou_even_scenario(
     """
     Run the OU-EVEN scenario: re-simulate OU with SmartChargingStrategy.EVEN.
 
-    Branches from the finished OU database, cleans simulation results,
-    and re-runs the simulation with even smart charging.
+    Applies even smart charging to the finished OU scenario and re-runs
+    consumption simulation.
 
     Parameters:
     -----------

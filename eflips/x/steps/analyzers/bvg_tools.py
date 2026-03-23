@@ -6,6 +6,7 @@ This module contains analyzers tailored for BVG (Berlin public transport) data a
 
 import warnings
 from typing import Any, Dict, List, Tuple
+from zoneinfo import ZoneInfo
 
 import cartopy.crs as ccrs  # type: ignore[import-untyped]
 import matplotlib
@@ -79,8 +80,12 @@ BVG_DEPOT_SHORT_NAMES = ["BTRB", "BFI", "BHLI", "BF S", "BF C", "BF M", "BF MDA"
 # Revenue service timeline plot defaults (datetime objects for xlim cropping)
 from datetime import datetime as dt
 
-REVENUE_SERVICE_PLOT_START = dt(2025, 6, 16, 0, 0)  # Monday 03:00
-REVENUE_SERVICE_PLOT_END = dt(2025, 6, 23, 0, 0)  # Next Monday 03:00
+REVENUE_SERVICE_PLOT_START = dt(
+    2025, 6, 16, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")
+)  # Monday 00:00
+REVENUE_SERVICE_PLOT_END = dt(
+    2025, 6, 23, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")
+)  # Next Monday 00:00
 
 
 # ============================================================================
@@ -1295,6 +1300,7 @@ class ScenarioComparisonAnalyzer(Analyzer):
         # --- Vehicles per type ---
         vehicle_counts = (
             session.query(VehicleType.name_short, func.count(Vehicle.id))
+            .select_from(Vehicle)
             .join(VehicleType, Vehicle.vehicle_type_id == VehicleType.id)
             .group_by(VehicleType.name_short)
             .all()

@@ -520,7 +520,7 @@ class TestSimulation:
         events = db_session.query(Event).all()
         assert len(events) > 0
 
-    # @pytest.mark.xfail(reason="Requires Gurobi optimizer which is not available on this platform")
+    @pytest.mark.xfail(reason="Requires Gurobi optimizer which is not available on this platform")
     def test_simulation_with_smart_charging_peak_shaving(
         self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
     ):
