@@ -44,8 +44,8 @@ from eflips.x.framework import Analyzer
 # ============================================================================
 
 # Plot dimensions in points (for LaTeX integration)
-PLOT_WIDTH_PT = 490.0
-PLOT_HEIGHT_PT = 375.0
+PLOT_HEIGHT_PT = 490.0 / 3
+PLOT_WIDTH_PT = 375.0
 
 # Convert points to inches for matplotlib (1 pt = 1/72 inch)
 PLOT_WIDTH_INCH = PLOT_WIDTH_PT / 72.0
@@ -265,7 +265,9 @@ Default: 52 weeks
         configure_latex_plotting()
 
         # Create figure with specified dimensions
-        fig, ax = plt.subplots(1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH))
+        fig, ax = plt.subplots(
+            1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained"
+        )
 
         # Pivot data for stacked bar chart
         df_pivot = prepared_data.pivot(
@@ -294,8 +296,6 @@ Default: 52 weeks
 
         # Configure legend
         plt.legend(title="", bbox_to_anchor=(0, 1.02, 1, 0.2), loc="upper left", ncols=3)
-
-        plt.tight_layout()
 
         return fig
 
@@ -405,7 +405,9 @@ Default: "Europe/Berlin"
         if xlim_end is None:
             xlim_end = REVENUE_SERVICE_PLOT_END
 
-        fig, ax = plt.subplots(1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH))
+        fig, ax = plt.subplots(
+            1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained"
+        )
 
         # Order columns by VEHICLE_TYPE_ORDER
         columns = [vt for vt in VEHICLE_TYPE_ORDER if vt in prepared_data.columns]
@@ -432,7 +434,6 @@ Default: "Europe/Berlin"
             ncols=3,
         )
 
-        plt.tight_layout()
         return fig
 
 
@@ -579,7 +580,9 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
         ]
 
         palette = sns.color_palette("Set2")
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH / 1.5))
+        fig, (ax1, ax2) = plt.subplots(
+            1, 2, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH / 1.5), layout="constrained"
+        )
 
         x = np.arange(len(display_names))
         width = 0.5
@@ -652,8 +655,6 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
         ax2.set_ylabel(r"Share of Time [\%]")
         ax2.set_ylim(0, 100)
         ax2.legend(loc="lower right")
-
-        plt.tight_layout()
         return fig
 
     @staticmethod
@@ -707,7 +708,7 @@ def _plot_two_power_series(
     if xlim_end is None:
         xlim_end = REVENUE_SERVICE_PLOT_END
 
-    fig, ax = plt.subplots(1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH))
+    fig, ax = plt.subplots(1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained")
     palette = sns.color_palette("Set2")
 
     ax.plot(df_a["time"], df_a["power"] / 1000, color=palette[0], label=label_a, alpha=0.8)
@@ -722,7 +723,6 @@ def _plot_two_power_series(
     ax.set_xlim(date2num(xlim_start), date2num(xlim_end))  # type: ignore[no-untyped-call]
 
     ax.legend(bbox_to_anchor=(0, 1.02, 1, 0.2), loc="upper left", ncols=2)
-    plt.tight_layout()
     return fig
 
 
@@ -1177,7 +1177,7 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
 
         configure_latex_plotting()
 
-        fig, ax = plt.subplots(figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH))
+        fig, ax = plt.subplots(figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained")
 
         palette = sns.color_palette("Set2")
         span_colors = {
@@ -1223,8 +1223,6 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
             loc="upper left",
             ncols=4,
         )
-
-        plt.tight_layout()
         return fig
 
 
@@ -1453,7 +1451,9 @@ class ScenarioComparisonAnalyzer(Analyzer):
                     lambda x: f"{int(x):+d}" if pd.notna(x) else "--"
                 )
 
-        fig, ax = plt.subplots(figsize=(PLOT_WIDTH_INCH, 0.4 * (len(display_df) + 1.5)))
+        fig, ax = plt.subplots(
+            figsize=(PLOT_WIDTH_INCH, 0.4 * (len(display_df) + 1.5)), layout="constrained"
+        )
         ax.axis("off")
 
         table = ax.table(
@@ -1472,7 +1472,6 @@ class ScenarioComparisonAnalyzer(Analyzer):
             cell.set_text_props(weight="bold")
             cell.set_facecolor("#d9e2f3")
 
-        plt.tight_layout()
         return fig
 
 
