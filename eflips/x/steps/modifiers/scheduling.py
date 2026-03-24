@@ -11,7 +11,7 @@ import typing
 from collections import defaultdict, OrderedDict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Counter, Set
+from typing import Any, Dict, List, Optional, Tuple, Counter, Set
 
 import eflips.model
 import networkx as nx  # type: ignore[import-untyped]
@@ -1448,8 +1448,18 @@ class StationElectrification(Modifier):
         # Make the depots electrified
         self._make_depot_stations_electrified(scenario, session)
 
+        # Compute consumption results ONCE before the loop. The driving energy consumption
+        # (delta_soc per trip) is constant across iterations — only opportunity charging
+        # at newly-electrified stations changes between iterations.
+        consumption_results = generate_consumption_result(scenario)
+        # generate_consumption_result may have detached our scenario object from the session
+        session.add(scenario)
+        session.flush()
+
         # Remove terminus charging from rotations that don't need it
-        self._remove_terminus_charging_from_okay_rotations(scenario, session)
+        self._remove_terminus_charging_from_okay_rotations(
+            scenario, session, consumption_results=consumption_results
+        )
 
         # Track number of stations electrified
         stations_electrified = 0
@@ -1473,9 +1483,8 @@ class StationElectrification(Modifier):
                 )
 
             savepoint = session.begin_nested()
-            # Run the consumption model to assess current SOC levels
+            # Run the consumption simulation to assess current SOC levels
             try:
-                consumption_results = generate_consumption_result(scenario)
                 simple_consumption_simulation(
                     scenario, initialize_vehicles=True, consumption_result=consumption_results
                 )
@@ -1563,6 +1572,7 @@ class StationElectrification(Modifier):
         self,
         scenario: Scenario,
         session: Session,
+        consumption_results: Optional[Dict] = None,
     ) -> None:
         """
         Run the consumption model and remove terminus charging from rotations that don't need it.
@@ -1573,18 +1583,20 @@ class StationElectrification(Modifier):
             The scenario to process
         session : Session
             An open database session
+        consumption_results : Optional[Dict]
+            Pre-computed consumption results. If None, they will be computed here.
         """
 
         self.logger.info("Removing terminus charging from rotations that don't need it")
 
         savepoint = session.begin_nested()
         try:
-            # Run the consumption model
-            consumption_results = generate_consumption_result(scenario)
-
-            # `create_consumption_results` may have detached our scenario object from the session
-            session.add(scenario)
-            session.flush()
+            # Use pre-computed consumption results if available, otherwise compute them
+            if consumption_results is None:
+                consumption_results = generate_consumption_result(scenario)
+                # generate_consumption_result may have detached our scenario object from the session
+                session.add(scenario)
+                session.flush()
 
             simple_consumption_simulation(
                 initialize_vehicles=True,
