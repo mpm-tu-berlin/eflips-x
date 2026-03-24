@@ -347,3 +347,7 @@ Python versions: 3.12, 3.13
 4. **Parameters are case-sensitive** and must match class names exactly
 5. **Analyzers must NOT modify the database** - framework enforces read-only via temporary copy
 6. **Tests use pytest-split in CI** - ensure `--store-durations` when developing for split tests
+
+## Matplotlib usage
+
+Do not use tight_layout, instead use layout="constrained" in plt.subplots().
