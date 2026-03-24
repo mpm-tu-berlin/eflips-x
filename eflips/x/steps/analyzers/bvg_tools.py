@@ -1506,3 +1506,134 @@ def merge_scenario_comparisons(scenario_dfs: List[pd.DataFrame]) -> pd.DataFrame
     merged = merged.sort_values("_sort").drop(columns="_sort").reset_index(drop=True)
 
     return merged
+
+
+# ============================================================================
+# TCO Visualization
+# ============================================================================
+
+# Cost category ordering for BVG TCO bar chart (matches dissertation script)
+TCO_COST_COLUMNS = [
+    "INFRASTRUCTURE",
+    "OTHER",
+    "MAINTENANCE",
+    "VEHICLE",
+    "ENERGY",
+    "BATTERY",
+    "STAFF",
+]
+
+TCO_CATEGORY_NAMES = {
+    "INFRASTRUCTURE": "Infrastructure",
+    "OTHER": "Other",
+    "MAINTENANCE": "Maintenance",
+    "VEHICLE": "Vehicle",
+    "ENERGY": "Energy",
+    "BATTERY": "Battery",
+    "STAFF": "Staff",
+}
+
+# BVG scenario display names for TCO comparison
+TCO_SCENARIO_NAMES: Dict[str, str] = {
+    "OU": "Existing\nBlocks\nUnchanged",
+    "DEP": "Depot\nCharging\nOnly",
+    "TERM": "Small\nBatteries and\nTermini",
+}
+
+
+def visualize_tco_comparison(
+    df: pd.DataFrame,
+    scenario_name_mapping: "Dict[str, str] | None" = None,
+    cost_columns: "List[str] | None" = None,
+    category_name_mapping: "Dict[str, str] | None" = None,
+) -> Figure:
+    """
+    Create a BVG-style stacked bar chart comparing TCO across scenarios.
+
+    Args:
+        df: DataFrame with 'scenario_name' column and cost category columns
+            (e.g. from merge_tco_results()).
+        scenario_name_mapping: Map scenario_name values to multi-line display names.
+            Default: BVG scenario names (OU, DEP, TERM).
+        cost_columns: Ordered list of cost category columns to include.
+            Default: TCO_COST_COLUMNS.
+        category_name_mapping: Map cost category keys to display names.
+            Default: TCO_CATEGORY_NAMES.
+
+    Returns:
+        matplotlib Figure
+    """
+    configure_latex_plotting()
+
+    if scenario_name_mapping is None:
+        scenario_name_mapping = TCO_SCENARIO_NAMES
+    if cost_columns is None:
+        cost_columns = TCO_COST_COLUMNS
+    if category_name_mapping is None:
+        category_name_mapping = TCO_CATEGORY_NAMES
+
+    # Filter to columns that actually exist in the DataFrame
+    available_columns = [c for c in cost_columns if c in df.columns]
+
+    plot_df = df.copy()
+    plot_df["scenario_display"] = (
+        plot_df["scenario_name"].map(scenario_name_mapping).fillna(plot_df["scenario_name"])
+    )
+
+    # Rename columns for display
+    rename_map = {c: category_name_mapping.get(c, c) for c in available_columns}
+
+    # Build pivot table indexed by display scenario name
+    df_pivot = plot_df.set_index("scenario_display")[available_columns].rename(columns=rename_map)
+
+    fig, ax = plt.subplots(1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained")
+    palette = sns.color_palette("Set2")
+
+    df_pivot.plot(kind="bar", stacked=True, ax=ax, color=palette)
+
+    # Add value labels inside each bar segment and totals on top
+    for i, (scenario, row) in enumerate(df_pivot.iterrows()):
+        y_offset = 0.0
+        total_sum = row.sum()
+
+        for category, value in row.items():
+            if value > 0:
+                label_y = y_offset + value / 2
+                ax.text(
+                    i,
+                    label_y,
+                    f"{value:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="black",
+                )
+            y_offset += value
+
+        # Bold total on top of each bar
+        ax.text(
+            i,
+            y_offset + 0.02,
+            f"{total_sum:.2f}",
+            ha="center",
+            va="bottom",
+            fontweight="bold",
+            fontsize=10,
+            color="black",
+        )
+
+    ax.set_title("")
+    ax.set_ylabel(r"Total Cost of Ownership $\left[ \frac{\mathrm{EUR}}{\mathrm{km}} \right]$")
+    ax.set_xlabel("")
+
+    # Keep x-axis labels horizontal (multi-line names read better this way)
+    plt.xticks(rotation=0, ha="center")
+
+    # Scale y-axis by 10% to accommodate sum totals on top
+    y_min, y_max = ax.get_ylim()
+    ax.set_ylim(y_min, y_max * 1.1)
+
+    # Position legend to the right of the plot
+    plt.legend(title="", bbox_to_anchor=(1.05, 1), loc="upper left", ncols=1)
+
+    return fig
