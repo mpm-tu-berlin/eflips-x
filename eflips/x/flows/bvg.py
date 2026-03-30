@@ -369,6 +369,9 @@ def run_common_pipeline() -> Path:
         "BVGXMLIngester.multithreading": True,
         "AddTemperatures.temperature_celsius": -12.0,
         "Settings.use_reduced_data": REDUCED_DATA,
+        "SetUpBvgVehicleTypes.override_consumption_lut": {
+            "GN": PROJECT_ROOT / "data" / "input" / "consumption_lut_gn.xlsx",
+        },
     }
 
     # Add reduction parameters if REDUCED_DATA is True
