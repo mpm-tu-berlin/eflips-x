@@ -193,10 +193,12 @@ def _bvg_tco_params() -> Dict[str, Any]:
 
 class UpdateBatteryCapacity(Modifier):
     """
-    Lightweight modifier to update battery capacities without re-creating vehicle types.
+    Lightweight modifier to update battery capacities and empty masses without re-creating
+    vehicle types.
 
-    This modifier only updates the battery_capacity attribute of existing vehicle types,
-    preserving their consumption LUTs that were created by CalculateConsumptionScaling.
+    This modifier only updates the battery_capacity and empty_mass attributes of existing
+    vehicle types, preserving their consumption LUTs that were created by
+    CalculateConsumptionScaling.
     """
 
     def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
@@ -209,37 +211,55 @@ class UpdateBatteryCapacity(Modifier):
 Dictionary mapping vehicle type short names to new battery capacities (in kWh).
 Example: {"EN": 500.0, "GN": 640.0, "DD": 472.0}
             """.strip(),
+            f"{cls.__name__}.empty_masses": """
+Dictionary mapping vehicle type short names to new empty masses (in kg).
+Example: {"EN": 9950.0, "GN": 17000.0, "DD": 18000.0}
+            """.strip(),
         }
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
         """
-        Update battery capacities for specified vehicle types.
+        Update battery capacities and empty masses for specified vehicle types.
 
         Parameters:
         -----------
         session : Session
             SQLAlchemy session
         params : Dict[str, Any]
-            Pipeline parameters containing battery_capacities
+            Pipeline parameters containing battery_capacities and/or empty_masses
         """
-        param_key = f"{self.__class__.__name__}.battery_capacities"
-        battery_capacities: Dict[str, float] = params.get(param_key, {})
+        capacity_key = f"{self.__class__.__name__}.battery_capacities"
+        mass_key = f"{self.__class__.__name__}.empty_masses"
+        battery_capacities: Dict[str, float] = params.get(capacity_key, {})
+        empty_masses: Dict[str, float] = params.get(mass_key, {})
 
-        if not battery_capacities:
-            logger.warning(f"No battery capacities specified in {param_key}, skipping update")
+        if not battery_capacities and not empty_masses:
+            logger.warning(
+                f"No battery capacities or empty masses specified in "
+                f"{capacity_key}/{mass_key}, skipping update"
+            )
             return
 
-        for name_short, new_capacity in battery_capacities.items():
+        all_names = set(battery_capacities.keys()) | set(empty_masses.keys())
+        for name_short in all_names:
             vehicle_type = (
                 session.query(VehicleType).filter(VehicleType.name_short == name_short).first()
             )
             if vehicle_type:
-                old_capacity = vehicle_type.battery_capacity
-                vehicle_type.battery_capacity = new_capacity
-                logger.info(
-                    f"Updated battery capacity for {name_short}: "
-                    f"{old_capacity} kWh -> {new_capacity} kWh"
-                )
+                if name_short in battery_capacities:
+                    old_capacity = vehicle_type.battery_capacity
+                    vehicle_type.battery_capacity = battery_capacities[name_short]
+                    logger.info(
+                        f"Updated battery capacity for {name_short}: "
+                        f"{old_capacity} kWh -> {battery_capacities[name_short]} kWh"
+                    )
+                if name_short in empty_masses:
+                    old_mass = vehicle_type.empty_mass
+                    vehicle_type.empty_mass = empty_masses[name_short]
+                    logger.info(
+                        f"Updated empty mass for {name_short}: "
+                        f"{old_mass} kg -> {empty_masses[name_short]} kg"
+                    )
             else:
                 logger.warning(f"Vehicle type {name_short} not found in database")
 
@@ -708,11 +728,16 @@ def run_term_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
             depots = depots_for_bvg(session)
         params["DepotAssignment.depot_config"] = depots
 
-    # Set up battery capacities (small batteries for TERM)
+    # Set up battery capacities and empty masses (small batteries for TERM)
     params["UpdateBatteryCapacity.battery_capacities"] = {
         "EN": 250.0,  # 50% of large battery (500.0)
         "GN": 320.0,  # 50% of large battery (640.0)
         "DD": 320.0,  # 68% of large battery (472.0)
+    }
+    params["UpdateBatteryCapacity.empty_masses"] = {
+        "EN": 9950.0,
+        "GN": 17000.0,
+        "DD": 18000.0,
     }
 
     # NOTE: IntegratedScheduling returns database in "just after vehicle scheduling" state
