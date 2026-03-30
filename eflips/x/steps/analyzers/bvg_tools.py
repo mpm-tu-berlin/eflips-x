@@ -1509,6 +1509,170 @@ def merge_scenario_comparisons(scenario_dfs: List[pd.DataFrame]) -> pd.DataFrame
 
 
 # ============================================================================
+# Energy Consumption and Battery-Electric Range
+# ============================================================================
+
+
+class EnergyConsumptionByVehicleTypeAnalyzer(Analyzer):
+    """
+    Compute average energy consumption and battery-electric range per vehicle type and scenario.
+
+    For each driving event in the simulation results, calculates energy consumed from
+    ``(soc_start - soc_end) * battery_capacity``, then aggregates per vehicle type to give
+    average consumption in kWh/km and a derived battery-electric range.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.scenario_name": "Label for this scenario in the output table.",
+        }
+
+    def analyze(self, session: Session, params: Dict[str, Any]) -> pd.DataFrame:
+        scenario_name = params.get(f"{self.__class__.__name__}.scenario_name", "Unknown")
+
+        rows = (
+            session.query(Event, VehicleType, Route)
+            .join(Vehicle, Event.vehicle_id == Vehicle.id)
+            .join(VehicleType, Vehicle.vehicle_type_id == VehicleType.id)
+            .join(Trip, Event.trip_id == Trip.id)
+            .join(Route, Trip.route_id == Route.id)
+            .filter(Event.event_type == EventType.DRIVING)
+            .all()
+        )
+
+        records = []
+        for event, vtype, route in rows:
+            energy_kwh = (event.soc_start - event.soc_end) * vtype.battery_capacity
+            distance_km = route.distance / 1000
+            records.append(
+                {
+                    "vehicle_type_id": vtype.id,
+                    "vehicle_type": vtype.name,
+                    "vehicle_type_short": vtype.name_short,
+                    "battery_capacity_kwh": vtype.battery_capacity,
+                    "battery_capacity_reserve_kwh": vtype.battery_capacity_reserve,
+                    "energy_kwh": energy_kwh,
+                    "distance_km": distance_km,
+                }
+            )
+
+        df = pd.DataFrame(records)
+
+        result_rows = []
+        for vtype_id, group in df.groupby("vehicle_type_id"):
+            total_energy = group["energy_kwh"].sum()
+            total_distance = group["distance_km"].sum()
+            avg_consumption = total_energy / total_distance if total_distance > 0 else float("nan")
+            battery_cap = group["battery_capacity_kwh"].iloc[0]
+            battery_reserve = group["battery_capacity_reserve_kwh"].iloc[0]
+            usable_battery = battery_cap - battery_reserve
+            range_km = usable_battery / avg_consumption if avg_consumption > 0 else float("nan")
+
+            result_rows.append(
+                {
+                    "scenario_name": scenario_name,
+                    "vehicle_type": group["vehicle_type"].iloc[0],
+                    "vehicle_type_short": group["vehicle_type_short"].iloc[0],
+                    "avg_consumption_kwh_per_km": round(avg_consumption, 2),
+                    "battery_capacity_kwh": battery_cap,
+                    "usable_battery_kwh": usable_battery,
+                    "battery_electric_range_km": round(range_km, 0),
+                }
+            )
+
+        result_rows.sort(key=lambda r: r["vehicle_type_short"])
+        return pd.DataFrame(result_rows)
+
+    @staticmethod
+    def visualize(df: pd.DataFrame) -> Figure:
+        """
+        Render the consumption/range DataFrame as a publication-quality matplotlib table.
+
+        Args:
+            df: Merged DataFrame from ``merge_energy_consumption_results()``.
+
+        Returns:
+            matplotlib Figure
+        """
+        configure_latex_plotting()
+
+        display_df = df.copy()
+        col_map = {
+            "scenario_name": "Scenario",
+            "vehicle_type_short": "Type",
+            "avg_consumption_kwh_per_km": "Consumption [kWh/km]",
+            "battery_capacity_kwh": "Battery [kWh]",
+            "usable_battery_kwh": "Usable Battery [kWh]",
+            "battery_electric_range_km": "Range [km]",
+        }
+        display_cols = [c for c in col_map if c in display_df.columns]
+        display_df = display_df[display_cols].rename(columns=col_map)
+
+        for col in display_df.columns:
+            if col == "Consumption [kWh/km]":
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.2f}" if pd.notna(x) else "--"
+                )
+            elif col in ("Battery [kWh]", "Usable Battery [kWh]"):
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.0f}" if pd.notna(x) else "--"
+                )
+            elif col == "Range [km]":
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{int(x)}" if pd.notna(x) else "--"
+                )
+
+        fig, ax = plt.subplots(
+            figsize=(PLOT_WIDTH_INCH, 0.4 * (len(display_df) + 1.5)), layout="constrained"
+        )
+        ax.axis("off")
+
+        table = ax.table(
+            cellText=display_df.values.tolist(),
+            colLabels=display_df.columns.tolist(),
+            loc="center",
+            cellLoc="center",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        table.auto_set_column_width(list(range(len(display_df.columns))))
+
+        for j in range(len(display_df.columns)):
+            cell = table[0, j]
+            cell.set_text_props(weight="bold")
+            cell.set_facecolor("#d9e2f3")
+
+        return fig
+
+
+def merge_energy_consumption_results(dfs: List[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Merge single-scenario energy consumption DataFrames into one table.
+
+    Args:
+        dfs: List of DataFrames from ``EnergyConsumptionByVehicleTypeAnalyzer.analyze()``.
+
+    Returns:
+        Combined DataFrame sorted by scenario order then vehicle type.
+    """
+    merged = pd.concat(dfs, ignore_index=True)
+
+    scenario_order = {name: i for i, name in enumerate(["OU", "DEP", "TERM"])}
+    merged["_scenario_sort"] = merged["scenario_name"].map(scenario_order).fillna(99)
+    merged = (
+        merged.sort_values(["_scenario_sort", "vehicle_type_short"])
+        .drop(columns="_scenario_sort")
+        .reset_index(drop=True)
+    )
+
+    return merged
+
+
+# ============================================================================
 # TCO Visualization
 # ============================================================================
 

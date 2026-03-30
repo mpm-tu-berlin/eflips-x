@@ -37,8 +37,10 @@ from eflips.x.steps.analyzers import (
     merge_tco_results,
 )
 from eflips.x.steps.analyzers.bvg_tools import (
+    EnergyConsumptionByVehicleTypeAnalyzer,
     RepresentativeVehicleSocAnalyzer,
     ScenarioComparisonAnalyzer,
+    merge_energy_consumption_results,
     merge_scenario_comparisons,
     visualize_depot_and_terminus_power,
     visualize_power_comparison,
@@ -933,6 +935,32 @@ def bvg_three_scenario_flow() -> None:
     logger.info("TCO comparison table saved to tco_results.xlsx")
     fig = visualize_tco_comparison(tco_table)
     save_plot_to_files_in_output_dir(fig, "tco_comparison")
+
+    # Energy consumption and battery-electric range by vehicle type
+    consumption_analyzer = EnergyConsumptionByVehicleTypeAnalyzer()
+    consumption_rows: List[pd.DataFrame] = []
+    for scenario_name, db_path, work_dir in [
+        ("OU", ou_db, WORK_DIR_BASE / "ou"),
+        ("DEP", dep_db, WORK_DIR_BASE / "dep"),
+        ("TERM", term_db, WORK_DIR_BASE / "term"),
+    ]:
+        ctx = PipelineContext(
+            work_dir=work_dir,
+            params={
+                "EnergyConsumptionByVehicleTypeAnalyzer.scenario_name": scenario_name,
+            },
+            current_db=db_path,
+        )
+        row = cast(pd.DataFrame, consumption_analyzer.execute(context=ctx))
+        consumption_rows.append(row)
+
+    consumption_table = merge_energy_consumption_results(consumption_rows)
+    consumption_table.to_excel(
+        output_dir() / "energy_consumption_by_vehicle_type.xlsx", index=False
+    )
+    logger.info("Energy consumption table saved to energy_consumption_by_vehicle_type.xlsx")
+    fig = EnergyConsumptionByVehicleTypeAnalyzer.visualize(consumption_table)
+    save_plot_to_files_in_output_dir(fig, "energy_consumption_by_vehicle_type")
 
     logger.info("BVG three-scenario flow complete!")
     logger.info(f"Results available in: {WORK_DIR_BASE}")
