@@ -388,7 +388,7 @@ class SetUpBvgVehicleTypes(Modifier):
     4. Deletes old vehicle types
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.0.1", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -553,8 +553,8 @@ for the vehicle type.
             level_of_loading = 0.5
             for i, temperature in enumerate(emp_temperatures):
                 for j, speed in enumerate(emp_speeds):
-                    # Interpolate the empirical data to the coordinates
-                    consumption = emp_data[i, j]
+                    # emp_data shape is (n_speeds, n_temps): row=speed_idx, col=temp_idx
+                    consumption = emp_data[j, i]
                     if not np.isnan(consumption):
                         new_coordinates.append((incline, temperature, level_of_loading, speed))
                         new_values.append(consumption)
