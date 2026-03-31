@@ -464,7 +464,7 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
 
         Returns:
             DataFrame with columns: scenario_name, rotation_name, vehicle_type,
-            revenue_km, empty_km, revenue_time_h, empty_time_h,
+            revenue_km, empty_km, total_km, revenue_time_h, empty_time_h,
             total_duration_h, pax_window_h.
         """
         scenario_name: str = params.get(f"{self.__class__.__name__}.scenario_name", "")
@@ -511,6 +511,7 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
                     "vehicle_type": rotation.vehicle_type.name_short,
                     "revenue_km": revenue_km,
                     "empty_km": empty_km,
+                    "total_km": revenue_km + empty_km,
                     "revenue_time_h": revenue_time_h,
                     "empty_time_h": empty_time_h,
                     "total_duration_h": total_duration_h,
@@ -581,7 +582,7 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
 
         palette = sns.color_palette("Set2")
         fig, (ax1, ax2) = plt.subplots(
-            1, 2, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH / 1.5), layout="constrained"
+            1, 2, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained"
         )
 
         x = np.arange(len(display_names))
@@ -671,16 +672,25 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
         scenarios = df["scenario_name"].unique()
         n_scenarios = len(scenarios)
 
-        fig, axes = plt.subplots(1, n_scenarios, figsize=(5 * n_scenarios, 4), squeeze=False)
+        fig, axes = plt.subplots(
+            2, n_scenarios, figsize=(5 * n_scenarios, 8), squeeze=False, layout="constrained"
+        )
 
-        for ax, scenario in zip(axes[0], scenarios):
-            data = df[df["scenario_name"] == scenario]["pax_window_h"]
-            ax.hist(data, bins=30)
-            ax.set_title(str(scenario))
-            ax.set_xlabel("Passenger window [h]")
-            ax.set_ylabel("Count")
+        for col, scenario in enumerate(scenarios):
+            subset = df[df["scenario_name"] == scenario]
 
-        plt.tight_layout()
+            # Row 1: passenger-window duration
+            axes[0, col].hist(subset["pax_window_h"], bins=30)
+            axes[0, col].set_title(str(scenario))
+            axes[0, col].set_xlabel("Passenger window [h]")
+            axes[0, col].set_ylabel("Count")
+
+            # Row 2: total km distribution
+            axes[1, col].hist(subset["total_km"], bins=30)
+            axes[1, col].set_title(str(scenario))
+            axes[1, col].set_xlabel("Total km per rotation")
+            axes[1, col].set_ylabel("Count")
+
         return fig
 
 
