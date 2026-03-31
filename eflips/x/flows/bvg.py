@@ -63,6 +63,7 @@ from eflips.x.steps.modifiers.general_utilities import (
 )
 from eflips.x.steps.modifiers.scheduling import (
     DepotAssignment,
+    InsufficientChargingTimeAnalyzer,
     StationElectrification,
     VehicleScheduling,
 )
@@ -742,15 +743,27 @@ def run_term_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
 
     # NOTE: IntegratedScheduling returns database in "just after vehicle scheduling" state
     # It rolls back its nested DepotAssignment calls, so we must run DepotAssignment again
-    steps = [
+    steps_1 = [
         UpdateBatteryCapacity(),
         VehicleScheduling(),  # TODO: Why does IntegratedScheduling not work?
         DepotAssignment(),  # Re-run since IntegratedScheduling rolls back
+    ]
+    run_steps(context=context, steps=steps_1)
+
+    insufficient_time_analyzer = InsufficientChargingTimeAnalyzer()
+    result = insufficient_time_analyzer.execute(context=context)
+
+    # TODO: Move up to params
+    # Do the hacky thing where we update the params, then unset them again
+    params["StationElectrification.max_stations_to_electrify"] = 999
+
+    steps_2 = [
         StationElectrification(),
         DepotGenerator(),
         Simulation(),
     ]
-    run_steps(context=context, steps=steps)
+    run_steps(context=context, steps=steps_2)
+    del params["StationElectrification.max_stations_to_electrify"]
 
     efficiency_data = cast(pd.DataFrame, SchedulingEfficiencyAnalyzer().execute(context=context))
     efficiency_data.to_excel(output_dir() / "term_scheduling_efficiency.xlsx", index=False)
