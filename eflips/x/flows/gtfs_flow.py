@@ -62,7 +62,7 @@ class DepotConfig:
 class AgencyConfig:
     gtfs_file: Path
     agency_name: str
-    agency_id: int
+    agency_id: str
     depots: List[DepotConfig]
     battery_capacity: float = 360.0
     consumption: float = 1.5
@@ -108,7 +108,7 @@ def parse_depot_locations(excel_path: Path) -> List[AgencyConfig]:
             AgencyConfig(
                 gtfs_file=excel_path.parent / file_name,
                 agency_name=agency_name,
-                agency_id=int(agency_id),
+                agency_id=str(agency_id),
                 depots=depots,
             )
         )
