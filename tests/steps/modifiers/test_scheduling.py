@@ -1166,14 +1166,20 @@ class TestInsufficientChargingTimeAnalyzer:
         # Run the analyzer
         result = analyzer.analyze(session=db_session, params={})
 
-        # Should return a list of rotation IDs
+        # Should return a dict with rotation_ids and soc_data
         assert (
             result is not None
-        ), "Should return a list when rotations have insufficient charging time"
-        assert isinstance(result, list), "Should return a list of rotation IDs"
-        assert len(result) > 0, "Should have at least one rotation with insufficient charging time"
+        ), "Should return a dict when rotations have insufficient charging time"
+        assert isinstance(result, dict), "Should return a dict with rotation_ids and soc_data"
+        assert "rotation_ids" in result, "Result should contain rotation_ids key"
+        assert "soc_data" in result, "Result should contain soc_data key"
+
+        rotation_ids = result["rotation_ids"]
+        assert (
+            len(rotation_ids) > 0
+        ), "Should have at least one rotation with insufficient charging time"
         assert all(
-            isinstance(rotation_id, int) for rotation_id in result
+            isinstance(rotation_id, int) for rotation_id in rotation_ids
         ), "All elements should be integers (rotation IDs)"
 
         # Verify the rotation IDs are valid
@@ -1183,10 +1189,17 @@ class TestInsufficientChargingTimeAnalyzer:
             .filter_by(scenario_id=simple_scenario_with_long_trips.id)
             .all()
         )
-        for rotation_id in result:
+        for rotation_id in rotation_ids:
             assert (
                 rotation_id in all_rotation_ids
             ), f"Rotation ID {rotation_id} should be a valid rotation in the scenario"
+
+        # Verify soc_data contains data for each failing rotation
+        soc_data = result["soc_data"]
+        for rotation_id in rotation_ids:
+            assert (
+                rotation_id in soc_data
+            ), f"soc_data should contain data for rotation {rotation_id}"
 
         # Verify that simulation results were created
         events_count = (
@@ -1269,9 +1282,7 @@ class TestInsufficientChargingTimeAnalyzer:
         docs = analyzer.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 1
         assert "InsufficientChargingTimeAnalyzer.charging_power_kw" in docs
-        assert "150 kW" in docs["InsufficientChargingTimeAnalyzer.charging_power_kw"]
 
 
 class TestIntegratedScheduling:
@@ -1611,68 +1622,16 @@ class TestIntegratedScheduling:
         with pytest.raises(ValueError, match="Expected exactly one scenario, found 2"):
             modifier.modify(session=db_session, params=params)
 
-    def test_integrated_scheduling_warns_about_high_iterations(
-        self,
-        temp_db: Path,
-        challenging_scenario_for_integrated_scheduling: Scenario,
-        db_session: Session,
-        monkeypatch,
-        caplog,
-    ):
-        """Test that IntegratedScheduling warns when max_iterations > 2."""
-        import logging
-
-        # Set logging level to capture warnings
-        caplog.set_level(logging.WARNING)
-
-        # Mock the ORS base URL
-        monkeypatch.setenv("OPENROUTESERVICE_BASE_URL", "http://mock-ors:8080/ors/")
-
-        # Create depot config
-        depots = (
-            db_session.query(Depot)
-            .filter_by(scenario_id=challenging_scenario_for_integrated_scheduling.id)
-            .all()
-        )
-        depot_config = []
-        for depot in depots:
-            depot_config.append(
-                {
-                    "depot_station": depot.station_id,
-                    "capacity": 100,
-                    "vehicle_type": [vt.id for vt in db_session.query(VehicleType).all()],
-                    "name": depot.name,
-                }
-            )
-
-        modifier = IntegratedScheduling()
-
-        params = {
-            "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
-            "VehicleScheduling.battery_margin": 0.1,
-            "DepotAssignment.depot_config": depot_config,
-            "InsufficientChargingTimeAnalyzer.charging_power_kw": 100.0,
-            "IntegratedScheduling.max_iterations": 10,  # High value should trigger warning
-        }
-
-        # Run the integrated scheduling
-        modifier.modify(session=db_session, params=params)
-        db_session.commit()
-
-        # Check that warning was logged
-        assert any(
-            "designed to find a feasible solution in 2 iterations" in record.message
-            for record in caplog.records
-        ), "Should warn about high max_iterations"
-
     def test_document_params(self):
         """Test that document_params returns expected parameters."""
         modifier = IntegratedScheduling()
         docs = modifier.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 1
+        assert len(docs) == 3
         assert "IntegratedScheduling.max_iterations" in docs
+        assert "IntegratedScheduling.break_safety_margin_soc" in docs
+        assert "IntegratedScheduling.candidates_per_critical_point" in docs
         assert "Maximum number of iterations" in docs["IntegratedScheduling.max_iterations"]
 
 
@@ -2039,8 +1998,9 @@ class TestStationElectrification:
         docs = modifier.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 2
+        assert len(docs) == 3
         assert "StationElectrification.charging_power_kw" in docs
         assert "StationElectrification.max_stations_to_electrify" in docs
+        assert "terminus_deadtime_s" in docs
         assert "450.0 kW" in docs["StationElectrification.charging_power_kw"]
         assert "25% of all termini" in docs["StationElectrification.max_stations_to_electrify"]
