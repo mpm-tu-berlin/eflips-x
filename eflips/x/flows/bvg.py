@@ -118,18 +118,24 @@ BVG_TCO_BATTERY_TYPES: Dict[str, Any] = {
         "procurement_cost": 190,
         "useful_life": 7,
         "cost_escalation": -0.03,
+        "specific_mass": 0.1,
+        "chemistry": "NMC",
     },
     "GN": {
         "name": "Solaris Urbino 18 large battery",
         "procurement_cost": 190,
         "useful_life": 7,
         "cost_escalation": -0.03,
+        "specific_mass": 0.1,
+        "chemistry": "NMC",
     },
     "DD": {
         "name": "Alexander Dennis Enviro500EV large battery",
         "procurement_cost": 190,
         "useful_life": 7,
         "cost_escalation": -0.03,
+        "specific_mass": 0.1,
+        "chemistry": "NMC",
     },
 }
 
