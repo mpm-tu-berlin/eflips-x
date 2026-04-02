@@ -44,6 +44,7 @@ from eflips.x.steps.analyzers.bvg_tools import (
     merge_scenario_comparisons,
     visualize_depot_and_terminus_power,
     visualize_power_comparison,
+    visualize_electrified_termini_map,
     visualize_routes_by_depot_cartopy,
     visualize_tco_comparison,
 )
@@ -64,6 +65,7 @@ from eflips.x.steps.modifiers.general_utilities import (
 from eflips.x.steps.modifiers.scheduling import (
     DepotAssignment,
     InsufficientChargingTimeAnalyzer,
+    IntegratedScheduling,
     StationElectrification,
     VehicleScheduling,
 )
@@ -320,21 +322,24 @@ class CleanSimulationResults(Modifier):
         logger.info(f"Deleted {vehicles_count} vehicles")
 
 
-def save_plot_to_files_in_output_dir(fig: Figure, basename: str) -> None:
+def save_plot_to_files_in_output_dir(
+    fig: Figure, basename: str, dpi: int = 300
+) -> None:
     """
     Utility mehtod to save a figure to the output directory with given basename.
 
     :param fig: A Matplotlib Figure object
     :param basename: The base name for the output files (without extension)
+    :param dpi: Resolution in dots per inch (used for both PDF and PNG)
     :return: None
     """
     data_dir = output_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
     output_pdf = data_dir / f"{basename}.pdf"
-    fig.savefig(output_pdf, bbox_inches="tight")
+    fig.savefig(output_pdf, bbox_inches="tight", dpi=dpi)
     logger.info(f"Saved plot to: {output_pdf}")
     output_png = data_dir / f"{basename}.png"
-    fig.savefig(output_png, bbox_inches="tight", dpi=300)
+    fig.savefig(output_png, bbox_inches="tight", dpi=dpi)
     logger.info(f"Saved plot to: {output_png}")
 
 
@@ -745,7 +750,7 @@ def run_term_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
     # It rolls back its nested DepotAssignment calls, so we must run DepotAssignment again
     steps_1 = [
         UpdateBatteryCapacity(),
-        VehicleScheduling(),  # TODO: Why does IntegratedScheduling not work?
+        IntegratedScheduling(),
         DepotAssignment(),  # Re-run since IntegratedScheduling rolls back
     ]
     run_steps(context=context, steps=steps_1)
@@ -753,6 +758,17 @@ def run_term_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
     insufficient_time_analyzer = InsufficientChargingTimeAnalyzer()
     result = insufficient_time_analyzer.execute(context=context)
 
+    if result is not None:
+        import matplotlib.pyplot as plt
+
+        critical_ids = result["rotation_ids"]
+        logger.warning(f"Critical rotations that cannot be fixed: {critical_ids}")
+        for rot_id, (soc_df, event_spans, rot_start, rot_end) in result["soc_data"].items():
+            fig = RepresentativeVehicleSocAnalyzer.visualize(
+                soc_df, event_spans, xlim_start=rot_start, xlim_end=rot_end
+            )
+            save_plot_to_files_in_output_dir(fig, f"critical_rotation_{rot_id}_soc")
+            plt.close(fig)
     # TODO: Move up to params
     # Do the hacky thing where we update the params, then unset them again
     params["StationElectrification.max_stations_to_electrify"] = 999
@@ -953,6 +969,21 @@ def bvg_three_scenario_flow() -> None:
     logger.info("Scenario comparison table saved to scenario_comparison.xlsx")
     fig = ScenarioComparisonAnalyzer.visualize(comparison_table)
     save_plot_to_files_in_output_dir(fig, "scenario_comparison")
+
+    # Geographic distribution of electrified termini (OU vs TERM)
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        scenario_sessions: Dict[str, Session] = {}
+        for scenario_name, db_path in [("OU", ou_db), ("TERM", term_db)]:
+            ctx = PipelineContext(
+                work_dir=WORK_DIR_BASE / scenario_name.lower(),
+                current_db=db_path,
+            )
+            session = stack.enter_context(ctx.get_session())
+            scenario_sessions[scenario_name] = session
+        fig = visualize_electrified_termini_map(scenario_sessions)
+    save_plot_to_files_in_output_dir(fig, "electrified_termini_map")
 
     # TCO analysis (OU, DEP, TERM — DIESEL excluded as non-electric baseline)
     tco_analyzer = TCOAnalyzer()
