@@ -5,6 +5,7 @@ The Simulation Modifiers run a simulation. This may also include depot optimizat
 """
 
 import logging
+from datetime import timedelta
 from typing import Any, Dict
 
 import sqlalchemy.orm.session
@@ -368,6 +369,16 @@ If True, the simulation will ignore delayed trips instead of raising an exceptio
 
 Default: False
             """.strip(),
+            "terminus_deadtime_s": """
+            Global parameter: the total time overhead in seconds (attach + detach) for
+            charging at the terminus. If the layover between trips is shorter than this,
+            no charging is performed. This parameter is shared across StationElectrification,
+            InsufficientChargingTimeAnalyzer, and Simulation.
+
+            Default: 60.0
+            Type: float
+            Example: 90.0
+            """.strip(),
         }
 
     def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
@@ -388,13 +399,18 @@ Default: False
             f"{self.__class__.__name__}.ignore_unstable_simulation", False
         )
         ignore_delayed_trips = params.get(f"{self.__class__.__name__}.ignore_delayed_trips", False)
+        terminus_deadtime_s: float = params.get("terminus_deadtime_s", 60.0)
+        terminus_deadtime = timedelta(seconds=terminus_deadtime_s)
 
         scenario = session.query(Scenario).one()
 
         ##### Step 1: Consumption simulation
         consumption_results = generate_consumption_result(scenario)
         simple_consumption_simulation(
-            scenario, initialize_vehicles=True, consumption_result=consumption_results
+            scenario,
+            initialize_vehicles=True,
+            consumption_result=consumption_results,
+            terminus_deadtime=terminus_deadtime,
         )
 
         ##### Step 2: Run the simulation
@@ -409,7 +425,10 @@ Default: False
         ##### Step 3: Consumption simulation
         consumption_results = generate_consumption_result(scenario)
         simple_consumption_simulation(
-            scenario, initialize_vehicles=False, consumption_result=consumption_results
+            scenario,
+            initialize_vehicles=False,
+            consumption_result=consumption_results,
+            terminus_deadtime=terminus_deadtime,
         )
 
 
