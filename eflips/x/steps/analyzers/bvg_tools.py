@@ -1986,7 +1986,10 @@ def visualize_tco_comparison(
     df_pivot.plot(kind="bar", stacked=True, ax=ax, color=palette)
 
     ax.set_title("")
-    ax.set_ylabel(r"Total Cost of Ownership $\left[ \frac{\mathrm{EUR}}{\mathrm{km}} \right]$")
+    ax.set_ylabel(
+        "Total Cost of Ownership\n"
+        r"$\left[ \frac{\mathrm{EUR}}{\mathrm{km}_\mathrm{rev}} \right]$"
+    )
     ax.set_xlabel("")
 
     # Keep x-axis labels horizontal (multi-line names read better this way)
@@ -2023,7 +2026,7 @@ def visualize_tco_comparison(
                     side_labels.append((segment_mid_y, value))
             y_offset += value
 
-        _place_tco_side_labels(ax, i, side_labels, n_bars=len(df_pivot))
+        _place_tco_side_labels(ax, i, side_labels, n_bars=len(df_pivot), min_spacing=min_label_height)
 
         # Bold total on top of each bar
         ax.text(
