@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 import cartopy.crs as ccrs  # type: ignore[import-untyped]
+from cartopy.io.img_tiles import GoogleTiles  # type: ignore[import-untyped]
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -32,6 +33,7 @@ from eflips.model import (
 )
 from geoalchemy2.shape import to_shape
 from matplotlib.figure import Figure
+from matplotlib.markers import MarkerStyle
 from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
 from sqlalchemy import func
@@ -281,6 +283,9 @@ Default: 52 weeks
         # Use seaborn Set2 color palette
         palette = sns.color_palette("Set2")
 
+        # Add line breaks after dashes in tick labels for readability
+        df_pivot.index = [name.replace("-", "-\n") for name in df_pivot.index]
+
         # Create stacked bar chart
         df_pivot.plot(kind="bar", stacked=True, ax=ax, color=palette)
 
@@ -290,8 +295,6 @@ Default: 52 weeks
             r"Revenue Mileage $\left[ \frac{\mathrm{km} \times 10^6}{\mathrm{a}} \right]$"
         )
         ax.set_xlabel("")
-
-        # Rotate x-axis labels for better readability
         plt.xticks(rotation=45, ha="right")
 
         # Configure legend
@@ -446,7 +449,7 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
     ``visualize_histogram()`` for a debugging histogram of passenger-window durations.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v1.1.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -582,7 +585,7 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
 
         palette = sns.color_palette("Set2")
         fig, (ax1, ax2) = plt.subplots(
-            1, 2, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained"
+            1, 2, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH * 1.5), layout="constrained"
         )
 
         x = np.arange(len(display_names))
@@ -669,27 +672,46 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
         Returns:
             matplotlib Figure
         """
-        scenarios = df["scenario_name"].unique()
-        n_scenarios = len(scenarios)
+        # Sort scenarios using the canonical order
+        order = SchedulingEfficiencyAnalyzer.SCENARIO_ORDER
+        display = SchedulingEfficiencyAnalyzer.SCENARIO_DISPLAY_NAMES
+        order_map = {code: i for i, code in enumerate(order)}
+        all_scenarios = sorted(
+            df["scenario_name"].unique(),
+            key=lambda s: order_map.get(s, len(order)),
+        )
+        n_scenarios = len(all_scenarios)
 
         fig, axes = plt.subplots(
-            2, n_scenarios, figsize=(5 * n_scenarios, 8), squeeze=False, layout="constrained"
+            2, n_scenarios, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), squeeze=False,
+            layout="constrained",
         )
 
-        for col, scenario in enumerate(scenarios):
+        for col, scenario in enumerate(all_scenarios):
             subset = df[df["scenario_name"] == scenario]
 
             # Row 1: passenger-window duration
             axes[0, col].hist(subset["pax_window_h"], bins=30)
-            axes[0, col].set_title(str(scenario))
+            axes[0, col].set_title(display.get(scenario, scenario))
             axes[0, col].set_xlabel("Passenger window [h]")
             axes[0, col].set_ylabel("Count")
 
             # Row 2: total km distribution
-            axes[1, col].hist(subset["total_km"], bins=30)
-            axes[1, col].set_title(str(scenario))
+            km_data = subset["total_km"].dropna()
+            if km_data.empty:
+                axes[1, col].text(0.5, 0.5, "No data", ha="center", va="center",
+                                  transform=axes[1, col].transAxes)
+            else:
+                axes[1, col].hist(km_data, bins=30)
             axes[1, col].set_xlabel("Total km per rotation")
             axes[1, col].set_ylabel("Count")
+
+        # Share xlims across rows
+        for row in range(2):
+            xlim_min = min(axes[row, c].get_xlim()[0] for c in range(n_scenarios))
+            xlim_max = max(axes[row, c].get_xlim()[1] for c in range(n_scenarios))
+            for c in range(n_scenarios):
+                axes[row, c].set_xlim(xlim_min, xlim_max)
 
         return fig
 
@@ -704,7 +726,6 @@ def _plot_two_power_series(
     df_b: pd.DataFrame,
     label_a: str,
     label_b: str,
-    title: str,
     xlim_start: "dt | None" = None,
     xlim_end: "dt | None" = None,
 ) -> Figure:
@@ -725,7 +746,6 @@ def _plot_two_power_series(
     ax.plot(df_b["time"], df_b["power"] / 1000, color=palette[1], label=label_b, alpha=0.8)
 
     ax.set_ylabel(r"Power [MW]")
-    ax.set_title(title)
     ax.xaxis.set_major_locator(DayLocator())  # type: ignore[no-untyped-call]
     ax.xaxis.set_major_formatter(DateFormatter("%a"))  # type: ignore[no-untyped-call]
     plt.xticks(rotation=45, ha="right")
@@ -749,7 +769,6 @@ def visualize_power_comparison(
         df_even,
         "Without Smart Charging",
         "With Smart Charging (EVEN)",
-        f"Power Consumption -- {depot_name}",
         xlim_start,
         xlim_end,
     )
@@ -767,7 +786,6 @@ def visualize_depot_and_terminus_power(
         df_termini,
         "Depots (total)",
         "Termini (total)",
-        "Power Consumption -- Smart Charging (EVEN)",
         xlim_start,
         xlim_end,
     )
@@ -952,6 +970,155 @@ def visualize_routes_by_depot_cartopy(
     )
 
     plt.tight_layout()
+
+    return fig
+
+
+class _CartoDBPositron(GoogleTiles):
+    """CartoDB Positron tile provider — clean light basemap, no API key required."""
+
+    def _image_url(self, tile):  # type: ignore[override]
+        x, y, z = tile
+        return f"https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png"
+
+
+def visualize_electrified_termini_map(
+    scenario_sessions: Dict[str, Session],
+    zoom_level: int = 10,
+) -> Figure:
+    """
+    Create a map showing the geographic distribution of electrified terminus stations
+    across scenarios using half-circle markers on a CartoDB Positron background.
+
+    Each terminus station is represented by a split circle: the left half indicates
+    presence in the OU scenario, the right half indicates presence in the TERM scenario.
+    Filled halves use the scenario's color; empty halves are white.
+
+    Args:
+        scenario_sessions: Dict mapping scenario codes ("OU", "TERM") to open
+                          SQLAlchemy sessions.
+        zoom_level: Tile zoom level (default 12, suitable for Berlin city-wide).
+
+    Returns:
+        matplotlib Figure with the terminus map.
+    """
+    configure_latex_plotting()
+
+    # --- Collect electrified terminus stations per scenario ---
+    # Key: station name, Value: (lon, lat)
+    scenario_stations: Dict[str, Dict[str, Tuple[float, float]]] = {}
+    all_coords: List[Tuple[float, float]] = []
+
+    for scenario_name, session in scenario_sessions.items():
+        depot_station_ids = {d.station_id for d in session.query(Depot).all()}
+        terminus_stations = (
+            session.query(Station)
+            .filter(
+                Station.is_electrified == True,  # noqa: E712
+                Station.charge_type == ChargeType.OPPORTUNITY,
+                ~Station.id.in_(depot_station_ids) if depot_station_ids else True,
+            )
+            .all()
+        )
+        stations_dict: Dict[str, Tuple[float, float]] = {}
+        for s in terminus_stations:
+            if s.geom is not None:
+                point = to_shape(s.geom)  # type: ignore[arg-type]
+                lon, lat = point.x, point.y
+                stations_dict[s.name] = (lon, lat)
+                all_coords.append((lon, lat))
+        scenario_stations[scenario_name] = stations_dict
+
+    if not all_coords:
+        raise ValueError("No electrified terminus stations found in any scenario")
+
+    # --- Compute map extent with padding ---
+    all_lons = [c[0] for c in all_coords]
+    all_lats = [c[1] for c in all_coords]
+    lon_pad = (max(all_lons) - min(all_lons)) * 0.10
+    lat_pad = (max(all_lats) - min(all_lats)) * 0.10
+    extent = [
+        min(all_lons) - lon_pad,
+        max(all_lons) + lon_pad,
+        min(all_lats) - lat_pad,
+        max(all_lats) + lat_pad,
+    ]
+
+    # --- Create figure with tile background ---
+    tiles = _CartoDBPositron()
+    fig, ax = plt.subplots(
+        1,
+        1,
+        subplot_kw={"projection": tiles.crs},
+        figsize=(PLOT_WIDTH_INCH, PLOT_WIDTH_INCH * 0.75),
+        layout="constrained",
+    )
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+    ax.add_image(tiles, zoom_level)
+    ax.set_axis_off()
+
+    # --- Half-circle markers ---
+    palette = sns.color_palette("Set2")
+    ou_color = palette[0]
+    term_color = palette[1]
+    left_marker = MarkerStyle("o", fillstyle="left")
+    right_marker = MarkerStyle("o", fillstyle="right")
+
+    ou_stations = scenario_stations.get("OU", {})
+    term_stations = scenario_stations.get("TERM", {})
+    all_station_names = sorted(set(ou_stations.keys()) | set(term_stations.keys()))
+
+    for name in all_station_names:
+        # Get coordinates from whichever scenario has this station
+        lon, lat = ou_stations.get(name, term_stations.get(name, (0, 0)))
+
+        # Left half: OU
+        left_color = ou_color if name in ou_stations else "white"
+        ax.scatter(
+            lon,
+            lat,
+            marker=left_marker,
+            s=80,
+            c=[left_color],
+            edgecolors="none",
+            transform=ccrs.PlateCarree(),
+            zorder=5,
+        )
+
+        # Right half: TERM
+        right_color = term_color if name in term_stations else "white"
+        ax.scatter(
+            lon,
+            lat,
+            marker=right_marker,
+            s=80,
+            c=[right_color],
+            edgecolors="none",
+            transform=ccrs.PlateCarree(),
+            zorder=5,
+        )
+
+    # --- Legend at bottom right ---
+    legend_elements = [
+        Patch(
+            facecolor=ou_color,
+            edgecolor="black",
+            linewidth=0.5,
+            label="Existing Blocks Unchanged",
+        ),
+        Patch(
+            facecolor=term_color,
+            edgecolor="black",
+            linewidth=0.5,
+            label="Small Batteries and Termini",
+        ),
+    ]
+    ax.legend(
+        handles=legend_elements,
+        loc="lower right",
+        fontsize=8,
+        framealpha=0.9,
+    )
 
     return fig
 
@@ -1206,18 +1373,23 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
                 drawn_labels.add(label)
             ax.axvspan(t_start, t_end, **kw)  # type: ignore[arg-type]
 
-        # SoC line
+        # SoC line (sort by time to avoid line doubling back)
+        sorted_data = prepared_data.sort_values("time")
         ax.plot(
-            prepared_data["time"],
-            prepared_data["soc"] * 100,
+            sorted_data["time"],
+            sorted_data["soc"] * 100,
             color="black",
             linewidth=1.2,
             label="SoC",
         )
 
         ax.set_ylabel(r"State of Charge [\%]")
-        ax.set_ylim(0, 105)
-        ax.set_title("Representative Vehicle -- Service Day")
+        soc_min_pct = float(sorted_data["soc"].min() * 100)
+        if soc_min_pct < 0:
+            ax.set_ylim(soc_min_pct - 5, 105)
+            ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
+        else:
+            ax.set_ylim(0, 105)
 
         import pytz
 
@@ -1228,11 +1400,14 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
         if xlim_start is not None and xlim_end is not None:
             ax.set_xlim(date2num(xlim_start), date2num(xlim_end))  # type: ignore[no-untyped-call]
 
-        ax.legend(
-            bbox_to_anchor=(0, 1.02, 1, 0.2),
-            loc="upper left",
-            ncols=4,
-        )
+        if "Terminus Charging" in drawn_labels:
+            ax.legend(loc="lower right", ncols=2)
+        else:
+            ax.legend(
+                bbox_to_anchor=(0, 1.02, 1, 0.2),
+                loc="upper left",
+                ncols=len(drawn_labels) + 1,  # +1 for the SoC line
+            )
         return fig
 
 
@@ -1715,6 +1890,51 @@ TCO_SCENARIO_NAMES: Dict[str, str] = {
 }
 
 
+def _place_tco_side_labels(
+    ax: "plt.Axes",
+    bar_x: int,
+    labels: "List[Tuple[float, float]]",
+    n_bars: int,
+    min_spacing: float = 0.18,
+) -> None:
+    """Place value labels to the side of a bar with leader lines.
+
+    Args:
+        ax: The axes to annotate.
+        bar_x: Integer x-position of the bar.
+        labels: List of (segment_mid_y, value) for thin segments.
+        n_bars: Total number of bars (used to pick left/right side).
+        min_spacing: Minimum vertical gap between labels in data units.
+    """
+    if not labels:
+        return
+
+    # Place labels to the left for the first bar, right for others
+    if bar_x == 0:
+        text_x = bar_x - 0.45
+        ha = "right"
+    else:
+        text_x = bar_x + 0.45
+        ha = "left"
+
+    # Sort by natural y and enforce minimum spacing
+    labels.sort(key=lambda t: t[0])
+    adjusted_y = [labels[0][0]]
+    for j in range(1, len(labels)):
+        adjusted_y.append(max(labels[j][0], adjusted_y[j - 1] + min_spacing))
+
+    for (natural_y, value), text_y in zip(labels, adjusted_y):
+        ax.annotate(
+            f"{value:.2f}",
+            xy=(bar_x, natural_y),
+            xytext=(text_x, text_y),
+            fontsize=8,
+            va="center",
+            ha=ha,
+            arrowprops=dict(arrowstyle="-", color="0.4", lw=0.5),
+        )
+
+
 def visualize_tco_comparison(
     df: pd.DataFrame,
     scenario_name_mapping: "Dict[str, str] | None" = None,
@@ -1765,24 +1985,45 @@ def visualize_tco_comparison(
 
     df_pivot.plot(kind="bar", stacked=True, ax=ax, color=palette)
 
-    # Add value labels inside each bar segment and totals on top
+    ax.set_title("")
+    ax.set_ylabel(r"Total Cost of Ownership $\left[ \frac{\mathrm{EUR}}{\mathrm{km}} \right]$")
+    ax.set_xlabel("")
+
+    # Keep x-axis labels horizontal (multi-line names read better this way)
+    plt.xticks(rotation=0, ha="center")
+
+    # Scale y-axis by 10% to accommodate sum totals on top, then compute label threshold
+    y_min, y_max = ax.get_ylim()
+    ax.set_ylim(y_min, y_max * 1.1)
+
+    y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
+    fig_h_pts = fig.get_size_inches()[1] * 72
+    min_label_height = 11 * y_range / (fig_h_pts * 0.7)
+
+    # Add value labels: inside for large segments, side labels for thin ones
     for i, (scenario, row) in enumerate(df_pivot.iterrows()):
         y_offset = 0.0
         total_sum = row.sum()
+        side_labels: List[Tuple[float, float]] = []
 
         for category, value in row.items():
             if value > 0:
-                label_y = y_offset + value / 2
-                ax.text(
-                    i,
-                    label_y,
-                    f"{value:.2f}",
-                    ha="center",
-                    va="center",
-                    fontsize=8,
-                    color="black",
-                )
+                segment_mid_y = y_offset + value / 2
+                if value >= min_label_height:
+                    ax.text(
+                        i,
+                        segment_mid_y,
+                        f"{value:.2f}",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="black",
+                    )
+                else:
+                    side_labels.append((segment_mid_y, value))
             y_offset += value
+
+        _place_tco_side_labels(ax, i, side_labels, n_bars=len(df_pivot))
 
         # Bold total on top of each bar
         ax.text(
@@ -1796,16 +2037,11 @@ def visualize_tco_comparison(
             color="black",
         )
 
-    ax.set_title("")
-    ax.set_ylabel(r"Total Cost of Ownership $\left[ \frac{\mathrm{EUR}}{\mathrm{km}} \right]$")
-    ax.set_xlabel("")
-
-    # Keep x-axis labels horizontal (multi-line names read better this way)
-    plt.xticks(rotation=0, ha="center")
-
-    # Scale y-axis by 10% to accommodate sum totals on top
-    y_min, y_max = ax.get_ylim()
-    ax.set_ylim(y_min, y_max * 1.1)
+    # Expand axis limits to prevent side labels from being clipped
+    x_lo, x_hi = ax.get_xlim()
+    ax.set_xlim(x_lo - 0.3, x_hi + 0.3)
+    y_lo, y_hi = ax.get_ylim()
+    ax.set_ylim(y_lo - min_label_height, y_hi)
 
     # Position legend to the right of the plot
     plt.legend(title="", bbox_to_anchor=(1.05, 1), loc="upper left", ncols=1)
