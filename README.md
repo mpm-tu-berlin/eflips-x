@@ -161,29 +161,6 @@ The repository includes ready-to-run example flows in `eflips/x/flows/`. These u
 [GTFS](https://gtfs.org/) (General Transit Feed Specification) data, a standard open format that is
 available for most public transit agencies worldwide.
 
-#### Potsdam (ViP) Flow
-
-A complete pipeline for the Verkehrsbetrieb Potsdam (ViP) bus network with opportunity charging.
-Demonstrates GTFS ingestion, vehicle scheduling, depot assignment, station electrification, and
-simulation with visualization output.
-
-```bash
-poetry run python -m eflips.x.flows.potsdam_opportunity_gtfs_flow
-```
-
-See [`eflips/x/flows/potsdam_opportunity_gtfs_flow.py`](eflips/x/flows/potsdam_opportunity_gtfs_flow.py) for the full
-source.
-
-#### Ulm (SWU) Flow
-
-A similar pipeline for the Stadtwerke Ulm (SWU) bus network with opportunity charging.
-
-```bash
-poetry run python -m eflips.x.flows.swu_gtfs_flow
-```
-
-See [`eflips/x/flows/swu_gtfs_flow.py`](eflips/x/flows/swu_gtfs_flow.py) for the full source.
-
 #### Generalized Multi-Agency GTFS Flow
 
 A configurable flow that reads agency and depot configuration from an Excel file

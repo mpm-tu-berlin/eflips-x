@@ -234,9 +234,11 @@ Default: 6
             scenario = session.query(Scenario).one_or_none()
             if scenario is None:
                 raise ValueError("No scenario found in the database.")
-        except MultipleResultsFound:
+        except MultipleResultsFound as exc:
             count = session.query(Scenario).count()
-            raise ValueError(f"Expected exactly one scenario in the database, found {count}.")
+            raise ValueError(
+                f"Expected exactly one scenario in the database, found {count}."
+            ) from exc
 
         # Validate parameters
         if depot_wishes is not None:
