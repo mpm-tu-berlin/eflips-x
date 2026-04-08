@@ -8,7 +8,7 @@ such as creating optimal rotation plans for different vehicle types.
 import logging
 import os
 import typing
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
@@ -1203,11 +1203,11 @@ class DepotAssignment(Modifier):
             raise ValueError(
                 f"depot_config must be a list of depot configurations, got {type(depot_config).__name__}"
             )
-            for depot in depot_config:
-                if not isinstance(depot, dict):
-                    raise ValueError(
-                        f"Each depot configuration must be a dict, got {type(depot).__name__}"
-                    )
+        for depot in depot_config:
+            if not isinstance(depot, dict):
+                raise ValueError(
+                    f"Each depot configuration must be a dict, got {type(depot).__name__}"
+                )
         if not isinstance(base_url, str):
             raise ValueError(f"base_url must be a string, got {type(base_url).__name__}")
         if not isinstance(depot_usage, (int, float)):
@@ -1277,7 +1277,7 @@ class DepotAssignment(Modifier):
             try:
                 optimizer.optimize(time_report=True)
                 self.logger.info(f"Optimization successful at {DEPOT_USAGE:.1%} capacity")
-            except ValueError as e:
+            except ValueError:
                 self.logger.info(
                     f"Cannot decrease depot capacity any further at {DEPOT_USAGE:.1%}. "
                     f"Stopping optimization."
@@ -1948,7 +1948,7 @@ class StationElectrification(Modifier):
         self,
         scenario: Scenario,
         session: Session,
-        consumption_results: Optional[Dict[str, Any]] = None,
+        consumption_results: Optional[Dict[int, Any]] = None,
         terminus_deadtime_s: float = 60.0,
     ) -> None:
         """
@@ -1960,8 +1960,9 @@ class StationElectrification(Modifier):
             The scenario to process
         session : Session
             An open database session
-        consumption_results : Optional[Dict]
-            Pre-computed consumption results. If None, they will be computed here.
+        consumption_results : Optional[Dict[int, Any]]
+            Pre-computed consumption results keyed by vehicle-type id. If None,
+            they will be computed here.
         terminus_deadtime_s : float
             Terminus deadtime in seconds. Passed through to simple_consumption_simulation.
         """
@@ -2099,6 +2100,8 @@ class StationElectrification(Modifier):
 
         # Score stations: break_time * abs(worst_soc) for each visiting low-SOC rotation.
         # Breaks shorter than terminus_deadtime are excluded since no charging would occur.
+        # We use defaultdict(float) rather than Counter because the scores are floats;
+        # Counter is typed as dict[T, int].
         station_scores: Dict[int, float] = defaultdict(float)
         for rotation in rotations_with_low_soc:
             weight = worst_soc_by_rotation[rotation.id]
@@ -2116,9 +2119,8 @@ class StationElectrification(Modifier):
             return None
 
         # Select the station with the highest score that isn't already electrified
-        for most_popular_station_id in sorted(
-            station_scores, key=station_scores.get, reverse=True  # type: ignore[arg-type]
-        ):
+        sorted_stations = sorted(station_scores.items(), key=lambda kv: kv[1], reverse=True)
+        for most_popular_station_id, _ in sorted_stations:
             station: Station = (
                 session.query(Station).filter(Station.id == most_popular_station_id).one()
             )

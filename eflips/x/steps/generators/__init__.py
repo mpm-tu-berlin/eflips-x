@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import socket
 import warnings
 from datetime import datetime, timedelta
@@ -76,21 +77,11 @@ class BVGXMLIngester(Generator):
         }
 
     def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
-        match params["log_level"] or "INFO":
-            case "DEBUG":
-                logging.basicConfig(level=logging.DEBUG)
-            case "INFO":
-                logging.basicConfig(level=logging.INFO)
-            case "WARNING":
-                logging.basicConfig(level=logging.WARNING)
-            case "ERROR":
-                logging.basicConfig(level=logging.ERROR)
-            case "CRITICAL":
-                logging.basicConfig(level=logging.CRITICAL)
-            case _:
-                raise ValueError(
-                    "Invalid log level. Must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
-                )
+        # PipelineStep.set_log_level() (called from PipelineStep.execute()) has
+        # already configured logging from params["log_level"] before generate()
+        # runs, so no per-step match/case is needed here. Still validate the
+        # value so direct callers (e.g. tests) get the same error contract.
+        self._validate_log_level_param(params)
         logger = logging.getLogger(__name__)
 
         # Set up an empty progress artifact
@@ -483,24 +474,11 @@ class GTFSIngester(Generator):
         :param params: Dictionary of parameters (see document_params for details)
         :raises ValueError: If parameters are invalid or preparation fails
         """
-        # Configure logging
-        log_level = params.get("log_level", "INFO")
-        match log_level:
-            case "DEBUG":
-                logging.basicConfig(level=logging.DEBUG)
-            case "INFO":
-                logging.basicConfig(level=logging.INFO)
-            case "WARNING":
-                logging.basicConfig(level=logging.WARNING)
-            case "ERROR":
-                logging.basicConfig(level=logging.ERROR)
-            case "CRITICAL":
-                logging.basicConfig(level=logging.CRITICAL)
-            case _:
-                raise ValueError(
-                    "Invalid log level. Must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
-                )
-
+        # PipelineStep.set_log_level() (called from PipelineStep.execute()) has
+        # already configured logging from params["log_level"] before generate()
+        # runs, so no per-step match/case is needed here. Still validate the
+        # value so direct callers (e.g. tests) get the same error contract.
+        self._validate_log_level_param(params)
         logger = logging.getLogger(__name__)
 
         # Set up a progress artifact for tracking
@@ -671,18 +649,9 @@ class CopyCreator(Generator):
         :param context: PipelineContext (unused, but required by interface)
         :param output_db: Path to the output database file
         """
-        import shutil
-        import warnings
+        self._unlink_stale_output_db(output_db)
 
         source_db = self.input_files[0]
-
-        # Check if the database file already exists. If yes, warn and remove it.
-        if output_db.exists():
-            warnings.warn(
-                f"Re-creating existing database at {output_db}. This may indicate a problem with cache "
-                "invalidation. If you did some actions that require re-running this step, you may ignore this warning."
-            )
-            output_db.unlink()
 
         # Ensure parent directory exists
         output_db.parent.mkdir(parents=True, exist_ok=True)
