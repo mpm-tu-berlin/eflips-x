@@ -34,9 +34,12 @@ from eflips.x.steps.generators import GTFSIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import MergeStations
 from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData
 from eflips.x.steps.modifiers.gtfs_utilities import ConfigureVehicleTypes
+from eflips.x.steps.analyzers.bvg_tools import RepresentativeVehicleSocAnalyzer
 from eflips.x.steps.modifiers.scheduling import (
     VehicleScheduling,
     DepotAssignment,
+    IntegratedScheduling,
+    InsufficientChargingTimeAnalyzer,
     StationElectrification,
 )
 from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
@@ -199,6 +202,7 @@ def run_depot_variant(
         "DepotAssignment.depot_config": build_depot_config(agency.depots),
         "Simulation.repetition_period": timedelta(weeks=1),
         "Simulation.smart_charging": SmartChargingStrategy.EVEN,
+        "Simulation.ignore_unstable_simulation": True,
         "ScenarioJsonExporter.output_path": str(output_dir / "scenario.json"),
     }
 
@@ -251,24 +255,64 @@ def run_opportunity_variant(
         "VehicleScheduling.charge_type": ChargeType.OPPORTUNITY,
         "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
         "VehicleScheduling.maximum_schedule_duration": timedelta(hours=24),
+        "IntegratedScheduling.max_iterations": 3,
         "DepotAssignment.depot_config": build_depot_config(agency.depots),
+        # InsufficientChargingTimeAnalyzer must use the same charging power as
+        # StationElectrification — the latter validates this and refuses to run otherwise.
+        "InsufficientChargingTimeAnalyzer.charging_power_kw": 450.0,
+        "StationElectrification.charging_power_kw": 450.0,
         "StationElectrification.max_stations_to_electrify": 9999,
         "Simulation.repetition_period": timedelta(weeks=1),
         "Simulation.smart_charging": SmartChargingStrategy.EVEN,
+        "Simulation.ignore_unstable_simulation": True,
         "ScenarioJsonExporter.output_path": str(output_dir / "scenario.json"),
     }
 
     context = PipelineContext(work_dir=work_dir, params=params)
     CopyCreator(input_files=[common_db]).execute(context=context)
 
+    # NOTE: IntegratedScheduling returns the database in the "just after vehicle scheduling"
+    # state — it rolls back its nested DepotAssignment calls, so we must re-run DepotAssignment.
     steps: List[PipelineStep] = [
-        VehicleScheduling(),
+        IntegratedScheduling(),
         DepotAssignment(),
     ]
     run_steps(steps=steps, context=context)
 
     # Export JSON scenario (read-only, does not advance current_db)
     ScenarioJsonExporter().execute(context=context)
+
+    # Diagnostic: identify rotations that are infeasible even with all termini electrified.
+    # If this returns a non-empty result, StationElectrification cannot rescue them — the
+    # schedule itself needs more break time (e.g. via IntegratedScheduling or by raising
+    # VehicleScheduling.minimum_break_time above terminus_deadtime_s).
+    insufficient_time_analyzer = InsufficientChargingTimeAnalyzer()
+    insufficient_result = insufficient_time_analyzer.execute(context=context)
+
+    if insufficient_result is not None:
+        critical_ids = insufficient_result["rotation_ids"]
+        logger.warning(
+            f"[{agency.agency_name}] {len(critical_ids)} rotation(s) are infeasible "
+            f"even with all termini electrified — StationElectrification will likely fail. "
+            f"Critical rotation IDs: {critical_ids}"
+        )
+
+        if enable_plots:
+            import matplotlib.pyplot as plt
+
+            critical_plots_dir = output_dir / "visualizations" / "critical_rotations"
+            critical_plots_dir.mkdir(parents=True, exist_ok=True)
+            for rot_id, (
+                soc_df,
+                event_spans,
+                rot_start,
+                rot_end,
+            ) in insufficient_result["soc_data"].items():
+                fig = RepresentativeVehicleSocAnalyzer.visualize(
+                    soc_df, event_spans, xlim_start=rot_start, xlim_end=rot_end
+                )
+                fig.savefig(critical_plots_dir / f"critical_rotation_{rot_id}_soc.png", dpi=150)
+                plt.close(fig)
 
     post_steps: List[PipelineStep] = [
         StationElectrification(),
