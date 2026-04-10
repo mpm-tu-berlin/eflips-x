@@ -4,7 +4,7 @@ import logging
 import shutil
 import socket
 import warnings
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from multiprocessing import Pool
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Any, List, Tuple
@@ -351,7 +351,7 @@ class GTFSIngester(Generator):
     def __init__(
         self,
         input_files: List[Path],
-        code_version: str = "v1",
+        code_version: str = "v3",
         cache_enabled: bool = True,
     ):
         """
@@ -403,59 +403,196 @@ class GTFSIngester(Generator):
         }
 
     @staticmethod
-    def _auto_select_start_date(gtfs_zip_file: Path) -> str:
+    def _compute_agency_active_dates(
+        feed: "gk.Feed", agency_name: str, bus_only: bool
+    ) -> List[date]:
         """
-        Auto-select a start date (Monday) in the middle of the GTFS feed validity period.
+        Build the sorted list of dates on which the given agency has at least one
+        active service, considering both ``calendar.txt`` (with day-of-week filtering)
+        and ``calendar_dates.txt`` exceptions.
 
-        This method:
-        1. Reads the GTFS feed to determine its validity period
-        2. Calculates the midpoint date
-        3. Finds the nearest Monday on or after the midpoint
-        4. Returns the date in ISO 8601 format (YYYY-MM-DD)
+        When ``bus_only`` is True, routes are restricted to bus route types
+        (``route_type == 3`` or ``700 <= route_type <= 799``) *before* computing
+        service_ids. This mirrors eflips-ingest's ``filter_feed_by_route_type`` and
+        is essential for mixed-mode feeds where an agency operates both rail and
+        bus service: without the filter we might pick a date on which only the
+        (later-filtered-out) rail service runs.
+
+        Handles the common edge cases:
+        - ``calendar.txt`` row with all day-of-week flags = 0 contributes no dates
+          (e.g. placeholder rows for agencies whose service is defined entirely via
+          ``calendar_dates.txt`` additions).
+        - Missing ``calendar.txt`` or missing ``calendar_dates.txt`` is fine — only
+          the present table contributes.
+        - ``exception_type=2`` removes a date that ``calendar.txt`` would otherwise
+          have generated.
+
+        :param feed: A gtfs_kit Feed object
+        :param agency_name: The name of the agency to filter on
+        :param bus_only: If True, restrict to bus route types before computing
+            active dates. Must match the ``bus_only`` flag passed to eflips-ingest
+            downstream, otherwise the selected date may fall on routes that will
+            later be filtered out.
+        :return: Sorted list of unique active dates (empty if none)
+        """
+        if feed.agency is None or feed.routes is None or feed.trips is None:
+            return []
+
+        # Look up agency_id
+        match = feed.agency[feed.agency["agency_name"] == agency_name]
+        if match.empty:
+            return []
+        agency_id = match.iloc[0]["agency_id"]
+
+        # Routes → service_ids belonging to this agency
+        agency_routes = feed.routes[feed.routes["agency_id"] == agency_id]
+        if bus_only:
+            # Same predicate as eflips-ingest's filter_feed_by_route_type:
+            # route_type 3 (standard bus) or 700-799 (extended bus services).
+            rt = agency_routes["route_type"]
+            agency_routes = agency_routes[(rt == 3) | ((rt >= 700) & (rt <= 799))]
+        route_ids = set(agency_routes["route_id"])
+        if not route_ids:
+            return []
+
+        agency_trips = feed.trips[feed.trips["route_id"].isin(route_ids)]
+        service_ids = set(agency_trips["service_id"].unique())
+        if not service_ids:
+            return []
+
+        active: set[date] = set()
+        dow_cols = [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        ]
+
+        # Step 1: expand calendar.txt rows that have at least one active day-of-week
+        if feed.calendar is not None and not feed.calendar.empty:
+            agency_cal = feed.calendar[feed.calendar["service_id"].isin(service_ids)]
+            for _, row in agency_cal.iterrows():
+                # Skip placeholder rows where every day-of-week flag is 0
+                day_flags = [int(row[c]) for c in dow_cols if c in row.index]
+                if not any(day_flags):
+                    continue
+                cal_start = datetime.strptime(str(int(row["start_date"])), "%Y%m%d").date()
+                cal_end = datetime.strptime(str(int(row["end_date"])), "%Y%m%d").date()
+                # Iterate days in the range and add ones whose weekday is enabled
+                d = cal_start
+                while d <= cal_end:
+                    if day_flags[d.weekday()] == 1:
+                        active.add(d)
+                    d += timedelta(days=1)
+
+        # Step 2: apply calendar_dates.txt exceptions
+        if feed.calendar_dates is not None and not feed.calendar_dates.empty:
+            agency_cd = feed.calendar_dates[feed.calendar_dates["service_id"].isin(service_ids)]
+            for _, row in agency_cd.iterrows():
+                d = datetime.strptime(str(int(row["date"])), "%Y%m%d").date()
+                exc = int(row["exception_type"])
+                if exc == 1:
+                    active.add(d)
+                elif exc == 2:
+                    active.discard(d)
+
+        return sorted(active)
+
+    @staticmethod
+    def _auto_select_start_date(gtfs_zip_file: Path, agency_name: str, bus_only: bool) -> str:
+        """
+        Auto-select a Monday near the middle of the agency's active service window.
+
+        When ``agency_name`` is provided, the validity period is computed from only the
+        services actually used by that agency's trips, considering both ``calendar.txt``
+        (filtered by day-of-week) and ``calendar_dates.txt`` exceptions. When
+        ``bus_only`` is True, only bus route types (3 or 700-799) are considered,
+        matching the downstream eflips-ingest filter. This avoids the failure mode
+        where a multi-agency feed's *global* validity range points to a date on
+        which the target agency has no (bus) service.
+
+        When ``agency_name`` is empty, falls back to the global feed validity period
+        from :meth:`EflipsIngestGtfsIngester.get_feed_validity_period`.
 
         :param gtfs_zip_file: Path to the GTFS zip file
+        :param agency_name: Agency name to scope the validity period to, or empty
+            string to use the global feed validity period
+        :param bus_only: Whether bus-only filtering will be applied downstream.
+            Must match the ``bus_only`` flag eventually passed to eflips-ingest.
         :return: ISO 8601 formatted date string (YYYY-MM-DD)
-        :raises ValueError: If the feed has no calendar data or is invalid
+        :raises ValueError: If the feed has no calendar data or the agency has no
+            active service dates
         """
         # Read the GTFS feed
         feed = gk.read_feed(gtfs_zip_file, dist_units="m")
 
-        # Get validity period
-        validity = EflipsIngestGtfsIngester.get_feed_validity_period(feed)
-        if validity is None:
-            raise ValueError(
-                "Cannot auto-select date: GTFS feed has no calendar data. "
-                "Please specify start_date manually."
+        start_date: date
+        end_date: date
+        target: date
+        active_set: set[date] | None
+
+        if agency_name:
+            # Agency-aware path
+            active_dates = GTFSIngester._compute_agency_active_dates(
+                feed, agency_name, bus_only=bus_only
             )
+            if not active_dates:
+                scope = "bus routes" if bus_only else "routes"
+                raise ValueError(
+                    f"Cannot auto-select date: agency '{agency_name}' has no active "
+                    f"service dates for its {scope} in the GTFS feed (checked both "
+                    "calendar.txt and calendar_dates.txt). Please specify start_date "
+                    "manually."
+                )
+            start_date = active_dates[0]
+            end_date = active_dates[-1]
+            # Median date — robust against sparse / clustered service patterns
+            target = active_dates[len(active_dates) // 2]
+            active_set = set(active_dates)
+        else:
+            # Fallback: global feed validity period
+            validity = EflipsIngestGtfsIngester.get_feed_validity_period(feed)
+            if validity is None:
+                raise ValueError(
+                    "Cannot auto-select date: GTFS feed has no calendar data. "
+                    "Please specify start_date manually."
+                )
+            start_date_str, end_date_str = validity
+            start_date = datetime.strptime(start_date_str, "%Y%m%d").date()
+            end_date = datetime.strptime(end_date_str, "%Y%m%d").date()
+            target = start_date + (end_date - start_date) / 2
+            active_set = None
 
-        start_date_str, end_date_str = validity
+        # Find the Monday on or before the target date
+        monday_date: date = target - timedelta(days=target.weekday())
 
-        # Parse GTFS dates (YYYYMMDD format)
-        start_date = datetime.strptime(start_date_str, "%Y%m%d").date()
-        end_date = datetime.strptime(end_date_str, "%Y%m%d").date()
-
-        # Calculate midpoint
-        midpoint = start_date + (end_date - start_date) / 2
-
-        # Find the nearest Monday on or after the midpoint
-        # weekday() returns 0 for Monday, 6 for Sunday
-        days_until_monday = (7 - midpoint.weekday()) % 7
-        monday_date = midpoint + timedelta(days=days_until_monday)
-
-        # Make sure the selected Monday + 6 days (for a week) is within the validity period
+        # Make sure Mon-Sun fits within the validity period
         week_end = monday_date + timedelta(days=6)
         if week_end > end_date:
-            # If the week extends beyond the validity period, move back to an earlier Monday
-            days_to_move_back = (week_end - end_date).days
-            # Round up to the nearest week
-            weeks_to_move_back = (days_to_move_back + 6) // 7
-            monday_date = monday_date - timedelta(weeks=weeks_to_move_back)
-
-        # Ensure the Monday is not before the start date
+            weeks_to_move_back = ((week_end - end_date).days + 6) // 7
+            monday_date -= timedelta(weeks=weeks_to_move_back)
         if monday_date < start_date:
-            # Find the first Monday on or after the start date
             days_until_monday = (7 - start_date.weekday()) % 7
             monday_date = start_date + timedelta(days=days_until_monday)
+
+        # Defensive: in the agency-aware path, ensure the chosen week intersects
+        # the active-dates set. Walk backward by one week if not (shouldn't trigger
+        # for normal feeds, since target itself is an active date).
+        if active_set is not None:
+            set_for_closure = active_set  # narrow for nested function
+
+            def week_has_service(mon: date) -> bool:
+                return any((mon + timedelta(days=i)) in set_for_closure for i in range(7))
+
+            safety = 0
+            while not week_has_service(monday_date) and monday_date >= start_date:
+                monday_date -= timedelta(weeks=1)
+                safety += 1
+                if safety > 520:  # 10 years of weeks — should never happen
+                    break
 
         return monday_date.strftime("%Y-%m-%d")
 
@@ -502,7 +639,9 @@ class GTFSIngester(Generator):
             logger.info(
                 "No start_date specified, auto-selecting Monday in middle of validity period"
             )
-            start_date = self._auto_select_start_date(gtfs_zip_file)
+            start_date = self._auto_select_start_date(
+                gtfs_zip_file, agency_name=agency_name, bus_only=bus_only
+            )
             logger.info(f"Auto-selected start_date: {start_date}")
 
         # Extract database URL from session
