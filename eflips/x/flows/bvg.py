@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from eflips.x.flows import run_steps
 from eflips.x.framework import Modifier
-from eflips.x.framework import PipelineContext, PipelineStep
+from eflips.x.framework import PipelineContext, PipelineStep, ScenarioDisplayConfig
 from eflips.x.steps.analyzers import (
     GeographicTripPlotAnalyzer,
     PowerAndOccupancyAnalyzer,
@@ -34,13 +34,13 @@ from eflips.x.steps.analyzers import (
     SchedulingEfficiencyAnalyzer,
     TCOAnalyzer,
     VehicleTypeDepotPlotAnalyzer,
+    merge_energy_consumption_results,
     merge_tco_results,
 )
 from eflips.x.steps.analyzers.bvg_tools import (
-    EnergyConsumptionByVehicleTypeAnalyzer,
+    BVGEnergyConsumptionAnalyzer,
     RepresentativeVehicleSocAnalyzer,
     ScenarioComparisonAnalyzer,
-    merge_energy_consumption_results,
     merge_scenario_comparisons,
     visualize_depot_and_terminus_power,
     visualize_power_comparison,
@@ -917,6 +917,17 @@ def bvg_three_scenario_flow() -> None:
     """
     logger.info("Starting BVG three-scenario flow...")
 
+    scenario_config = ScenarioDisplayConfig(
+        order=["OU", "DEP", "TERM", "DIESEL"],
+        display_names={
+            "OU": "Original Blocks",
+            "DEP": "Depot Charging Only",
+            "TERM": "Small Batteries, Termini",
+            "DIESEL": "Diesel Baseline",
+        },
+        baseline="DIESEL",
+    )
+
     # Phase 1: Common pipeline (sequential)
     common_db = run_common_pipeline()
 
@@ -964,7 +975,7 @@ def bvg_three_scenario_flow() -> None:
         row = cast(pd.DataFrame, comparison_analyzer.execute(context=ctx))
         comparison_rows.append(row)
 
-    comparison_table = merge_scenario_comparisons(comparison_rows)
+    comparison_table = merge_scenario_comparisons(comparison_rows, config=scenario_config)
     comparison_table.to_excel(output_dir() / "scenario_comparison.xlsx", index=False)
     logger.info("Scenario comparison table saved to scenario_comparison.xlsx")
     fig = ScenarioComparisonAnalyzer.visualize(comparison_table)
@@ -1005,11 +1016,11 @@ def bvg_three_scenario_flow() -> None:
     tco_table = merge_tco_results(tco_rows)
     tco_table.to_excel(output_dir() / "tco_results.xlsx", index=False)
     logger.info("TCO comparison table saved to tco_results.xlsx")
-    fig = visualize_tco_comparison(tco_table)
+    fig = visualize_tco_comparison(tco_table, config=scenario_config)
     save_plot_to_files_in_output_dir(fig, "tco_comparison")
 
     # Energy consumption and battery-electric range by vehicle type
-    consumption_analyzer = EnergyConsumptionByVehicleTypeAnalyzer()
+    consumption_analyzer = BVGEnergyConsumptionAnalyzer()
     consumption_rows: List[pd.DataFrame] = []
     for scenario_name, db_path, work_dir in [
         ("OU", ou_db, WORK_DIR_BASE / "ou"),
@@ -1019,19 +1030,19 @@ def bvg_three_scenario_flow() -> None:
         ctx = PipelineContext(
             work_dir=work_dir,
             params={
-                "EnergyConsumptionByVehicleTypeAnalyzer.scenario_name": scenario_name,
+                "BVGEnergyConsumptionAnalyzer.scenario_name": scenario_name,
             },
             current_db=db_path,
         )
         row = cast(pd.DataFrame, consumption_analyzer.execute(context=ctx))
         consumption_rows.append(row)
 
-    consumption_table = merge_energy_consumption_results(consumption_rows)
+    consumption_table = merge_energy_consumption_results(consumption_rows, config=scenario_config)
     consumption_table.to_excel(
         output_dir() / "energy_consumption_by_vehicle_type.xlsx", index=False
     )
     logger.info("Energy consumption table saved to energy_consumption_by_vehicle_type.xlsx")
-    fig = EnergyConsumptionByVehicleTypeAnalyzer.visualize(consumption_table)
+    fig = BVGEnergyConsumptionAnalyzer.visualize(consumption_table)
     save_plot_to_files_in_output_dir(fig, "energy_consumption_by_vehicle_type")
 
     logger.info("BVG three-scenario flow complete!")
