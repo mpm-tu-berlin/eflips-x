@@ -64,6 +64,41 @@ class PipelineContext:
             db_engine.dispose()
 
 
+@dataclass
+class ScenarioDisplayConfig:
+    """Configuration for scenario ordering and display names in multi-scenario visualizations.
+
+    Pass as a global parameter via ``params["scenario_display_config"]``.
+    Analyzers and merge functions use this to sort scenarios consistently
+    and map internal codes to human-readable names.
+
+    Attributes:
+        order: Canonical ordering of scenario codes, e.g. ``["OU", "DEP", "TERM"]``.
+        display_names: Mapping from scenario code to human-readable name.
+        baseline: Optional scenario code used as a comparison baseline (e.g. ``"DIESEL"``).
+    """
+
+    order: List[str]
+    display_names: Dict[str, str] = field(default_factory=dict)
+    baseline: Optional[str] = None
+
+    def sort_key(self, scenario_name: str) -> int:
+        """Return sort position for a scenario name. Unknown scenarios sort last."""
+        try:
+            return self.order.index(scenario_name)
+        except ValueError:
+            return len(self.order)
+
+    def display_name(self, scenario_name: str) -> str:
+        """Return display name, falling back to the raw scenario name."""
+        return self.display_names.get(scenario_name, scenario_name)
+
+
+def get_scenario_display_config(params: Dict[str, Any]) -> Optional["ScenarioDisplayConfig"]:
+    """Retrieve :class:`ScenarioDisplayConfig` from pipeline params, or ``None`` if not set."""
+    return params.get("scenario_display_config")
+
+
 class PrefectTask(Protocol):
     """Here, we specify the function signature for Prefect tasks used in PipelineStep."""
 

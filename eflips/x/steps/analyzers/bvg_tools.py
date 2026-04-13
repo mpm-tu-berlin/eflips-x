@@ -39,7 +39,8 @@ from matplotlib.ticker import FuncFormatter
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from eflips.x.framework import Analyzer
+from eflips.x.framework import Analyzer, ScenarioDisplayConfig
+from eflips.x.steps.analyzers.output_analyzers import EnergyConsumptionByVehicleTypeAnalyzer
 
 # ============================================================================
 # Plot Configuration Constants
@@ -1662,129 +1663,60 @@ class ScenarioComparisonAnalyzer(Analyzer):
         return fig
 
 
-def merge_scenario_comparisons(scenario_dfs: List[pd.DataFrame]) -> pd.DataFrame:
+def merge_scenario_comparisons(
+    scenario_dfs: List[pd.DataFrame],
+    config: "ScenarioDisplayConfig | None" = None,
+) -> pd.DataFrame:
     """
     Merge single-scenario comparison rows and compute additional-vehicle metrics.
 
     Args:
         scenario_dfs: List of single-row DataFrames from
                       ``ScenarioComparisonAnalyzer.analyze()``.
+        config: Optional scenario display configuration for ordering and baseline.
+                Falls back to ``ScenarioComparisonAnalyzer.SCENARIO_ORDER`` and
+                ``"DIESEL"`` baseline if not provided.
 
     Returns:
         Combined DataFrame with ``additional_vehicles`` and ``additional_vehicles_pct``
-        columns relative to the DIESEL scenario.
+        columns relative to the baseline scenario.
     """
     merged = pd.concat(scenario_dfs, ignore_index=True)
 
-    diesel_mask = merged["scenario_name"] == "DIESEL"
-    if diesel_mask.any():
-        diesel_total = int(merged.loc[diesel_mask, "total_vehicles"].iloc[0])
-        merged["additional_vehicles"] = merged["total_vehicles"] - diesel_total
+    baseline = config.baseline if config is not None and config.baseline else "DIESEL"
+    baseline_mask = merged["scenario_name"] == baseline
+    if baseline_mask.any():
+        baseline_total = int(merged.loc[baseline_mask, "total_vehicles"].iloc[0])
+        merged["additional_vehicles"] = merged["total_vehicles"] - baseline_total
         merged["additional_vehicles_pct"] = (
-            merged["additional_vehicles"] / diesel_total * 100
+            merged["additional_vehicles"] / baseline_total * 100
         ).round(1)
     else:
         merged["additional_vehicles"] = None
         merged["additional_vehicles_pct"] = None
 
-    # Sort by standard order
-    order = {name: i for i, name in enumerate(ScenarioComparisonAnalyzer.SCENARIO_ORDER)}
-    merged["_sort"] = merged["scenario_name"].map(order).fillna(len(order))
+    # Sort by config order if provided, otherwise by class-level default
+    if config is not None:
+        merged["_sort"] = merged["scenario_name"].map(lambda s: config.sort_key(s))
+    else:
+        order = {name: i for i, name in enumerate(ScenarioComparisonAnalyzer.SCENARIO_ORDER)}
+        merged["_sort"] = merged["scenario_name"].map(order).fillna(len(order))
     merged = merged.sort_values("_sort").drop(columns="_sort").reset_index(drop=True)
 
     return merged
 
 
 # ============================================================================
-# Energy Consumption and Battery-Electric Range
+# BVG Energy Consumption Visualization
 # ============================================================================
 
 
-class EnergyConsumptionByVehicleTypeAnalyzer(Analyzer):
-    """
-    Compute average energy consumption and battery-electric range per vehicle type and scenario.
-
-    For each driving event in the simulation results, calculates energy consumed from
-    ``(soc_start - soc_end) * battery_capacity``, then aggregates per vehicle type to give
-    average consumption in kWh/km and a derived battery-electric range.
-    """
-
-    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
-        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
-
-    @classmethod
-    def document_params(cls) -> Dict[str, str]:
-        return {
-            f"{cls.__name__}.scenario_name": "Label for this scenario in the output table.",
-        }
-
-    def analyze(self, session: Session, params: Dict[str, Any]) -> pd.DataFrame:
-        scenario_name = params.get(f"{self.__class__.__name__}.scenario_name", "Unknown")
-
-        rows = (
-            session.query(Event, VehicleType, Route)
-            .join(Vehicle, Event.vehicle_id == Vehicle.id)
-            .join(VehicleType, Vehicle.vehicle_type_id == VehicleType.id)
-            .join(Trip, Event.trip_id == Trip.id)
-            .join(Route, Trip.route_id == Route.id)
-            .filter(Event.event_type == EventType.DRIVING)
-            .all()
-        )
-
-        records = []
-        for event, vtype, route in rows:
-            energy_kwh = (event.soc_start - event.soc_end) * vtype.battery_capacity
-            distance_km = route.distance / 1000
-            records.append(
-                {
-                    "vehicle_type_id": vtype.id,
-                    "vehicle_type": vtype.name,
-                    "vehicle_type_short": vtype.name_short,
-                    "battery_capacity_kwh": vtype.battery_capacity,
-                    "battery_capacity_reserve_kwh": vtype.battery_capacity_reserve,
-                    "energy_kwh": energy_kwh,
-                    "distance_km": distance_km,
-                }
-            )
-
-        df = pd.DataFrame(records)
-
-        result_rows = []
-        for vtype_id, group in df.groupby("vehicle_type_id"):
-            total_energy = group["energy_kwh"].sum()
-            total_distance = group["distance_km"].sum()
-            avg_consumption = total_energy / total_distance if total_distance > 0 else float("nan")
-            battery_cap = group["battery_capacity_kwh"].iloc[0]
-            battery_reserve = group["battery_capacity_reserve_kwh"].iloc[0]
-            usable_battery = battery_cap - battery_reserve
-            range_km = usable_battery / avg_consumption if avg_consumption > 0 else float("nan")
-
-            result_rows.append(
-                {
-                    "scenario_name": scenario_name,
-                    "vehicle_type": group["vehicle_type"].iloc[0],
-                    "vehicle_type_short": group["vehicle_type_short"].iloc[0],
-                    "avg_consumption_kwh_per_km": round(avg_consumption, 2),
-                    "battery_capacity_kwh": battery_cap,
-                    "usable_battery_kwh": usable_battery,
-                    "battery_electric_range_km": round(range_km, 0),
-                }
-            )
-
-        result_rows.sort(key=lambda r: r["vehicle_type_short"])
-        return pd.DataFrame(result_rows)
+class BVGEnergyConsumptionAnalyzer(EnergyConsumptionByVehicleTypeAnalyzer):
+    """BVG-specific subclass that adds LaTeX-styled table visualization."""
 
     @staticmethod
     def visualize(df: pd.DataFrame) -> Figure:
-        """
-        Render the consumption/range DataFrame as a publication-quality matplotlib table.
-
-        Args:
-            df: Merged DataFrame from ``merge_energy_consumption_results()``.
-
-        Returns:
-            matplotlib Figure
-        """
+        """Render the consumption/range DataFrame as a publication-quality matplotlib table."""
         configure_latex_plotting()
 
         display_df = df.copy()
@@ -1834,29 +1766,6 @@ class EnergyConsumptionByVehicleTypeAnalyzer(Analyzer):
             cell.set_facecolor("#d9e2f3")
 
         return fig
-
-
-def merge_energy_consumption_results(dfs: List[pd.DataFrame]) -> pd.DataFrame:
-    """
-    Merge single-scenario energy consumption DataFrames into one table.
-
-    Args:
-        dfs: List of DataFrames from ``EnergyConsumptionByVehicleTypeAnalyzer.analyze()``.
-
-    Returns:
-        Combined DataFrame sorted by scenario order then vehicle type.
-    """
-    merged = pd.concat(dfs, ignore_index=True)
-
-    scenario_order = {name: i for i, name in enumerate(["OU", "DEP", "TERM"])}
-    merged["_scenario_sort"] = merged["scenario_name"].map(scenario_order).fillna(99)
-    merged = (
-        merged.sort_values(["_scenario_sort", "vehicle_type_short"])
-        .drop(columns="_scenario_sort")
-        .reset_index(drop=True)
-    )
-
-    return merged
 
 
 # ============================================================================
@@ -1942,6 +1851,7 @@ def visualize_tco_comparison(
     scenario_name_mapping: "Dict[str, str] | None" = None,
     cost_columns: "List[str] | None" = None,
     category_name_mapping: "Dict[str, str] | None" = None,
+    config: "ScenarioDisplayConfig | None" = None,
 ) -> Figure:
     """
     Create a BVG-style stacked bar chart comparing TCO across scenarios.
@@ -1950,17 +1860,23 @@ def visualize_tco_comparison(
         df: DataFrame with 'scenario_name' column and cost category columns
             (e.g. from merge_tco_results()).
         scenario_name_mapping: Map scenario_name values to multi-line display names.
-            Default: BVG scenario names (OU, DEP, TERM).
+            Default: BVG scenario names (OU, DEP, TERM). Ignored if *config* is provided.
         cost_columns: Ordered list of cost category columns to include.
             Default: TCO_COST_COLUMNS.
         category_name_mapping: Map cost category keys to display names.
             Default: TCO_CATEGORY_NAMES.
+        config: Optional scenario display configuration. If provided, derives
+                *scenario_name_mapping* from ``config.display_names`` (adding line
+                breaks between words for the bar chart).
 
     Returns:
         matplotlib Figure
     """
     configure_latex_plotting()
 
+    # If config is provided, derive scenario_name_mapping from it
+    if config is not None and scenario_name_mapping is None:
+        scenario_name_mapping = {k: "\n".join(v.split()) for k, v in config.display_names.items()}
     if scenario_name_mapping is None:
         scenario_name_mapping = TCO_SCENARIO_NAMES
     if cost_columns is None:
