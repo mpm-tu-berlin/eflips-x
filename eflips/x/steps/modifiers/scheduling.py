@@ -225,12 +225,13 @@ class IntegratedScheduling(Modifier):
         Identify trips that should have longer breaks added, using SoC trajectory analysis.
 
         The algorithm:
-        1) For each infeasible rotation, find SoC critical points (where SoC drops below 0
-           or a safety margin)
-        2) For each critical point, walk backward through the rotation's trips and score
-           candidates using energy urgency, time-of-day favorability, and proximity
-        3) Select the top K candidates per critical point (more for severe deficits)
-        4) As a safety net, also include a global dwell-time fallback per rotation
+
+        - For each infeasible rotation, find SoC critical points (where SoC drops below 0
+          or a safety margin).
+        - For each critical point, walk backward through the rotation's trips and score
+          candidates using energy urgency, time-of-day favorability, and proximity.
+        - Select the top K candidates per critical point (more for severe deficits).
+        - As a safety net, also include a global dwell-time fallback per rotation.
 
         Parameters:
         -----------
@@ -1451,11 +1452,10 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
         Returns:
         --------
         Dict[str, Any] | None
-            - None if all rotations have sufficient charging time (SOC >= 0)
-            - Dict with keys:
-              - "rotation_ids": List[int] of failing rotation IDs
-              - "soc_data": Dict mapping each failing rotation ID to a tuple of
-                (soc_df, event_spans, rot_start, rot_end) for plotting
+            None if all rotations have sufficient charging time (SOC >= 0).
+            Otherwise a dict with keys ``"rotation_ids"`` (List[int] of failing rotation IDs)
+            and ``"soc_data"`` (dict mapping each failing rotation ID to a tuple of
+            soc_df, event_spans, rot_start, rot_end for plotting).
 
         Raises:
         -------

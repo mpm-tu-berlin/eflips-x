@@ -71,11 +71,6 @@ class ScenarioDisplayConfig:
     Pass as a global parameter via ``params["scenario_display_config"]``.
     Analyzers and merge functions use this to sort scenarios consistently
     and map internal codes to human-readable names.
-
-    Attributes:
-        order: Canonical ordering of scenario codes, e.g. ``["OU", "DEP", "TERM"]``.
-        display_names: Mapping from scenario code to human-readable name.
-        baseline: Optional scenario code used as a comparison baseline (e.g. ``"DIESEL"``).
     """
 
     order: List[str]
