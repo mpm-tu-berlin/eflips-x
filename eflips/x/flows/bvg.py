@@ -328,9 +328,7 @@ class CleanSimulationResults(Modifier):
         logger.info(f"Deleted {vehicles_count} vehicles")
 
 
-def save_plot_to_files_in_output_dir(
-    fig: Figure, basename: str, dpi: int = 300
-) -> None:
+def save_plot_to_files_in_output_dir(fig: Figure, basename: str, dpi: int = 300) -> None:
     """
     Utility mehtod to save a figure to the output directory with given basename.
 
@@ -726,6 +724,7 @@ def run_term_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
             True if REDUCED_DATA else False
         ),  # Reduced data has unstable simulation, for some reason.
         "SchedulingEfficiencyAnalyzer.scenario_name": "TERM",
+        "StationElectrification.max_stations_to_electrify": 999,
     }
 
     # Create context and copy common database as baseline
@@ -775,17 +774,12 @@ def run_term_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
             )
             save_plot_to_files_in_output_dir(fig, f"critical_rotation_{rot_id}_soc")
             plt.close(fig)
-    # TODO: Move up to params
-    # Do the hacky thing where we update the params, then unset them again
-    params["StationElectrification.max_stations_to_electrify"] = 999
-
     steps_2 = [
         StationElectrification(),
         DepotGenerator(),
         Simulation(),
     ]
     run_steps(context=context, steps=steps_2)
-    del params["StationElectrification.max_stations_to_electrify"]
 
     efficiency_data = cast(pd.DataFrame, SchedulingEfficiencyAnalyzer().execute(context=context))
     efficiency_data.to_excel(output_dir() / "term_scheduling_efficiency.xlsx", index=False)

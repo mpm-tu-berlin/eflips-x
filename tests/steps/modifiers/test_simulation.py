@@ -632,11 +632,12 @@ class TestSimulation:
         docs = modifier.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 4
+        assert len(docs) == 5
         assert "Simulation.repetition_period" in docs
         assert "Simulation.smart_charging" in docs
         assert "Simulation.ignore_unstable_simulation" in docs
         assert "Simulation.ignore_delayed_trips" in docs
+        assert "terminus_deadtime_s" in docs
 
         # Check that descriptions are non-empty
         for key, value in docs.items():

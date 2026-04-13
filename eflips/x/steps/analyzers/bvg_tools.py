@@ -683,7 +683,10 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
         n_scenarios = len(all_scenarios)
 
         fig, axes = plt.subplots(
-            2, n_scenarios, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), squeeze=False,
+            2,
+            n_scenarios,
+            figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH),
+            squeeze=False,
             layout="constrained",
         )
 
@@ -699,8 +702,9 @@ class SchedulingEfficiencyAnalyzer(Analyzer):
             # Row 2: total km distribution
             km_data = subset["total_km"].dropna()
             if km_data.empty:
-                axes[1, col].text(0.5, 0.5, "No data", ha="center", va="center",
-                                  transform=axes[1, col].transAxes)
+                axes[1, col].text(
+                    0.5, 0.5, "No data", ha="center", va="center", transform=axes[1, col].transAxes
+                )
             else:
                 axes[1, col].hist(km_data, bins=30)
             axes[1, col].set_xlabel("Total km per rotation")
@@ -873,7 +877,9 @@ def visualize_routes_by_depot_cartopy(
     # Create figure with cartopy projection
     # Increase height to accommodate legend below
     fig, ax = plt.subplots(
-        figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), subplot_kw={"projection": projection}
+        figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH),
+        subplot_kw={"projection": projection},
+        layout="constrained",
     )
 
     # Track if we have routes without depot assignment
@@ -969,15 +975,13 @@ def visualize_routes_by_depot_cartopy(
         framealpha=0.9,
     )
 
-    plt.tight_layout()
-
     return fig
 
 
-class _CartoDBPositron(GoogleTiles):
+class _CartoDBPositron(GoogleTiles):  # type: ignore[misc]
     """CartoDB Positron tile provider — clean light basemap, no API key required."""
 
-    def _image_url(self, tile):  # type: ignore[override]
+    def _image_url(self, tile: Tuple[int, int, int]) -> str:
         x, y, z = tile
         return f"https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png"
 
@@ -1011,15 +1015,13 @@ def visualize_electrified_termini_map(
 
     for scenario_name, session in scenario_sessions.items():
         depot_station_ids = {d.station_id for d in session.query(Depot).all()}
-        terminus_stations = (
-            session.query(Station)
-            .filter(
-                Station.is_electrified == True,  # noqa: E712
-                Station.charge_type == ChargeType.OPPORTUNITY,
-                ~Station.id.in_(depot_station_ids) if depot_station_ids else True,
-            )
-            .all()
+        query = session.query(Station).filter(
+            Station.is_electrified == True,  # noqa: E712
+            Station.charge_type == ChargeType.OPPORTUNITY,
         )
+        if depot_station_ids:
+            query = query.filter(~Station.id.in_(depot_station_ids))
+        terminus_stations = query.all()
         stations_dict: Dict[str, Tuple[float, float]] = {}
         for s in terminus_stations:
             if s.geom is not None:
@@ -1053,8 +1055,8 @@ def visualize_electrified_termini_map(
         figsize=(PLOT_WIDTH_INCH, PLOT_WIDTH_INCH * 0.75),
         layout="constrained",
     )
-    ax.set_extent(extent, crs=ccrs.PlateCarree())
-    ax.add_image(tiles, zoom_level)
+    ax.set_extent(extent, crs=ccrs.PlateCarree())  # type: ignore[attr-defined]
+    ax.add_image(tiles, zoom_level)  # type: ignore[call-arg]
     ax.set_axis_off()
 
     # --- Half-circle markers ---
@@ -2026,7 +2028,9 @@ def visualize_tco_comparison(
                     side_labels.append((segment_mid_y, value))
             y_offset += value
 
-        _place_tco_side_labels(ax, i, side_labels, n_bars=len(df_pivot), min_spacing=min_label_height)
+        _place_tco_side_labels(
+            ax, i, side_labels, n_bars=len(df_pivot), min_spacing=min_label_height
+        )
 
         # Bold total on top of each bar
         ax.text(
