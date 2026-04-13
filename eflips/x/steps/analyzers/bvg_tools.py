@@ -1802,7 +1802,7 @@ TCO_SCENARIO_NAMES: Dict[str, str] = {
 
 
 def _place_tco_side_labels(
-    ax: "plt.Axes",
+    ax: "matplotlib.axes.Axes",
     bar_x: int,
     labels: "List[Tuple[float, float]]",
     n_bars: int,
