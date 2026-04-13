@@ -19,9 +19,9 @@ from eflips.eval.output import prepare as eval_output_prepare
 from eflips.eval.output import visualize as eval_output_visualize
 from eflips.eval.output.prepare import depot_layout
 from eflips.model import EnergySource, Scenario, VehicleType
-from eflips.tco.data_queries import init_tco_parameters
-from eflips.tco.tco_calculator import TCOCalculator
-from eflips.tco.tco_parameter_config import (
+from eflips.tco.data_queries import init_tco_parameters  # type: ignore[import-untyped]
+from eflips.tco.tco_calculator import TCOCalculator  # type: ignore[import-untyped]
+from eflips.tco.tco_parameter_config import (  # type: ignore[import-untyped]
     BatteryTypeTCOParameter,
     ChargingInfrastructureTCOParameter,
     ChargingPointTypeTCOParameter,

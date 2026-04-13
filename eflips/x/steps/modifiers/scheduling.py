@@ -11,7 +11,7 @@ import typing
 from collections import defaultdict, OrderedDict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Counter, Set
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import eflips.model
 import networkx as nx  # type: ignore[import-untyped]
@@ -1915,7 +1915,7 @@ class StationElectrification(Modifier):
         self,
         scenario: Scenario,
         session: Session,
-        consumption_results: Optional[Dict] = None,
+        consumption_results: Optional[Dict[str, Any]] = None,
         terminus_deadtime_s: float = 60.0,
     ) -> None:
         """
@@ -2066,7 +2066,7 @@ class StationElectrification(Modifier):
 
         # Score stations: break_time * abs(worst_soc) for each visiting low-SOC rotation.
         # Breaks shorter than terminus_deadtime are excluded since no charging would occur.
-        station_scores: typing.Counter[float] = Counter()
+        station_scores: Dict[int, float] = defaultdict(float)
         for rotation in rotations_with_low_soc:
             weight = worst_soc_by_rotation[rotation.id]
             for i in range(len(rotation.trips) - 1):
@@ -2083,7 +2083,9 @@ class StationElectrification(Modifier):
             return None
 
         # Select the station with the highest score that isn't already electrified
-        for most_popular_station_id, _ in station_scores.most_common():
+        for most_popular_station_id in sorted(
+            station_scores, key=station_scores.get, reverse=True  # type: ignore[arg-type]
+        ):
             station: Station = (
                 session.query(Station).filter(Station.id == most_popular_station_id).one()
             )
