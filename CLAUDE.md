@@ -54,6 +54,8 @@ Parameters are passed through `PipelineContext.params` dictionary:
 
 All steps must implement `document_params()` class method that returns a dictionary documenting their parameters.
 
+The global parameter `"scenario_display_config"` accepts a `ScenarioDisplayConfig` instance (from `eflips.x.framework`) to control scenario ordering, display names, and baseline selection in multi-scenario visualizations. Analyzers and merge functions that accept a `config` parameter will fall back to hardcoded defaults when this is not set.
+
 ### Database Chaining
 
 Steps execute sequentially, each producing a new database file:
@@ -351,3 +353,9 @@ Python versions: 3.12, 3.13
 ## Matplotlib usage
 
 Do not use tight_layout, instead use layout="constrained" in plt.subplots().
+
+## Building Analyzers
+
+The visualize() method is optional for things that create tables. Here, we can just assume the user will view (or export) the tables themselves.
+
+In the bare visualize() method, we try to create undecorated, standard matplotlib (or plotly…) figures. We try to do it in a way that is coductive to a subclass pre- and/or postprocessing our visualize method in order to apply a custom visual style. 
