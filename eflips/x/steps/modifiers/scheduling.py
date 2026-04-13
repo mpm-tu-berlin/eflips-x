@@ -44,6 +44,10 @@ from sqlalchemy.orm import Session, joinedload
 
 from eflips.x.framework import Modifier, Analyzer
 
+#: Default opportunity charging power in kW, shared across IntegratedScheduling,
+#: InsufficientChargingTimeAnalyzer and StationElectrification.
+DEFAULT_CHARGING_POWER_KW: float = 450.0
+
 
 class IntegratedScheduling(Modifier):
     """
@@ -196,7 +200,7 @@ class IntegratedScheduling(Modifier):
 
                     # Compute dynamic break duration from the worst SoC deficit
                     dynamic_duration = self._compute_dynamic_break_duration(
-                        insufficient_charging_analyzer_result, session
+                        insufficient_charging_analyzer_result, session, params
                     )
                     params[f"{VehicleScheduling.__name__}.longer_break_time_duration"] = (
                         dynamic_duration
@@ -216,7 +220,7 @@ class IntegratedScheduling(Modifier):
         analyzer_result: Dict[str, Any],
         session: sqlalchemy.orm.session.Session,
         params: Dict[str, Any],
-    ) -> set[int]:
+    ) -> Set[int]:
         """
         Identify trips that should have longer breaks added, using SoC trajectory analysis.
 
@@ -239,7 +243,7 @@ class IntegratedScheduling(Modifier):
 
         Returns:
         --------
-        set[int]
+        Set[int]
             Set of trip IDs that should have longer breaks added
         """
         rotation_ids: List[int] = analyzer_result["rotation_ids"]
@@ -248,7 +252,10 @@ class IntegratedScheduling(Modifier):
         safety_margin = params.get(f"{self.__class__.__name__}.break_safety_margin_soc", 0.05)
         base_k = params.get(f"{self.__class__.__name__}.candidates_per_critical_point", 3)
 
-        trip_ids_to_add_longer_breaks: set[int] = set()
+        # Precompute global dwell time per station (used by fallback heuristic)
+        global_dwell = self._compute_global_dwell_time(session)
+
+        trip_ids_to_add_longer_breaks: Set[int] = set()
 
         for rotation_id in rotation_ids:
             rotation = (
@@ -296,7 +303,7 @@ class IntegratedScheduling(Modifier):
                     )
 
             # Safety net: also add the global dwell-time fallback station for this rotation
-            fallback_trip_id = self._global_dwell_time_fallback(rotation, trips, session)
+            fallback_trip_id = self._global_dwell_time_fallback(rotation, trips, global_dwell)
             if fallback_trip_id is not None:
                 trip_ids_to_add_longer_breaks.add(fallback_trip_id)
 
@@ -328,7 +335,7 @@ class IntegratedScheduling(Modifier):
             Each dict has keys: critical_time, critical_soc, deficit, trip_index, trip_id
         """
         critical_points: List[Dict[str, Any]] = []
-        seen_trip_indices: set[int] = set()
+        seen_trip_indices: Set[int] = set()
 
         for _, row in soc_df.iterrows():
             soc_val = row["soc"]
@@ -481,19 +488,12 @@ class IntegratedScheduling(Modifier):
             return None
         return float(preceding.iloc[-1]["soc"])
 
-    def _global_dwell_time_fallback(
-        self,
-        rotation: Rotation,
-        trips: List[Trip],
-        session: Session,
-    ) -> Optional[int]:
+    def _compute_global_dwell_time(self, session: Session) -> List[Tuple[int, timedelta]]:
         """
-        Fallback heuristic: find the station with the highest global dwell time across all
-        rotations, and if the given rotation visits it, return the first trip arriving there.
+        Compute total dwell time per station across all rotations, sorted descending.
 
-        This preserves the original heuristic's logic as a safety net.
+        Returns a list of (station_id, total_dwell) tuples, most-dwelled-at first.
         """
-        # Compute global dwell time per station (only for this rotation's candidate stations)
         all_rotations = (
             session.query(Rotation)
             .options(joinedload(Rotation.trips).joinedload(Trip.route))
@@ -506,15 +506,32 @@ class IntegratedScheduling(Modifier):
                 dwell = rot.trips[i + 1].departure_time - trip.arrival_time
                 total_dwell[station_id] += dwell
 
-        # Sort descending
-        sorted_stations = sorted(total_dwell.items(), key=lambda x: x[1], reverse=True)
+        return sorted(total_dwell.items(), key=lambda x: x[1], reverse=True)
 
-        # Find this rotation's arrival stations (excluding last trip)
+    def _global_dwell_time_fallback(
+        self,
+        rotation: Rotation,
+        trips: List[Trip],
+        global_dwell: List[Tuple[int, timedelta]],
+    ) -> Optional[int]:
+        """
+        Fallback heuristic: from precomputed global dwell times, find the highest-dwell
+        station that this rotation visits and return the first trip arriving there.
+
+        Parameters:
+        -----------
+        rotation : Rotation
+            The rotation to find a fallback break for
+        trips : List[Trip]
+            Ordered trips of the rotation
+        global_dwell : List[Tuple[int, timedelta]]
+            Precomputed (station_id, total_dwell) pairs sorted descending by dwell time.
+            Obtained from _compute_global_dwell_time().
+        """
         rotation_stations = {trip.route.arrival_station_id for trip in trips[:-1]}
 
-        for station_id, _ in sorted_stations:
+        for station_id, _ in global_dwell:
             if station_id in rotation_stations:
-                # Return the first trip arriving at this station
                 for trip in trips[:-1]:
                     if trip.route.arrival_station_id == station_id:
                         self.logger.info(
@@ -528,12 +545,27 @@ class IntegratedScheduling(Modifier):
         self,
         analyzer_result: Dict[str, Any],
         session: Session,
+        params: Dict[str, Any],
     ) -> timedelta:
         """
         Compute a conservative break duration based on the worst SoC deficit.
 
         Uses battery capacity and charging power to estimate how much break time
         is needed, adds a 50% safety margin, and caps between 5 and 15 minutes.
+
+        Parameters:
+        -----------
+        analyzer_result : Dict[str, Any]
+            Result from InsufficientChargingTimeAnalyzer with "soc_data" key
+        session : Session
+            SQLAlchemy session for querying vehicle types
+        params : Dict[str, Any]
+            Pipeline parameters; reads StationElectrification.charging_power_kw
+
+        Raises:
+        -------
+        ValueError
+            If no VehicleType with battery_capacity is found in the scenario
         """
         soc_data: Dict[int, Any] = analyzer_result["soc_data"]
 
@@ -546,8 +578,7 @@ class IntegratedScheduling(Modifier):
 
         deficit = abs(worst_soc)  # e.g., 0.15 means SoC dipped to -15%
 
-        # Estimate needed charging time:
-        # Get battery capacity and charging power from the first vehicle type
+        # Get battery capacity from the first vehicle type in the scenario
         scenario = session.query(Scenario).one()
         vehicle_type = (
             session.query(VehicleType)
@@ -555,16 +586,18 @@ class IntegratedScheduling(Modifier):
             .filter(Rotation.scenario_id == scenario.id)
             .first()
         )
-        if vehicle_type is not None and vehicle_type.battery_capacity is not None:
-            battery_kwh = vehicle_type.battery_capacity
-        else:
-            battery_kwh = 300.0  # Reasonable default
+        if vehicle_type is None or vehicle_type.battery_capacity is None:
+            raise ValueError(
+                "Cannot compute dynamic break duration: no VehicleType with "
+                "battery_capacity found in the scenario"
+            )
+        battery_kwh = vehicle_type.battery_capacity
 
-        charging_power_kw = 450.0  # Typical opportunity charger power
-        # needed_minutes = deficit * battery_kwh / charging_power_kw * 60
+        charging_power_kw: float = params.get(
+            "StationElectrification.charging_power_kw", DEFAULT_CHARGING_POWER_KW
+        )
         needed_minutes = deficit * battery_kwh / charging_power_kw * 60
-        # Add 50% safety margin
-        needed_minutes *= 1.5
+        needed_minutes *= 1.5  # 50% safety margin
 
         # Clamp between 5 and 15 minutes
         duration_minutes = max(5.0, min(15.0, needed_minutes))
@@ -1395,7 +1428,7 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
     @classmethod
     def _get_default_charging_power_kw(cls) -> float:
         """Get the default charging power in kW."""
-        return 450.0
+        return DEFAULT_CHARGING_POWER_KW
 
     def analyze(self, session: Session, params: Dict[str, Any]) -> Dict[str, Any] | None:
         """
@@ -1582,7 +1615,7 @@ class StationElectrification(Modifier):
     @staticmethod
     def _get_default_charging_power_kw() -> float:
         """Get the default charging power in kW."""
-        return 450.0
+        return DEFAULT_CHARGING_POWER_KW
 
     def _get_default_max_stations(self, session: Session) -> int:
         """Get the default maximum number of stations to electrify (25% of termini)."""
