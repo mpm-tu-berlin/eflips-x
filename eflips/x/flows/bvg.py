@@ -330,7 +330,7 @@ class CleanSimulationResults(Modifier):
 
 def save_plot_to_files_in_output_dir(fig: Figure, basename: str, dpi: int = 300) -> None:
     """
-    Utility mehtod to save a figure to the output directory with given basename.
+    Utility method to save a figure to the output directory with given basename.
 
     :param fig: A Matplotlib Figure object
     :param basename: The base name for the output files (without extension)
