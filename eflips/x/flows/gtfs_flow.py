@@ -63,20 +63,32 @@ class DepotConfig:
 
 @dataclass
 class AgencyConfig:
+    """One logical simulation: one GTFS file, one or more agencies, one or more depots.
+
+    Rows in ``depot_locations.xlsx`` are grouped by ``simulation_id`` to form
+    a single AgencyConfig. Within a group, each row may contribute an agency
+    (``agency_id`` / ``agency_name``), a depot (``name`` / ``coords`` / ...),
+    or both.
+    """
+
+    simulation_id: str
     gtfs_file: Path
-    agency_name: str
-    agency_id: str
+    agency_ids: List[str]
+    agency_names: List[str]
     depots: List[DepotConfig]
     battery_capacity: float = 360.0
     consumption: float = 1.5
     charging_curve: List[List[float]] = field(default_factory=lambda: [[0.0, 450.0], [1.0, 450.0]])
 
     @property
+    def agency_name(self) -> str:
+        """Human-readable label combining all agencies in this simulation."""
+        return " / ".join(self.agency_names) if self.agency_names else self.simulation_id
+
+    @property
     def slug(self) -> str:
-        """Sanitized agency name for directory naming."""
-        s = self.agency_name.lower()
-        s = re.sub(r"[^a-z0-9]+", "_", s)
-        s = s.strip("_")
+        """Sanitized simulation id for directory naming."""
+        s = re.sub(r"[^a-z0-9]+", "_", self.simulation_id.lower()).strip("_")
         return s[:60]
 
 
@@ -85,33 +97,73 @@ class AgencyConfig:
 # ---------------------------------------------------------------------------
 
 
+def _parse_depot_row(row: "pd.Series[Any]") -> DepotConfig | None:
+    """Extract a DepotConfig from an Excel row, or None if the row has no depot."""
+    if not pd.notna(row.get("name")):
+        return None
+    lat_str, lon_str = str(row["coords"]).split(",", 1)
+    capacity = 9999 if math.isnan(float(row["capacity"])) else int(row["capacity"])
+    return DepotConfig(
+        name=row["name"],
+        coords=(float(lon_str.strip()), float(lat_str.strip())),
+        capacity=capacity,
+    )
+
+
+def _single_file_name(group: "pd.DataFrame", sim_id: str) -> str:
+    """Return the single distinct non-null ``file_name`` in a simulation group."""
+    file_names = {str(v) for v in group["file_name"].dropna()}
+    if not file_names:
+        raise ValueError(f"Simulation '{sim_id}' has no file_name on any row")
+    if len(file_names) > 1:
+        raise ValueError(f"Simulation '{sim_id}' has conflicting file_name values: {file_names}")
+    return next(iter(file_names))
+
+
 def parse_depot_locations(excel_path: Path) -> List[AgencyConfig]:
     """Parse the depot_locations Excel file into a list of AgencyConfig.
 
-    Only agencies with at least one named depot are included.
+    Rows are grouped by ``simulation_id``. Within a simulation group:
+    - ``file_name`` is taken from the (only) non-null value (rows may leave
+      it blank; all non-blank values in the group must agree).
+    - Each row with a non-null ``agency_id`` contributes one agency.
+    - Each row with a non-null depot ``name`` contributes one depot.
+
+    Only simulations with at least one depot are emitted. If the Excel file
+    doesn't have a ``simulation_id`` column (legacy format) or a row leaves it
+    blank, we fall back to ``agency_name`` for grouping — so single-agency
+    rows continue to work without edits.
     """
     df = pd.read_excel(excel_path)
 
-    # Filter to rows with a depot name
-    filled = df[df["name"].notna()].copy()
-    if filled.empty:
-        raise ValueError(f"No depot entries found in {excel_path}")
+    if "simulation_id" not in df.columns:
+        df["simulation_id"] = df["agency_name"]
+    else:
+        df["simulation_id"] = df["simulation_id"].fillna(df["agency_name"])
+
+    df = df[df["simulation_id"].notna()].copy()
+    if df.empty:
+        raise ValueError(f"No entries with simulation_id found in {excel_path}")
 
     configs: List[AgencyConfig] = []
-    grouped = filled.groupby(["file_name", "agency_id", "agency_name"])
-    for (file_name, agency_id, agency_name), group in grouped:
-        depots: List[DepotConfig] = []
-        for _, row in group.iterrows():
-            # Parse "lat, lon" string → (lon, lat) tuple
-            parts = str(row["coords"]).split(",")
-            lat, lon = float(parts[0].strip()), float(parts[1].strip())
-            capacity = 9999 if math.isnan(float(row["capacity"])) else int(row["capacity"])
-            depots.append(DepotConfig(name=row["name"], coords=(lon, lat), capacity=capacity))
+    for sim_id, group in df.groupby("simulation_id", sort=False):
+        sim_id = str(sim_id)
+        file_name = _single_file_name(group, sim_id)
+
+        agencies_mask = group["agency_id"].notna()
+        agency_ids = [str(v) for v in group.loc[agencies_mask, "agency_id"]]
+        agency_names = [str(v) for v in group.loc[agencies_mask, "agency_name"].dropna()]
+        depots = [d for d in (_parse_depot_row(r) for _, r in group.iterrows()) if d]
+
+        if not depots:
+            continue  # simulations with no configured depot are skipped
+
         configs.append(
             AgencyConfig(
+                simulation_id=sim_id,
                 gtfs_file=excel_path.parent / file_name,
-                agency_name=agency_name,
-                agency_id=str(agency_id),
+                agency_ids=agency_ids,
+                agency_names=agency_names,
                 depots=depots,
             )
         )
@@ -156,7 +208,7 @@ def run_common_phase(
         "log_level": "INFO",
         "GTFSIngester.bus_only": True,
         "GTFSIngester.duration": "WEEK",
-        "GTFSIngester.agency_name": agency.agency_name,
+        "GTFSIngester.agency_ids": agency.agency_ids,
         "ConfigureVehicleTypes.battery_capacity": agency.battery_capacity,
         "ConfigureVehicleTypes.consumption": agency.consumption,
         "ConfigureVehicleTypes.charging_curve": agency.charging_curve,
@@ -400,7 +452,13 @@ def gtfs_flow(
 
     if agency_filter:
         filter_lower = agency_filter.lower()
-        agencies = [a for a in agencies if filter_lower in a.agency_name.lower()]
+
+        def matches(a: AgencyConfig) -> bool:
+            if filter_lower in a.simulation_id.lower():
+                return True
+            return any(filter_lower in n.lower() for n in a.agency_names)
+
+        agencies = [a for a in agencies if matches(a)]
         if not agencies:
             raise ValueError(f"No agencies matched filter '{agency_filter}'")
 
