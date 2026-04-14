@@ -7,7 +7,7 @@ import warnings
 from datetime import date, datetime, timedelta
 from multiprocessing import Pool
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Any, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Tuple
 from uuid import UUID
 
 import gtfs_kit as gk  # type: ignore[import-untyped]
@@ -351,7 +351,7 @@ class GTFSIngester(Generator):
     def __init__(
         self,
         input_files: List[Path],
-        code_version: str = "v3",
+        code_version: str = "v4",
         cache_enabled: bool = True,
     ):
         """
@@ -384,9 +384,14 @@ class GTFSIngester(Generator):
         return {
             "log_level": "Logging level. One of DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is INFO.",
             f"{cls.__name__}.agency_name": (
-                "Name of the agency to import (required for multi-agency feeds). "
-                "If the GTFS feed contains multiple agencies, you must specify which one to import. "
-                "If not specified for a single-agency feed, the sole agency will be used automatically."
+                "Name of the agency to import, or a list of names to combine into one import "
+                "(required for multi-agency feeds unless agency_ids is given). "
+                "Exact match against agency.txt is required."
+            ),
+            f"{cls.__name__}.agency_ids": (
+                "agency_id (or list of agency_ids) to import from a multi-agency feed. "
+                "Preferred over agency_name because ids are unambiguous. When both are given, "
+                "the resulting set is the union."
             ),
             f"{cls.__name__}.start_date": (
                 "Start date for import in ISO 8601 format (YYYY-MM-DD). "
@@ -403,8 +408,52 @@ class GTFSIngester(Generator):
         }
 
     @staticmethod
+    def _coerce_str_list(value: str | Iterable[str] | None) -> List[str]:
+        """Normalise a scalar/iterable/None into a list of non-empty strings.
+
+        Accepts the flexible shapes our params and eflips-ingest both use:
+        ``""`` / ``None`` → ``[]``; a single string → ``[s]``; any iterable of
+        strings → a list (with empty/None entries dropped).
+        """
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(v) for v in value if v not in (None, "")]
+
+    @staticmethod
+    def _resolve_agency_ids(
+        feed: "gk.Feed", agency_names: List[str], agency_ids: List[str]
+    ) -> List[str]:
+        """
+        Resolve the given names and ids against ``feed.agency`` and return the
+        union as a list of agency_id strings. Raises ``ValueError`` if any
+        requested name/id is not present in the feed.
+        """
+        if feed.agency is None or len(feed.agency) == 0:
+            raise ValueError("GTFS feed has no agency table")
+
+        feed_names = set(feed.agency["agency_name"].astype(str))
+        feed_ids = set(feed.agency["agency_id"].astype(str))
+
+        missing_names = [n for n in agency_names if n not in feed_names]
+        missing_ids = [i for i in agency_ids if i not in feed_ids]
+        if missing_names or missing_ids:
+            raise ValueError(
+                f"Agency not found in GTFS feed. "
+                f"Missing names: {missing_names}, missing ids: {missing_ids}. "
+                f"Available agencies: {', '.join(sorted(feed_names))}"
+            )
+
+        resolved: set[str] = set(agency_ids)
+        if agency_names:
+            by_name = feed.agency[feed.agency["agency_name"].isin(agency_names)]
+            resolved.update(by_name["agency_id"].astype(str).tolist())
+        return sorted(resolved)
+
+    @staticmethod
     def _compute_agency_active_dates(
-        feed: "gk.Feed", agency_name: str, bus_only: bool
+        feed: "gk.Feed", agency_ids: List[str], bus_only: bool
     ) -> List[date]:
         """
         Build the sorted list of dates on which the given agency has at least one
@@ -428,7 +477,8 @@ class GTFSIngester(Generator):
           have generated.
 
         :param feed: A gtfs_kit Feed object
-        :param agency_name: The name of the agency to filter on
+        :param agency_ids: The agency_ids (as strings) to filter on. Assumed to
+            already be validated against ``feed.agency``.
         :param bus_only: If True, restrict to bus route types before computing
             active dates. Must match the ``bus_only`` flag passed to eflips-ingest
             downstream, otherwise the selected date may fall on routes that will
@@ -438,14 +488,10 @@ class GTFSIngester(Generator):
         if feed.agency is None or feed.routes is None or feed.trips is None:
             return []
 
-        # Look up agency_id
-        match = feed.agency[feed.agency["agency_name"] == agency_name]
-        if match.empty:
-            return []
-        agency_id = match.iloc[0]["agency_id"]
-
-        # Routes → service_ids belonging to this agency
-        agency_routes = feed.routes[feed.routes["agency_id"] == agency_id]
+        # Routes → service_ids belonging to this agency set.
+        # Compare as strings because agency_id columns in GTFS may be int- or
+        # str-typed depending on the feed.
+        agency_routes = feed.routes[feed.routes["agency_id"].astype(str).isin(agency_ids)]
         if bus_only:
             # Same predicate as eflips-ingest's filter_feed_by_route_type:
             # route_type 3 (standard bus) or 700-799 (extended bus services).
@@ -502,31 +548,36 @@ class GTFSIngester(Generator):
         return sorted(active)
 
     @staticmethod
-    def _auto_select_start_date(gtfs_zip_file: Path, agency_name: str, bus_only: bool) -> str:
+    def _auto_select_start_date(
+        gtfs_zip_file: Path,
+        *,
+        agency_name: str | Iterable[str] = "",
+        agency_ids: str | Iterable[str] = "",
+        bus_only: bool = True,
+    ) -> str:
         """
-        Auto-select a Monday near the middle of the agency's active service window.
+        Auto-select a Monday near the middle of the agency set's active service window.
 
-        When ``agency_name`` is provided, the validity period is computed from only the
-        services actually used by that agency's trips, considering both ``calendar.txt``
-        (filtered by day-of-week) and ``calendar_dates.txt`` exceptions. When
-        ``bus_only`` is True, only bus route types (3 or 700-799) are considered,
-        matching the downstream eflips-ingest filter. This avoids the failure mode
-        where a multi-agency feed's *global* validity range points to a date on
-        which the target agency has no (bus) service.
+        When ``agency_name`` or ``agency_ids`` is non-empty, the validity period is
+        computed from only the services actually used by the selected agencies'
+        trips, considering both ``calendar.txt`` (filtered by day-of-week) and
+        ``calendar_dates.txt`` exceptions. When ``bus_only`` is True, only bus
+        route types (3 or 700-799) are considered, matching the downstream
+        eflips-ingest filter.
 
-        When ``agency_name`` is empty, falls back to the global feed validity period
-        from :meth:`EflipsIngestGtfsIngester.get_feed_validity_period`.
+        When neither is provided, falls back to the global feed validity period.
 
         :param gtfs_zip_file: Path to the GTFS zip file
-        :param agency_name: Agency name to scope the validity period to, or empty
-            string to use the global feed validity period
+        :param agency_name: Agency name or list of names to scope to
+        :param agency_ids: Agency id or list of ids to scope to
         :param bus_only: Whether bus-only filtering will be applied downstream.
-            Must match the ``bus_only`` flag eventually passed to eflips-ingest.
         :return: ISO 8601 formatted date string (YYYY-MM-DD)
-        :raises ValueError: If the feed has no calendar data or the agency has no
-            active service dates
+        :raises ValueError: If the feed has no calendar data, any requested
+            agency is missing, or the resolved agency set has no active service.
         """
-        # Read the GTFS feed
+        names = GTFSIngester._coerce_str_list(agency_name)
+        ids = GTFSIngester._coerce_str_list(agency_ids)
+
         feed = gk.read_feed(gtfs_zip_file, dist_units="m")
 
         start_date: date
@@ -534,18 +585,21 @@ class GTFSIngester(Generator):
         target: date
         active_set: set[date] | None
 
-        if agency_name:
-            # Agency-aware path
+        if names or ids:
+            # Agency-aware path. _resolve_agency_ids raises a clear
+            # "agency not found" error if any requested name/id is missing,
+            # distinct from the "no active services" case below.
+            resolved_ids = GTFSIngester._resolve_agency_ids(feed, names, ids)
             active_dates = GTFSIngester._compute_agency_active_dates(
-                feed, agency_name, bus_only=bus_only
+                feed, resolved_ids, bus_only=bus_only
             )
             if not active_dates:
                 scope = "bus routes" if bus_only else "routes"
                 raise ValueError(
-                    f"Cannot auto-select date: agency '{agency_name}' has no active "
-                    f"service dates for its {scope} in the GTFS feed (checked both "
-                    "calendar.txt and calendar_dates.txt). Please specify start_date "
-                    "manually."
+                    f"Cannot auto-select date: agency/agencies {names or ids} have no "
+                    f"active service dates for their {scope} in the GTFS feed (checked "
+                    "both calendar.txt and calendar_dates.txt). "
+                    "Please specify start_date manually."
                 )
             start_date = active_dates[0]
             end_date = active_dates[-1]
@@ -630,6 +684,7 @@ class GTFSIngester(Generator):
 
         # Get parameters
         agency_name = params.get(f"{self.__class__.__name__}.agency_name", "")
+        agency_ids = params.get(f"{self.__class__.__name__}.agency_ids", "")
         start_date = params.get(f"{self.__class__.__name__}.start_date")
         duration = params.get(f"{self.__class__.__name__}.duration", "WEEK")
         bus_only = params.get(f"{self.__class__.__name__}.bus_only", True)
@@ -640,7 +695,10 @@ class GTFSIngester(Generator):
                 "No start_date specified, auto-selecting Monday in middle of validity period"
             )
             start_date = self._auto_select_start_date(
-                gtfs_zip_file, agency_name=agency_name, bus_only=bus_only
+                gtfs_zip_file,
+                agency_name=agency_name,
+                agency_ids=agency_ids,
+                bus_only=bus_only,
             )
             logger.info(f"Auto-selected start_date: {start_date}")
 
@@ -688,6 +746,7 @@ class GTFSIngester(Generator):
             progress_callback=prepare_progress_callback,
             duration=duration,
             agency_name=agency_name,
+            agency_id=agency_ids,
             bus_only=bus_only,
         )
 
@@ -713,8 +772,8 @@ class GTFSIngester(Generator):
         rotation_count = session.query(Rotation).count()
         if trip_count == 0:
             raise ValueError(
-                f"GTFS ingestion produced 0 trips for agency '{agency_name}' "
-                f"with start_date={start_date}, duration={duration}. "
+                f"GTFS ingestion produced 0 trips for agency name(s) {agency_name!r} "
+                f"id(s) {agency_ids!r} with start_date={start_date}, duration={duration}. "
                 f"The selected date range may fall outside this agency's active service period. "
                 f"({rotation_count} empty rotations were created.)"
             )
