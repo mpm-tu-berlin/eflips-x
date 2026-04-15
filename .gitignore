@@ -236,3 +236,4 @@ data/cache/**/*
 data/output/**/*
 
 doc/_build/*
+doc/autoapi/*

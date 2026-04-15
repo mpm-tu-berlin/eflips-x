@@ -9,10 +9,12 @@ import logging
 import os
 import typing
 from collections import defaultdict, OrderedDict
-from datetime import timedelta
-from typing import Any, Dict, List, Tuple, Counter, Set
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import eflips.model
+import networkx as nx  # type: ignore[import-untyped]
 import pandas as pd
 import sqlalchemy.orm.session
 from eflips.depot.api import (  # type: ignore[import-untyped]
@@ -42,6 +44,10 @@ from sqlalchemy.orm import Session, joinedload
 
 from eflips.x.framework import Modifier, Analyzer
 
+#: Default opportunity charging power in kW, shared across IntegratedScheduling,
+#: InsufficientChargingTimeAnalyzer and StationElectrification.
+DEFAULT_CHARGING_POWER_KW: float = 450.0
+
 
 class IntegratedScheduling(Modifier):
     """
@@ -54,7 +60,7 @@ class IntegratedScheduling(Modifier):
     a feasible schedule is found. It adds longer breaks to trips that need them until the schedule is feasible.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v2.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -68,6 +74,8 @@ class IntegratedScheduling(Modifier):
         Dict[str, str]
             Dictionary describing the configurable parameters:
             - IntegratedScheduling.max_iterations: Maximum number of iterations to attempt
+            - IntegratedScheduling.break_safety_margin_soc: SoC threshold for near-critical detection
+            - IntegratedScheduling.candidates_per_critical_point: Base number of break candidates per critical point
         """
         return {
             f"{cls.__name__}.max_iterations": """
@@ -75,13 +83,25 @@ class IntegratedScheduling(Modifier):
             The modifier will try to create feasible schedules by adjusting break times
             and re-running vehicle scheduling, depot assignment, and terminus placement.
 
-            Note: The heuristic is designed in a way that it should always find a feasible solution in 2 iterations.
-            If you need more, this may hint at a deper design issue in the scenario or this could be a bug. Please 
-            contact the developers.
-
-            Default: 2
+            Default: 3
             Type: int
-            Example: 10
+            Example: 5
+            """.strip(),
+            f"{cls.__name__}.break_safety_margin_soc": """
+            SoC threshold below which a point is considered "near-critical" and should
+            receive break placement even if SoC hasn't gone negative yet.
+
+            Default: 0.05 (5%)
+            Type: float
+            Example: 0.10
+            """.strip(),
+            f"{cls.__name__}.candidates_per_critical_point": """
+            Base number of break candidate trips to select per critical point.
+            This is increased for more severe deficits (deficit > 10% -> +1, > 20% -> +2).
+
+            Default: 3
+            Type: int
+            Example: 5
             """.strip(),
         }
 
@@ -113,7 +133,7 @@ class IntegratedScheduling(Modifier):
             This modifier modifies the database in place by updating rotation plans
         """
         max_iterations_key = f"{self.__class__.__name__}.max_iterations"
-        max_iterations = params.get(max_iterations_key, 2)
+        max_iterations = params.get(max_iterations_key, 3)
 
         if not isinstance(max_iterations, int):
             raise ValueError(
@@ -121,10 +141,6 @@ class IntegratedScheduling(Modifier):
             )
         if max_iterations <= 0:
             raise ValueError(f"max_iterations must be positive, got {max_iterations}")
-        if max_iterations > 2:
-            self.logger.warning(
-                "The code is designed to find a feasible solution in 2 iterations."
-            )
 
         self.logger.info(f"Starting integrated scheduling with max_iterations={max_iterations}")
 
@@ -172,17 +188,28 @@ class IntegratedScheduling(Modifier):
                     break
                 else:
                     self.logger.info(
-                        f"Schedule is not feasible, {len(insufficient_charging_analyzer_result)} rotations "
+                        f"Schedule is not feasible, "
+                        f"{len(insufficient_charging_analyzer_result['rotation_ids'])} rotations "
                         "have insufficient charging time. Adding longer breaks and retrying."
                     )
-                    # Now, we will need to identify which trips are in the problematic rotations and which of these
-                    # should have longer breaks added.
+                    # Identify which trips should have longer breaks and compute dynamic duration
                     new_trips_to_add_longer_breaks = self.find_trips_to_add_longer_breaks(
                         insufficient_charging_analyzer_result, session, params
                     )
                     ids_of_trips_to_add_longer_breaks.update(new_trips_to_add_longer_breaks)
+
+                    # Compute dynamic break duration from the worst SoC deficit
+                    dynamic_duration = self._compute_dynamic_break_duration(
+                        insufficient_charging_analyzer_result, session, params
+                    )
+                    params[f"{VehicleScheduling.__name__}.longer_break_time_duration"] = (
+                        dynamic_duration
+                    )
+
                     self.logger.info(
-                        f"Trying scheudling again, adding longer breaks to {len(new_trips_to_add_longer_breaks)} trips."
+                        f"Retrying scheduling with longer breaks on "
+                        f"{len(new_trips_to_add_longer_breaks)} new trips "
+                        f"(duration={dynamic_duration})."
                     )
                     # Rollback the nested session to discard changes
             finally:
@@ -190,107 +217,397 @@ class IntegratedScheduling(Modifier):
 
     def find_trips_to_add_longer_breaks(
         self,
-        rotation_ids: List[int],
+        analyzer_result: Dict[str, Any],
         session: sqlalchemy.orm.session.Session,
         params: Dict[str, Any],
-    ) -> set[int]:
+    ) -> Set[int]:
         """
-        Identify trips within the given rotations that should have longer breaks added. We have conflicting goals of
-        1) Minizing the number of trips that need longer breaks added and
-        2) Putting the longer breaks at useful locations (i.e., where the vehicle can charge).
+        Identify trips that should have longer breaks added, using SoC trajectory analysis.
 
-        The heuristic approach does the following:
-        1) It looks (globally) at the palces where *all* vehicles spend the longest time anyway
-        2) It looks (for each rotation) at the termini, taking the ones the vehicle visits on at least 33% of its trips (or the top five, if there are no such termini)
-        3) from the possible termini from 2) it selects the one that is closest to the global top locations from 1)
+        The algorithm:
+
+        - For each infeasible rotation, find SoC critical points (where SoC drops below 0
+          or a safety margin).
+        - For each critical point, walk backward through the rotation's trips and score
+          candidates using energy urgency, time-of-day favorability, and proximity.
+        - Select the top K candidates per critical point (more for severe deficits).
+        - As a safety net, also include a global dwell-time fallback per rotation.
 
         Parameters:
         -----------
-        rotation_ids : List[int]
-            List of rotation IDs that have insufficient charging time
-        nested_session : Session
+        analyzer_result : Dict[str, Any]
+            Result from InsufficientChargingTimeAnalyzer with keys "rotation_ids" and "soc_data"
+        session : Session
             SQLAlchemy session connected to the database
         params : Dict[str, Any]
             Pipeline parameters
 
         Returns:
         --------
-        set[int]
+        Set[int]
             Set of trip IDs that should have longer breaks added
         """
-        # 1) Create the global list of top locations where vehicles spend the most time
-        total_length_of_stay_per_station: Dict[int, timedelta] = defaultdict(
-            timedelta
-        )  # station_id -> total length of stay
+        rotation_ids: List[int] = analyzer_result["rotation_ids"]
+        soc_data: Dict[int, Any] = analyzer_result["soc_data"]
+
+        safety_margin = params.get(f"{self.__class__.__name__}.break_safety_margin_soc", 0.05)
+        base_k = params.get(f"{self.__class__.__name__}.candidates_per_critical_point", 3)
+
+        # Precompute global dwell time per station (used by fallback heuristic)
+        global_dwell = self._compute_global_dwell_time(session)
+
+        trip_ids_to_add_longer_breaks: Set[int] = set()
+
+        for rotation_id in rotation_ids:
+            rotation = (
+                session.query(Rotation)
+                .filter(Rotation.id == rotation_id)
+                .options(joinedload(Rotation.trips).joinedload(Trip.route))
+                .one()
+            )
+            trips = sorted(rotation.trips, key=lambda t: t.departure_time)
+
+            if rotation_id not in soc_data:
+                self.logger.warning(
+                    f"No SoC data for rotation {rotation_id}, skipping SoC-based analysis"
+                )
+                continue
+
+            soc_df, event_spans, rot_start, rot_end = soc_data[rotation_id]
+
+            # Phase 1: Find SoC critical points
+            critical_points = self._find_soc_critical_points(trips, soc_df, safety_margin)
+
+            if not critical_points:
+                self.logger.warning(
+                    f"Rotation {rotation_id} is infeasible but no critical points found "
+                    f"in SoC trajectory. Using fallback."
+                )
+
+            # Phase 2 & 3: Score candidates and select trips
+            max_deficit = max((cp["deficit"] for cp in critical_points), default=0.1)
+            for cp in critical_points:
+                scored = self._score_break_candidates(cp, trips, soc_df, max_deficit)
+                # Select top K candidates, scaled by deficit severity
+                k = base_k
+                if cp["deficit"] > 0.20:
+                    k = base_k + 2
+                elif cp["deficit"] > 0.10:
+                    k = base_k + 1
+                selected = sorted(scored, key=lambda c: c["score"], reverse=True)[:k]
+                for candidate in selected:
+                    trip_ids_to_add_longer_breaks.add(candidate["trip_id"])
+                    self.logger.info(
+                        f"Adding longer break to trip {candidate['trip_id']} "
+                        f"(score={candidate['score']:.3f}) in rotation {rotation_id} "
+                        f"for critical point at trip index {cp['trip_index']}"
+                    )
+
+            # Safety net: also add the global dwell-time fallback station for this rotation
+            fallback_trip_id = self._global_dwell_time_fallback(rotation, trips, global_dwell)
+            if fallback_trip_id is not None:
+                trip_ids_to_add_longer_breaks.add(fallback_trip_id)
+
+        return trip_ids_to_add_longer_breaks
+
+    def _find_soc_critical_points(
+        self,
+        trips: List[Trip],
+        soc_df: pd.DataFrame,
+        safety_margin: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Identify points in the rotation where SoC drops below 0 or a safety margin.
+
+        Walks the SoC trajectory and matches dips to the trip during which they occur.
+
+        Parameters:
+        -----------
+        trips : List[Trip]
+            Ordered list of trips in the rotation
+        soc_df : pd.DataFrame
+            DataFrame with columns "time" and "soc"
+        safety_margin : float
+            SoC threshold below which a point is "near-critical"
+
+        Returns:
+        --------
+        List[Dict[str, Any]]
+            Each dict has keys: critical_time, critical_soc, deficit, trip_index, trip_id
+        """
+        critical_points: List[Dict[str, Any]] = []
+        seen_trip_indices: Set[int] = set()
+
+        for _, row in soc_df.iterrows():
+            soc_val = row["soc"]
+            time_val = row["time"]
+
+            if soc_val >= safety_margin:
+                continue
+
+            # Find which trip this time falls within (or just after)
+            matched_index = None
+            for i, trip in enumerate(trips):
+                if trip.departure_time <= time_val <= trip.arrival_time:
+                    matched_index = i
+                    break
+                # Also match the dwell period after a trip (before next trip departs)
+                if (
+                    i < len(trips) - 1
+                    and trip.arrival_time <= time_val <= trips[i + 1].departure_time
+                ):
+                    matched_index = i
+                    break
+
+            if matched_index is None:
+                # Time is outside any trip window — use the last trip
+                matched_index = len(trips) - 1
+
+            # Only record one critical point per trip (the worst one)
+            if matched_index in seen_trip_indices:
+                # Update if this is worse
+                for cp in critical_points:
+                    if cp["trip_index"] == matched_index and soc_val < cp["critical_soc"]:
+                        cp["critical_soc"] = soc_val
+                        cp["critical_time"] = time_val
+                        cp["deficit"] = abs(min(0.0, soc_val))
+                continue
+
+            seen_trip_indices.add(matched_index)
+            critical_points.append(
+                {
+                    "critical_time": time_val,
+                    "critical_soc": soc_val,
+                    "deficit": abs(min(0.0, soc_val)),
+                    "trip_index": matched_index,
+                    "trip_id": trips[matched_index].id,
+                }
+            )
+
+        return critical_points
+
+    def _score_break_candidates(
+        self,
+        critical_point: Dict[str, Any],
+        trips: List[Trip],
+        soc_df: pd.DataFrame,
+        max_deficit: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        For a critical point, walk backward through the rotation's trips and score each
+        as a potential break location.
+
+        Scoring: energy_urgency * time_of_day_weight * proximity_weight
+
+        Parameters:
+        -----------
+        critical_point : Dict[str, Any]
+            Critical point with keys: trip_index, deficit, etc.
+        trips : List[Trip]
+            Ordered list of trips in the rotation
+        soc_df : pd.DataFrame
+            SoC trajectory DataFrame
+        max_deficit : float
+            Maximum deficit across all critical points (for normalization)
+
+        Returns:
+        --------
+        List[Dict[str, Any]]
+            Each dict has keys: trip_id, score, station_id, distance_in_trips
+        """
+        cp_index = critical_point["trip_index"]
+        deficit = critical_point["deficit"]
+        energy_urgency = deficit / max_deficit if max_deficit > 0 else 1.0
+
+        candidates: List[Dict[str, Any]] = []
+        max_backward = 10
+
+        # Walk backward from the critical point (excluding the last trip which has no break after it)
+        for distance in range(0, min(max_backward, cp_index + 1)):
+            i = cp_index - distance
+            if i < 0:
+                break
+
+            trip = trips[i]
+            # Skip the last trip in the rotation (no break after it)
+            if i >= len(trips) - 1:
+                continue
+
+            # Check SoC at this trip's arrival time — stop if comfortable
+            soc_at_point = self._interpolate_soc(soc_df, trip.arrival_time)
+            if soc_at_point is not None and soc_at_point > 0.50 and distance > 2:
+                break
+
+            hour = trip.arrival_time.hour
+            tod_weight = self._time_of_day_weight(hour)
+            proximity_weight = 1.0 / (1.0 + distance)
+
+            score = energy_urgency * tod_weight * proximity_weight
+
+            candidates.append(
+                {
+                    "trip_id": trip.id,
+                    "score": score,
+                    "station_id": trip.route.arrival_station_id,
+                    "distance_in_trips": distance,
+                }
+            )
+
+        return candidates
+
+    @staticmethod
+    def _time_of_day_weight(hour: int) -> float:
+        """
+        Return a weight (0.4-1.0) for how favorable this hour is for adding a break.
+
+        Off-peak hours (when fewer buses are needed) get higher weights, making them
+        preferred locations for longer breaks.
+
+        Peak:     07:00-09:00, 16:00-18:00 -> 0.4
+        Shoulder: 09:00-10:00, 14:00-16:00, 18:00-20:00 -> 0.7
+        Off-peak: 10:00-14:00, 20:00-04:00 -> 1.0
+        Early:    04:00-07:00 -> 0.7
+        """
+        if 7 <= hour < 9 or 16 <= hour < 18:
+            return 0.4  # Peak
+        elif 9 <= hour < 10 or 14 <= hour < 16 or 18 <= hour < 20:
+            return 0.7  # Shoulder
+        elif 4 <= hour < 7:
+            return 0.7  # Early morning
+        else:
+            return 1.0  # Off-peak (10-14, 20-04)
+
+    @staticmethod
+    def _interpolate_soc(soc_df: pd.DataFrame, time_val: datetime) -> Optional[float]:
+        """
+        Find the SoC value at the given time by looking up the nearest preceding entry.
+
+        Returns None if the time is before the first entry.
+        """
+        preceding = soc_df[soc_df["time"] <= time_val]
+        if preceding.empty:
+            return None
+        return float(preceding.iloc[-1]["soc"])
+
+    def _compute_global_dwell_time(self, session: Session) -> List[Tuple[int, timedelta]]:
+        """
+        Compute total dwell time per station across all rotations, sorted descending.
+
+        Returns a list of (station_id, total_dwell) tuples, most-dwelled-at first.
+        """
         all_rotations = (
             session.query(Rotation)
             .options(joinedload(Rotation.trips).joinedload(Trip.route))
             .all()
         )
-        for rotation in all_rotations:
-            # We are looking at the break time form an "after trip" perspective, so we skip the first trip
-            for i, trip in enumerate(rotation.trips[:-1]):
-                arrival_station_id = trip.route.arrival_station_id
-                cur_trip_end = trip.arrival_time
-                next_trip_start = rotation.trips[i + 1].departure_time
-                length_of_stay = next_trip_start - cur_trip_end
-                total_length_of_stay_per_station[arrival_station_id] += length_of_stay
+        total_dwell: Dict[int, timedelta] = defaultdict(timedelta)
+        for rot in all_rotations:
+            for i, trip in enumerate(rot.trips[:-1]):
+                station_id = trip.route.arrival_station_id
+                dwell = rot.trips[i + 1].departure_time - trip.arrival_time
+                total_dwell[station_id] += dwell
 
-        # Sort stations by total length of stay descending
-        total_length_of_stay_per_station = OrderedDict(
-            sorted(
-                total_length_of_stay_per_station.items(),
-                key=lambda item: item[1],
-                reverse=True,
-            )
+        return sorted(total_dwell.items(), key=lambda x: x[1], reverse=True)
+
+    def _global_dwell_time_fallback(
+        self,
+        rotation: Rotation,
+        trips: List[Trip],
+        global_dwell: List[Tuple[int, timedelta]],
+    ) -> Optional[int]:
+        """
+        Fallback heuristic: from precomputed global dwell times, find the highest-dwell
+        station that this rotation visits and return the first trip arriving there.
+
+        Parameters:
+        -----------
+        rotation : Rotation
+            The rotation to find a fallback break for
+        trips : List[Trip]
+            Ordered trips of the rotation
+        global_dwell : List[Tuple[int, timedelta]]
+            Precomputed (station_id, total_dwell) pairs sorted descending by dwell time.
+            Obtained from _compute_global_dwell_time().
+        """
+        rotation_stations = {trip.route.arrival_station_id for trip in trips[:-1]}
+
+        for station_id, _ in global_dwell:
+            if station_id in rotation_stations:
+                for trip in trips[:-1]:
+                    if trip.route.arrival_station_id == station_id:
+                        self.logger.info(
+                            f"Fallback: adding break after trip {trip.id} "
+                            f"at station {station_id} (global dwell-time leader)"
+                        )
+                        return trip.id
+        return None
+
+    def _compute_dynamic_break_duration(
+        self,
+        analyzer_result: Dict[str, Any],
+        session: Session,
+        params: Dict[str, Any],
+    ) -> timedelta:
+        """
+        Compute a conservative break duration based on the worst SoC deficit.
+
+        Uses battery capacity and charging power to estimate how much break time
+        is needed, adds a 50% safety margin, and caps between 5 and 15 minutes.
+
+        Parameters:
+        -----------
+        analyzer_result : Dict[str, Any]
+            Result from InsufficientChargingTimeAnalyzer with "soc_data" key
+        session : Session
+            SQLAlchemy session for querying vehicle types
+        params : Dict[str, Any]
+            Pipeline parameters; reads StationElectrification.charging_power_kw
+
+        Raises:
+        -------
+        ValueError
+            If no VehicleType with battery_capacity is found in the scenario
+        """
+        soc_data: Dict[int, Any] = analyzer_result["soc_data"]
+
+        # Find the worst (most negative) SoC across all infeasible rotations
+        worst_soc = 0.0
+        for rot_id, (soc_df, _, _, _) in soc_data.items():
+            min_soc = soc_df["soc"].min()
+            if min_soc < worst_soc:
+                worst_soc = min_soc
+
+        deficit = abs(worst_soc)  # e.g., 0.15 means SoC dipped to -15%
+
+        # Get battery capacity from the first vehicle type in the scenario
+        scenario = session.query(Scenario).one()
+        vehicle_type = (
+            session.query(VehicleType)
+            .join(Rotation)
+            .filter(Rotation.scenario_id == scenario.id)
+            .first()
         )
-
-        # 2) For each rotation with insufficient charging time, find candidate termini for longer breaks
-        trip_ids_to_add_longer_breaks = set()
-        for rotation_id in rotation_ids:
-            rotation = (
-                session.query(Rotation)
-                .filter(Rotation.id == rotation_id)
-                .options(joinedload(Rotation.trips))
-                .one()
+        if vehicle_type is None or vehicle_type.battery_capacity is None:
+            raise ValueError(
+                "Cannot compute dynamic break duration: no VehicleType with "
+                "battery_capacity found in the scenario"
             )
-            candidate_termini_station_ids: Dict[int, int] = defaultdict(
-                int
-            )  # station_id -> count of visits
-            for trip in rotation.trips[:-1]:  # Skip last trip, as no break after it
-                arrival_station_id = trip.route.arrival_station_id
-                candidate_termini_station_ids[arrival_station_id] += 1
+        battery_kwh = vehicle_type.battery_capacity
 
-            # Filter termini that are visited on at least 33% of trips
-            total_trips = len(rotation.trips)
-            filtered_candidate_termini = {
-                station_id: count
-                for station_id, count in candidate_termini_station_ids.items()
-                if count >= total_trips / 3
-            }
-            # If no termini pass the filter, take the top five most visited termini
-            if len(filtered_candidate_termini) < 1:
-                filtered_candidate_termini = dict(
-                    sorted(
-                        candidate_termini_station_ids.items(),
-                        key=lambda item: item[1],
-                        reverse=True,
-                    )[:5]
-                )
-            # 3) From the filtered candidate termini, select the one closest to the global top locations
-            for station_id in total_length_of_stay_per_station.keys():
-                if station_id in filtered_candidate_termini:
-                    # Find the trips that arrive at this station and add them to the list
-                    for trip in rotation.trips:
-                        if trip.route.arrival_station_id == station_id:
-                            trip_ids_to_add_longer_breaks.add(trip.id)
-                            self.logger.info(
-                                f"Adding longer break to trip {trip.id} in rotation {rotation.id} "
-                                f"at station {station_id}"
-                            )
-                    break  # Found the best candidate, move to next rotation
+        charging_power_kw: float = params.get(
+            "StationElectrification.charging_power_kw", DEFAULT_CHARGING_POWER_KW
+        )
+        needed_minutes = deficit * battery_kwh / charging_power_kw * 60
+        needed_minutes *= 1.5  # 50% safety margin
 
-        return trip_ids_to_add_longer_breaks
+        # Clamp between 5 and 15 minutes
+        duration_minutes = max(5.0, min(15.0, needed_minutes))
+        self.logger.info(
+            f"Dynamic break duration: deficit={deficit:.2%}, "
+            f"battery={battery_kwh}kWh, needed={needed_minutes:.1f}min, "
+            f"using={duration_minutes:.1f}min"
+        )
+        return timedelta(minutes=duration_minutes)
 
 
 class VehicleScheduling(Modifier):
@@ -308,7 +625,7 @@ class VehicleScheduling(Modifier):
     in the scenario.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.0.1", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -341,6 +658,11 @@ class VehicleScheduling(Modifier):
     def _get_default_charge_type() -> ChargeType:
         """Get the default charge type."""
         return ChargeType.DEPOT
+
+    @staticmethod
+    def _get_default_save_graphs() -> bool:
+        """Get the default save_graphs setting."""
+        return False
 
     @classmethod
     def document_params(cls) -> Dict[str, str]:
@@ -410,6 +732,33 @@ class VehicleScheduling(Modifier):
             Type: ChargeType
             Example: ChargeType.OPPORTUNITY
             """.strip(),
+            f"{cls.__name__}.save_graphs": """
+            Whether to save optimization graphs to disk for visualization.
+            When enabled, creates GraphML files showing the vehicle scheduling optimization graphs.
+            One file is created per vehicle type.
+
+            Graphs are saved to: PROJECT_ROOT/data/output/scheduling_graphs/<timestamp>/
+            where <timestamp> is in YYYYMMDD_HHMMSS format (e.g., 20260113_145230).
+
+            You can override the output directory by also setting graph_output_dir parameter.
+
+            Default: False
+            Type: bool
+            Example: True
+            """.strip(),
+            f"{cls.__name__}.graph_output_dir": """
+            Optional custom directory path where graph files should be saved.
+            Only used when save_graphs is True.
+
+            If not specified, graphs are saved to:
+            PROJECT_ROOT/data/output/scheduling_graphs/<timestamp>/
+
+            The directory will be created if it doesn't exist.
+
+            Default: None (uses automatic timestamped directory)
+            Type: Optional[str] (path)
+            Example: "/custom/path/to/graphs"
+            """.strip(),
         }
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
@@ -461,6 +810,11 @@ class VehicleScheduling(Modifier):
         charge_type = params.get(
             f"{self.__class__.__name__}.charge_type", self._get_default_charge_type()
         )
+        save_graphs_key = f"{self.__class__.__name__}.save_graphs"
+        graph_output_dir_key = f"{self.__class__.__name__}.graph_output_dir"
+
+        save_graphs = params.get(save_graphs_key, self._get_default_save_graphs())
+        graph_output_dir = params.get(graph_output_dir_key, None)
 
         # Validate parameters
         if not isinstance(minimum_break_time, timedelta):
@@ -489,6 +843,27 @@ class VehicleScheduling(Modifier):
             )
         if not isinstance(charge_type, ChargeType):
             raise ValueError(f"charge_type must be a ChargeType, got {type(charge_type).__name__}")
+
+        # Validate save_graphs parameter
+        if not isinstance(save_graphs, bool):
+            raise ValueError(f"save_graphs must be a boolean, got {type(save_graphs).__name__}")
+
+        # Validate and set up graph_output_dir
+        if save_graphs:
+            if graph_output_dir is None:
+                # Compute default: PROJECT_ROOT/data/output/scheduling_graphs/<timestamp>/
+                project_root = self.find_project_root()
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                graph_output_dir = (
+                    project_root / "data" / "output" / "scheduling_graphs" / timestamp
+                )
+            else:
+                # Validate custom path
+                if not isinstance(graph_output_dir, (str, Path)):
+                    raise ValueError(
+                        f"graph_output_dir must be a string or Path, got {type(graph_output_dir).__name__}"
+                    )
+                graph_output_dir = Path(graph_output_dir)
 
         # Make sure there is just one scenario
         scenario_q = session.query(eflips.model.Scenario)
@@ -533,6 +908,12 @@ class VehicleScheduling(Modifier):
 
         self.logger.info(f"Processing {num_vehicle_types} vehicle type(s)")
 
+        # Create output directory if graph saving is enabled
+        if save_graphs:
+            assert graph_output_dir is not None
+            graph_output_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Saving graphs to: {graph_output_dir}")
+
         # Process each vehicle type separately
         for i, vehicle_type in enumerate(all_vehicle_types):
             self.logger.info(
@@ -562,8 +943,38 @@ class VehicleScheduling(Modifier):
                 f"with {len(graph.nodes)} nodes and {len(graph.edges)} edges"
             )
 
+            # Save graph if requested
+            if save_graphs:
+                # Create filename: {vehicle_type_name}_scheduling_graph.graphml
+                graph_filename = f"{vehicle_type.name_short}_scheduling_graph.graphml"
+                assert graph_output_dir is not None  # For type checking
+                graph_filepath = graph_output_dir / graph_filename
+
+                # Create a copy of the graph and turn the node weight from a tuple into a string for GraphML compatibility
+                graph_copy = graph.copy()
+                for node in graph_copy.nodes:
+                    node_data = graph_copy.nodes[node]
+                    if "weight" in node_data and isinstance(node_data["weight"], tuple):
+                        node_data["weight"] = (
+                            f"{node_data['weight'][0]*100:.2f}% ΔSOC"
+                            if node_data["weight"][0] is not None
+                            else "N/A"
+                        )
+
+                # Save graph to GraphML format
+                try:
+                    nx.write_graphml(graph_copy, str(graph_filepath))
+                    self.logger.info(f"Saved graph to {graph_filepath}")
+                except Exception as e:
+                    self.logger.error(f"Failed to save graph for {vehicle_type.name_short}: {e}")
+                    # Don't raise - graph saving is optional, don't block optimization
+
             # Solve the vehicle scheduling problem
-            rotation_plan = solve(graph)
+            rotation_plan = solve(
+                graph,
+                write_to_file=True if save_graphs else False,
+                maximum_schedule_duration=maximum_schedule_duration,
+            )
             self.logger.info(
                 f"Solved vehicle scheduling for vehicle type {vehicle_type.name_short}"
             )
@@ -594,7 +1005,7 @@ class DepotAssignment(Modifier):
     4. Logs comparison of before/after assignments
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.2.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -882,6 +1293,13 @@ class DepotAssignment(Modifier):
                 f"Final depot usage: {DEPOT_USAGE + STEP_SIZE:.1%}"
             )
 
+        # Restore original capacities to avoid cache invalidation for subsequent modifiers
+        # The depot_config is a reference to params["DepotAssignment.depot_config"], so modifications
+        # persist and affect the cache key computation for downstream modifiers like StationElectrification
+        for depot, orig_cap in zip(depot_config, original_capacities):
+            depot["capacity"] = orig_cap
+        self.logger.debug("Restored original depot capacities to prevent cache invalidation")
+
         # Write optimization results back to the database
         optimizer.write_optimization_results(delete_original_data=True)
 
@@ -903,6 +1321,8 @@ class DepotAssignment(Modifier):
         self.logger.info("Completed logging post-optimization depot assignments")
 
         # Go through all depots (union of pre and post optimization keys) in alphabetical order and list the changes
+        # Also make sure the ChargeType for all active depots is set to DEPOT, as the optimizer assumes this and the StationElectrification modifier relies on it
+        # Unset for depots that are no longer active, to avoid confusion
         all_stations = set(pre_optimization_assignments.keys()).union(
             post_optimization_assignments.keys()
         )
@@ -946,6 +1366,22 @@ class DepotAssignment(Modifier):
             )
 
 
+def _electrify_station(
+    station: Station,
+    charge_type: ChargeType,
+    power_per_charger: float,
+    amount_charging_places: int = 1000,
+    voltage_level: VoltageLevel = VoltageLevel.MV,
+) -> None:
+    """Electrify a single station with the given charging parameters."""
+    station.is_electrified = True
+    station.charge_type = charge_type
+    station.amount_charging_places = amount_charging_places
+    station.power_per_charger = power_per_charger
+    station.power_total = amount_charging_places * power_per_charger
+    station.voltage_level = voltage_level
+
+
 class InsufficientChargingTimeAnalyzer(Analyzer):
     """
     Analyze whether rotations have sufficient charging time throughout the day.
@@ -955,11 +1391,11 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
     If rotations end with negative SOC, it indicates that the schedule needs more slack
     time for charging, and a new schedule with more break time should be created.
 
-    Returns None if all rotations have sufficient charging time (SOC >= 0 at end of day),
-    or a list of rotation IDs that end with SOC below zero.
+    Returns None if all rotations have sufficient charging time (SOC >= 0 throughout the day),
+    or a list of rotation IDs that have SOC below zero at any point during their schedule.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.3.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -976,16 +1412,26 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
         return {
             cls.__name__
             + ".charging_power_kw": """
-            The charging power in kW to assume for all charging stations during the analysis. Default is 150 kW.
-            """.strip()
+            The charging power in kW to assume for all charging stations during the analysis. Default is 450 kW.
+            """.strip(),
+            "terminus_deadtime_s": """
+            Global parameter: the total time overhead in seconds (attach + detach) for
+            charging at the terminus. If the layover between trips is shorter than this,
+            no charging is performed. This parameter is shared across StationElectrification,
+            InsufficientChargingTimeAnalyzer, and Simulation.
+
+            Default: 60.0
+            Type: float
+            Example: 90.0
+            """.strip(),
         }
 
     @classmethod
     def _get_default_charging_power_kw(cls) -> float:
         """Get the default charging power in kW."""
-        return 450.0
+        return DEFAULT_CHARGING_POWER_KW
 
-    def analyze(self, session: Session, params: Dict[str, Any]) -> List[int] | None:
+    def analyze(self, session: Session, params: Dict[str, Any]) -> Dict[str, Any] | None:
         """
         Check if rotations have sufficient charging time throughout the day.
 
@@ -1005,10 +1451,11 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
 
         Returns:
         --------
-        List[int] | None
-            - None if all rotations have sufficient charging time (SOC >= 0)
-            - List[int] of rotation IDs that end with SOC < 0, indicating insufficient
-              charging time and the need for a new schedule with more slack
+        Dict[str, Any] | None
+            None if all rotations have sufficient charging time (SOC >= 0).
+            Otherwise a dict with keys ``"rotation_ids"`` (List[int] of failing rotation IDs)
+            and ``"soc_data"`` (dict mapping each failing rotation ID to a tuple of
+            soc_df, event_spans, rot_start, rot_end for plotting).
 
         Raises:
         -------
@@ -1035,99 +1482,115 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
         charging_power = params.get(
             f"{self.__class__.__name__}.charging_power_kw", self._get_default_charging_power_kw()
         )
+        terminus_deadtime_s: float = params.get("terminus_deadtime_s", 60.0)
 
         # Electrify Depots
-        depot_q = (
+        depot_stations = (
             session.query(Station)
             .filter(Station.scenario_id == scenario.id)
             .filter(Station.charge_type == ChargeType.DEPOT)
+            .all()
         )
-        depot_q.update(
-            {
-                "is_electrified": True,
-                "amount_charging_places": 1000,
-                "power_per_charger": charging_power,
-                "power_total": 1000 * charging_power,
-                "charge_type": ChargeType.DEPOT,
-                "voltage_level": VoltageLevel.MV,
-            }
-        )
+        for s in depot_stations:
+            _electrify_station(s, ChargeType.DEPOT, charging_power)
 
         # Electrify All termini
-        station_q = (
+        terminus_stations = (
             session.query(Station)
             .filter(Station.scenario_id == scenario.id)
             .filter(or_(Station.charge_type == None, Station.charge_type != ChargeType.DEPOT))
+            .all()
         )
-        station_q.update(
-            {
-                "is_electrified": True,
-                "amount_charging_places": 1000,
-                "power_per_charger": charging_power,
-                "power_total": 1000 * charging_power,
-                "charge_type": ChargeType.OPPORTUNITY,
-                "voltage_level": VoltageLevel.MV,
-            }
-        )
+        for s in terminus_stations:
+            _electrify_station(s, ChargeType.OPPORTUNITY, charging_power)
 
         # Generate consumption results
         consumption_results = generate_consumption_result(scenario)
 
         # Run consumption simulation
         simple_consumption_simulation(
-            scenario=scenario, initialize_vehicles=True, consumption_result=consumption_results
+            scenario=scenario,
+            initialize_vehicles=True,
+            consumption_result=consumption_results,
+            terminus_deadtime=timedelta(seconds=terminus_deadtime_s),
         )
 
-        # Load all rotations with their trips eagerly to avoid N+1 queries
-        all_rotations = (
-            session.query(Rotation)
+        # Check ALL driving events for negative SOC, not just the final one.
+        # A rotation that dips below 0% mid-day is infeasible even if it recovers
+        # by end of day (the bus would have been stranded).
+        rotations_with_low_soc_q = (
+            session.query(Rotation.id)
+            .join(Trip)
+            .join(Event)
             .filter(Rotation.scenario_id == scenario.id)
-            .options(joinedload(Rotation.trips))
-            .all()
+            .filter(Event.event_type == EventType.DRIVING)
+            .filter(Event.soc_end < 0)
+            .distinct()
         )
-
-        # For each rotation, find the last trip and check its final SOC
-        rotations_with_low_soc = []
-
-        for rotation in all_rotations:
-            if not rotation.trips:
-                self.logger.warning(f"Rotation {rotation.id} has no trips, skipping")
-                continue
-
-            # Get the last trip
-            last_trip = rotation.trips[-1]
-
-            # Find the last driving event for this trip
-            last_driving_event = (
-                session.query(Event)
-                .filter(Event.trip_id == last_trip.id)
-                .filter(Event.event_type == EventType.DRIVING)
-                .order_by(Event.time_end.desc())
-                .first()
-            )
-
-            if last_driving_event is None:
-                self.logger.warning(
-                    f"Rotation {rotation.id}, last trip {last_trip.id} has no driving events, skipping"
-                )
-                continue
-
-            # Check if the final SOC is below zero
-            if last_driving_event.soc_end < 0:
-                rotations_with_low_soc.append(rotation.id)
-                self.logger.debug(
-                    f"Rotation {rotation.id} ends with SOC {last_driving_event.soc_end:.2%} < 0"
-                )
+        rotations_with_low_soc = [rid for (rid,) in rotations_with_low_soc_q.all()]
 
         if rotations_with_low_soc:
+            # Log details and build SoC plot data for each failing rotation
+            label_map = {
+                EventType.DRIVING: "Driving",
+                EventType.CHARGING_DEPOT: "Depot Charging",
+                EventType.CHARGING_OPPORTUNITY: "Terminus Charging",
+            }
+            soc_data: Dict[int, Any] = {}
+
+            for rot_id in rotations_with_low_soc:
+                rotation = (
+                    session.query(Rotation)
+                    .filter(Rotation.id == rot_id)
+                    .options(joinedload(Rotation.trips))
+                    .one()
+                )
+                min_soc = (
+                    session.query(func.min(Event.soc_end))
+                    .join(Trip)
+                    .join(Rotation)
+                    .filter(Rotation.id == rot_id)
+                    .filter(Event.event_type == EventType.DRIVING)
+                    .scalar()
+                )
+                self.logger.warning(
+                    f"Rotation {rot_id} has minimum SOC {min_soc:.2%} even with all "
+                    f"stations electrified"
+                )
+
+                # Build SoC timeseries from the rotation's vehicle events
+                vehicle_id = rotation.vehicle_id
+                events = (
+                    session.query(Event)
+                    .filter(Event.vehicle_id == vehicle_id)
+                    .order_by(Event.time_start)
+                    .all()
+                )
+                rows = []
+                for e in events:
+                    rows.append({"time": e.time_start, "soc": e.soc_start})
+                    rows.append({"time": e.time_end, "soc": e.soc_end})
+                soc_df = pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
+
+                event_spans = [
+                    (label_map[e.event_type], e.time_start, e.time_end)
+                    for e in events
+                    if e.event_type in label_map
+                ]
+
+                rot_start = rotation.trips[0].departure_time
+                rot_end = rotation.trips[-1].arrival_time
+                soc_data[rot_id] = (soc_df, event_spans, rot_start, rot_end)
+
             self.logger.warning(
                 f"Found {len(rotations_with_low_soc)} rotation(s) with insufficient charging time "
-                f"(ending with SOC < 0): {rotations_with_low_soc}"
+                f"(SOC < 0 at some point during the day, even with all stations electrified): "
+                f"{rotations_with_low_soc}"
             )
-            return rotations_with_low_soc
+            return {"rotation_ids": rotations_with_low_soc, "soc_data": soc_data}
         else:
             self.logger.info(
-                "All rotations have sufficient charging time (SOC >= 0 at end of day)"
+                "All rotations have sufficient charging time (SOC >= 0 throughout the day)"
             )
             return None
 
@@ -1138,20 +1601,21 @@ class StationElectrification(Modifier):
 
     This modifier iteratively adds charging infrastructure at strategic termini until all
     rotations can complete their schedules without running below 0% SOC. It uses a heuristic
-    approach to select stations where rotations with low SOC spend the most time.
+    approach to select stations where rotations with low SOC spend the most time, weighted
+    by the severity of each rotation's SOC deficit.
 
     The modifier incorporates the logic from the original do_station_electrification() function
     and the utility functions from util_station_electrification module.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v2.0.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
     @staticmethod
     def _get_default_charging_power_kw() -> float:
         """Get the default charging power in kW."""
-        return 450.0
+        return DEFAULT_CHARGING_POWER_KW
 
     def _get_default_max_stations(self, session: Session) -> int:
         """Get the default maximum number of stations to electrify (25% of termini)."""
@@ -1189,6 +1653,16 @@ class StationElectrification(Modifier):
             Default: 25% of all termini in the network (minimum 1)
             Type: int
             Example: 50
+            """.strip(),
+            "terminus_deadtime_s": """
+            Global parameter: the total time overhead in seconds (attach + detach) for
+            charging at the terminus. If the layover between trips is shorter than this,
+            no charging is performed. This parameter is shared across StationElectrification,
+            InsufficientChargingTimeAnalyzer, and Simulation.
+
+            Default: 60.0
+            Type: float
+            Example: 90.0
             """.strip(),
         }
 
@@ -1254,12 +1728,9 @@ class StationElectrification(Modifier):
             if start != end:
                 raise ValueError(f"Start and end station are not the same: {start} != {end}")
             if not start.is_electrified:
-                start.is_electrified = True
-                start.amount_charging_places = 100
-                start.power_per_charger = 300
-                start.power_total = start.amount_charging_places * start.power_per_charger
-                start.charge_type = ChargeType.DEPOT
-                start.voltage_level = VoltageLevel.MV
+                _electrify_station(
+                    start, ChargeType.DEPOT, power_per_charger=300, amount_charging_places=100
+                )
 
     def modify(self, session: Session, params: Dict[str, Any]) -> None:
         """
@@ -1297,6 +1768,7 @@ class StationElectrification(Modifier):
 
         charging_power = params.get(charging_power_key, self._get_default_charging_power_kw())
         max_stations = params.get(max_stations_key, self._get_default_max_stations(session))
+        terminus_deadtime_s: float = params.get("terminus_deadtime_s", 60.0)
 
         # Validate charging power
         if not isinstance(charging_power, (int, float)):
@@ -1344,8 +1816,21 @@ class StationElectrification(Modifier):
         # Make the depots electrified
         self._make_depot_stations_electrified(scenario, session)
 
+        # Compute consumption results ONCE before the loop. The driving energy consumption
+        # (delta_soc per trip) is constant across iterations — only opportunity charging
+        # at newly-electrified stations changes between iterations.
+        consumption_results = generate_consumption_result(scenario)
+        # generate_consumption_result may have detached our scenario object from the session
+        session.add(scenario)
+        session.flush()
+
         # Remove terminus charging from rotations that don't need it
-        self._remove_terminus_charging_from_okay_rotations(scenario, session)
+        self._remove_terminus_charging_from_okay_rotations(
+            scenario,
+            session,
+            consumption_results=consumption_results,
+            terminus_deadtime_s=terminus_deadtime_s,
+        )
 
         # Track number of stations electrified
         stations_electrified = 0
@@ -1369,11 +1854,13 @@ class StationElectrification(Modifier):
                 )
 
             savepoint = session.begin_nested()
-            # Run the consumption model to assess current SOC levels
+            # Run the consumption simulation to assess current SOC levels
             try:
-                consumption_results = generate_consumption_result(scenario)
                 simple_consumption_simulation(
-                    scenario, initialize_vehicles=True, consumption_result=consumption_results
+                    scenario,
+                    initialize_vehicles=True,
+                    consumption_result=consumption_results,
+                    terminus_deadtime=timedelta(seconds=terminus_deadtime_s),
                 )
 
                 if self.logger.isEnabledFor(logging.INFO):
@@ -1409,7 +1896,9 @@ class StationElectrification(Modifier):
                     # All rotations are feasible now
                     break
 
-                electrified_station_id = self._identify_charging_station_to_add(scenario, session)
+                electrified_station_id = self._identify_charging_station_to_add(
+                    scenario, session, terminus_deadtime_s=terminus_deadtime_s
+                )
 
                 if electrified_station_id is None:
                     num_rotations_failing = self._number_of_rotations_below_zero(scenario, session)
@@ -1459,6 +1948,8 @@ class StationElectrification(Modifier):
         self,
         scenario: Scenario,
         session: Session,
+        consumption_results: Optional[Dict[str, Any]] = None,
+        terminus_deadtime_s: float = 60.0,
     ) -> None:
         """
         Run the consumption model and remove terminus charging from rotations that don't need it.
@@ -1469,23 +1960,28 @@ class StationElectrification(Modifier):
             The scenario to process
         session : Session
             An open database session
+        consumption_results : Optional[Dict]
+            Pre-computed consumption results. If None, they will be computed here.
+        terminus_deadtime_s : float
+            Terminus deadtime in seconds. Passed through to simple_consumption_simulation.
         """
 
         self.logger.info("Removing terminus charging from rotations that don't need it")
 
         savepoint = session.begin_nested()
         try:
-            # Run the consumption model
-            consumption_results = generate_consumption_result(scenario)
-
-            # `create_consumption_results` may have detached our scenario object from the session
-            session.add(scenario)
-            session.flush()
+            # Use pre-computed consumption results if available, otherwise compute them
+            if consumption_results is None:
+                consumption_results = generate_consumption_result(scenario)
+                # generate_consumption_result may have detached our scenario object from the session
+                session.add(scenario)
+                session.flush()
 
             simple_consumption_simulation(
                 initialize_vehicles=True,
                 scenario=scenario,
                 consumption_result=consumption_results,
+                terminus_deadtime=timedelta(seconds=terminus_deadtime_s),
             )
 
             # Get the rotations with low SoC
@@ -1553,12 +2049,14 @@ class StationElectrification(Modifier):
         self,
         scenario: Scenario,
         session: Session,
+        terminus_deadtime_s: float = 60.0,
     ) -> int | None:
         """
         Identify a charging station to add based on heuristic.
 
-        The heuristic selects the station where rotations with negative SoC spend the most time.
-        If the selected station is already electrified, the next best station is selected.
+        The heuristic scores each candidate station by the total break time spent there by
+        low-SOC rotations, weighted by the severity of each rotation's SOC deficit. Breaks
+        shorter than terminus_deadtime_s are excluded since no charging would occur there.
 
         Parameters:
         -----------
@@ -1566,8 +2064,8 @@ class StationElectrification(Modifier):
             The scenario to add the charging station to
         session : Session
             An open database session
-        power : float
-            The power of the charging station in kW
+        terminus_deadtime_s : float
+            Terminus deadtime in seconds. Breaks shorter than this are excluded from scoring.
 
         Returns:
         --------
@@ -1587,22 +2085,40 @@ class StationElectrification(Modifier):
             .all()
         )
 
-        # For these rotations, find all arrival stations except the last one (depot)
-        # Sum up the time spent at each station
-        total_break_time_by_station: typing.Counter[int] = Counter()
+        # Get worst SOC per failing rotation to weight by deficit severity
+        worst_soc_by_rotation: Dict[int, float] = {}
         for rotation in rotations_with_low_soc:
+            min_soc = (
+                session.query(func.min(Event.soc_end))
+                .join(Trip)
+                .filter(Trip.rotation_id == rotation.id)
+                .filter(Event.event_type == EventType.DRIVING)
+                .scalar()
+            )
+            worst_soc_by_rotation[rotation.id] = abs(min_soc) if min_soc is not None else 0
+
+        # Score stations: break_time * abs(worst_soc) for each visiting low-SOC rotation.
+        # Breaks shorter than terminus_deadtime are excluded since no charging would occur.
+        station_scores: Dict[int, float] = defaultdict(float)
+        for rotation in rotations_with_low_soc:
+            weight = worst_soc_by_rotation[rotation.id]
             for i in range(len(rotation.trips) - 1):
                 trip = rotation.trips[i]
-                total_break_time_by_station[trip.route.arrival_station_id] += int(
-                    (rotation.trips[i + 1].departure_time - trip.arrival_time).total_seconds()
-                )
+                break_time = (
+                    rotation.trips[i + 1].departure_time - trip.arrival_time
+                ).total_seconds()
+                if break_time <= terminus_deadtime_s:
+                    continue
+                station_scores[trip.route.arrival_station_id] += break_time * weight
 
         # If all stations have a score of 0, we can't add any more stations
-        if all(v == 0 for v in total_break_time_by_station.values()):
+        if all(v == 0 for v in station_scores.values()):
             return None
 
         # Select the station with the highest score that isn't already electrified
-        for most_popular_station_id, _ in total_break_time_by_station.most_common():
+        for most_popular_station_id in sorted(
+            station_scores, key=station_scores.get, reverse=True  # type: ignore[arg-type]
+        ):
             station: Station = (
                 session.query(Station).filter(Station.id == most_popular_station_id).one()
             )

@@ -17,8 +17,7 @@ import plotly.graph_objs as go  # type: ignore
 import sqlalchemy
 from eflips.eval.input import prepare as eval_input_prepare
 from eflips.eval.input import visualize as eval_input_visualize
-
-from eflips.eval.output import prepare as eval_output_prepare
+from eflips.eval.input.route_options import RouteCalculationMode
 from eflips.model import Scenario
 from sqlalchemy.orm import Session
 
@@ -128,7 +127,7 @@ class GeographicTripPlotAnalyzer(Analyzer):
     - line_name: the name of the line, which is the first part of the rotation name. Used for sorting
     """
 
-    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v1.0.7", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -142,21 +141,20 @@ Optional parameter to filter rotations. Can be:
 
 Example: `params[f"{cls.__name__}.rotation_ids"] = [1, 2, 3]`
             """.strip(),
-            f"{cls.__name__}.plot_charging_station": f"""
-        Boolean flag to indicate whether to include charging station locations in the plot. Default is False.
-
-        Example: `params[f"{cls.__name__}.plot_charging_station"] = False`
-                    """.strip(),
-            f"{cls.__name__}.plot_depot_charger_count": f"""
-                Boolean flag to indicate whether to plot depot charger count. Default is False.
-
-                Example: `params[f"{cls.__name__}.plot_depot_charger_count"] = False`
-                            """.strip(),
+            f"{cls.__name__}.route_calculation_mode": f"""
+Optional parameter to specify the route calculation mode. Can be one of:
+    - STATIONS_ONLY: Use station points only
+    - ROUTE_SHAPES: Use Route.geom if available, fallback to stations (default)
+    - ROUTE_SHAPES_AND_GEO_LOOKUP: Use Route.geom if available, else lookup via OpenRouteService API
+        """.strip(),
+            f"{cls.__name__}.passenger_trips_only": f"""
+Optional boolean parameter to include only passenger trips. Default is True.
+        """.strip(),
         }
 
     def analyze(
         self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> pd.DataFrame:
         """
         This function creates a dataframe that can be used to visualize the geographic distribution of rotations. It creates
         a dataframe with one row for each trip and the following columns:
@@ -178,40 +176,31 @@ Example: `params[f"{cls.__name__}.rotation_ids"] = [1, 2, 3]`
         scenario = session.query(Scenario).one()
         scenario_id = scenario.id
 
-        result = {}
-
         # Extract parameters
         rotation_ids = params.get(f"{self.__class__.__name__}.rotation_ids", None)
 
+        route_calculation_mode = params.get(
+            f"{self.__class__.__name__}.route_calculation_mode",
+            RouteCalculationMode.ROUTE_SHAPES_AND_GEO_LOOKUP,
+        )
+        if isinstance(route_calculation_mode, str):
+            route_calculation_mode = RouteCalculationMode[route_calculation_mode]
+
+        passenger_trips_only = params.get(f"{self.__class__.__name__}.passenger_trips_only", True)
+
         # Call eflips-eval prepare function
-        trip_data = eval_input_prepare.geographic_trip_plot(scenario_id, session, rotation_ids)
-        result["trip_data"] = trip_data
-
-        # Optionally include charging station data
-        plot_charging_station = params.get(
-            f"{self.__class__.__name__}.plot_charging_station", False
+        result = eval_input_prepare.geographic_trip_plot(
+            scenario_id=scenario_id,
+            session=session,
+            rotation_ids=rotation_ids,
+            route_calculation_mode=RouteCalculationMode.ROUTE_SHAPES,
+            passenger_trips_only=passenger_trips_only,
         )
-        if plot_charging_station:
-            charging_station_data = eval_output_prepare.charging_station_coordinates(
-                scenario_id, session
-            )
-
-            result["charging_station_data"] = charging_station_data
-
-        # Optionally include depot charger count data
-        plot_depot_charger_count = params.get(
-            f"{self.__class__.__name__}.plot_depot_charger_count", False
-        )
-
-        if plot_depot_charger_count:
-
-            depot_data = eval_output_prepare.depot_charger_count(scenario_id, session)
-            result["depot_data"] = depot_data
 
         return result
 
     @staticmethod
-    def visualize(prepared_data: Dict[str, pd.DataFrame]) -> folium.Map:
+    def visualize(prepared_data: pd.DataFrame) -> folium.Map:
         """
         Visualize trips on a map using folium.
 
@@ -221,16 +210,7 @@ Example: `params[f"{cls.__name__}.rotation_ids"] = [1, 2, 3]`
         Returns:
             Folium map object
         """
-
-        trip_data = prepared_data["trip_data"]
-        charging_station_data = prepared_data.get("charging_station_data", None)
-        depot_data = prepared_data.get("depot_data", None)
-
-        return eval_input_visualize.geographic_trip_plot(
-            prepared_data=trip_data,
-            charging_station_data=charging_station_data,
-            depot_charger_data=depot_data,
-        )
+        return eval_input_visualize.geographic_trip_plot(prepared_data)
 
 
 class SingleRotationInfoAnalyzer(Analyzer):

@@ -173,7 +173,7 @@ def vbb_gtfs_flow() -> None:
 
     ### Step 6: Vehicle Scheduling ###
     # Configure scheduling parameters
-    params["VehicleScheduling.charge_type"] = ChargeType.DEPOT
+    params["VehicleScheduling.charge_type"] = ChargeType.OPPORTUNITY
     params["VehicleScheduling.minimum_break_time"] = timedelta(minutes=0)
     params["VehicleScheduling.maximum_schedule_duration"] = timedelta(hours=24)
     scheduling_steps.append(VehicleScheduling())
@@ -216,7 +216,7 @@ def vbb_gtfs_flow() -> None:
     params["Simulation.repetition_period"] = timedelta(weeks=1)
     # Custom setting to enable smart charging
     params["Simulation.smart_charging"] = (
-        SmartChargingStrategy.NONE
+        SmartChargingStrategy.EVEN
     )  # TODO: Change to EVEN when available
     scheduling_steps.append(Simulation())
 

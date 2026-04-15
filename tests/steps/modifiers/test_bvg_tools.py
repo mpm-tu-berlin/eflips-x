@@ -1290,11 +1290,12 @@ class TestReduceToNDaysNDepots:
         rotations = db_session.query(Rotation).all()
         assert len(rotations) == 2
 
-        # Verify it's from the correct day and depot
+        # With default preferred_weekdays=[2,3] (Tue/Wed), Jan 2 (Tuesday) is the busiest
+        # preferred day (6 trips vs Jan 3 Wed with 4 trips), so it should be kept.
         kept_rotation = rotations[0]
         first_trip = kept_rotation.trips[0]
-        assert first_trip.departure_time.date() == datetime(2024, 1, 1).date()
-        assert first_trip.route.departure_station.name_short in ["D1", "D2"]
+        assert first_trip.departure_time.date() == datetime(2024, 1, 2).date()
+        assert first_trip.route.departure_station.name_short in ["D1", "D3"]
 
     def test_reduce_to_custom_days_depots(
         self, temp_db: Path, scenario_with_multiple_days_depots, db_session: Session

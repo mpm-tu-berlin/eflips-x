@@ -64,6 +64,36 @@ class PipelineContext:
             db_engine.dispose()
 
 
+@dataclass
+class ScenarioDisplayConfig:
+    """Configuration for scenario ordering and display names in multi-scenario visualizations.
+
+    Pass as a global parameter via ``params["scenario_display_config"]``.
+    Analyzers and merge functions use this to sort scenarios consistently
+    and map internal codes to human-readable names.
+    """
+
+    order: List[str]
+    display_names: Dict[str, str] = field(default_factory=dict)
+    baseline: Optional[str] = None
+
+    def sort_key(self, scenario_name: str) -> int:
+        """Return sort position for a scenario name. Unknown scenarios sort last."""
+        try:
+            return self.order.index(scenario_name)
+        except ValueError:
+            return len(self.order)
+
+    def display_name(self, scenario_name: str) -> str:
+        """Return display name, falling back to the raw scenario name."""
+        return self.display_names.get(scenario_name, scenario_name)
+
+
+def get_scenario_display_config(params: Dict[str, Any]) -> Optional["ScenarioDisplayConfig"]:
+    """Retrieve :class:`ScenarioDisplayConfig` from pipeline params, or ``None`` if not set."""
+    return params.get("scenario_display_config")
+
+
 class PrefectTask(Protocol):
     """Here, we specify the function signature for Prefect tasks used in PipelineStep."""
 
@@ -165,6 +195,16 @@ class PipelineStep(ABC):
 
         assert self._prefect_task is not None
         self._prefect_task(context=context, output_db=output_db)
+
+        # After a Prefect cache hit, the output database may have been deleted by the user.
+        # Treat a missing output database as a cache invalidation decision and re-run.
+        if not output_db.exists():
+            self.logger.info(
+                f"{self.__class__.__name__}: output database not found at '{output_db}' after a "
+                f"Prefect cache hit. The file was likely deleted by the user, which is interpreted "
+                f"as a cache invalidation decision. Re-running the step now."
+            )
+            self.execute_impl(context=context, output_db=output_db)
 
         context.set_current_db(output_db)
 

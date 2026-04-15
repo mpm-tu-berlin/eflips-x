@@ -9,22 +9,18 @@ license = {text = "AGPL-3.0-or-later"}
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "eflips-ingest",
+    "eflips-model",
     "eflips-depot",
-
+    "eflips-ingest",
+    "eflips-eval",
+    "eflips-opt (>=1.0.0)",
+    "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@feature/revenue-km",
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
     "fuzzywuzzy (>=0.18.0,<0.19.0)",
     "python-levenshtein (>=0.27.1,<0.28.0)",
-
-    "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@feature/refactor-parameter-inputs",
-    "eflips-opt @ git+https://github.com/mpm-tu-berlin/eflips-opt.git@feature/transition-planning",
-    "eflips-model @ git+https://github.com/mpm-tu-berlin/eflips-model.git@personal/shuyao_heterogeneous_fleet",
-    "eflips-eval @ git+https://github.com/mpm-tu-berlin/eflips-eval.git@personal/shuyao_heterogeneous_fleet",
-
-
-
-
-
+    "cartopy (>=0.25.0,<0.26.0)",
+    "pandas (>=2.0)",
+    "openpyxl (>=3.1.0)",
 ]
 
 [tool.poetry]
@@ -34,13 +30,15 @@ package-mode = false
 mypy = "^1.16.1"
 black = "^25.1.0"
 pandas-stubs = "^2.3.2.250827"
-pytest = "^8.4.2"
+pytest = "^9.0.3"
 pytest-pycharm = "^0.7.0"
 sphinx-autoapi = "^3.6.1"
 sphinx-paramlinks = "^0.6.0"
 pydocstringformatter = "^0.7.5"
 pytest-xdist = "^3.8.0"
-pytest-split = "^0.10.0"
+pytest-split = "^0.11.0"
+coverage = "^7.13.5"
+pytest-cov = "^7.0.0"
 
 
 
@@ -57,6 +55,13 @@ pytest-split = "^0.10.0"
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.coverage.run]
+source = ["eflips/x"]
+omit = ["eflips/x/flows/*"]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.black]
 line-length = 99
