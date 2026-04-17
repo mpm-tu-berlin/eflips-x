@@ -67,8 +67,10 @@ class TestGTFSIngester:
         assert f"{ingester.__class__.__name__}.bus_only" in params
 
     def test_auto_select_start_date(self, sample_gtfs_file: Path):
-        """Test the auto date selection method."""
-        start_date = GTFSIngester._auto_select_start_date(sample_gtfs_file)
+        """Test the auto date selection method (global fallback path)."""
+        start_date = GTFSIngester._auto_select_start_date(
+            sample_gtfs_file, agency_name="", bus_only=False
+        )
 
         # Should return a valid ISO 8601 date string
         assert isinstance(start_date, str)

@@ -3,33 +3,43 @@
 from datetime import timedelta
 from pathlib import Path
 
+import eflips.model
 import pytest
 from eflips.depot.api import DepotConfigurationWish, SmartChargingStrategy
 from eflips.model import Scenario, Depot, Area, Process, Station, Rotation, Event
 from sqlalchemy.orm import Session
 
 from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
-from tests.util import multi_depot_scenario
 
 
 class TestDepotGenerator:
     """Test suite for DepotGenerator modifier."""
 
+    # ------------------------------------------------------------------
+    # Fixture overrides: use the module-scoped small_multi_depot_db from
+    # tests/steps/conftest.py so multi_depot_scenario() runs once per
+    # module instead of once per test.
+    # ------------------------------------------------------------------
+
+    @pytest.fixture
+    def temp_db(self, writable_scenario_db: Path) -> Path:
+        return writable_scenario_db
+
+    @pytest.fixture
+    def db_session(self, writable_scenario_db: Path):
+        db_url = f"sqlite:///{writable_scenario_db.absolute().as_posix()}"
+        engine = eflips.model.create_engine(db_url)
+        session = Session(engine)
+        yield session
+        session.close()
+        engine.dispose()
+
     @pytest.fixture
     def test_scenario(self, db_session: Session) -> Scenario:
-        """Create a test scenario with multi-depot network, but delete Depot objects."""
-        scenario = multi_depot_scenario(
-            db_session,
-            num_depots=2,
-            lines_per_depot=4,
-            trips_per_line=10,
-        )
-
-        # Delete the Depot objects created by multi_depot_scenario
-        # DepotGenerator should create them
+        """Use the pre-built scenario and delete Depot objects so DepotGenerator can create them."""
+        scenario = db_session.query(Scenario).one()
         db_session.query(Depot).filter_by(scenario_id=scenario.id).delete()
         db_session.commit()
-
         return scenario
 
     def _get_depot_stations(self, db_session: Session, scenario: Scenario) -> list[Station]:
@@ -308,6 +318,11 @@ class TestDepotGenerator:
 
     def test_depot_generator_no_scenario_error(self, temp_db: Path, db_session: Session):
         """Test that missing scenario raises an error."""
+        db_session.query(Rotation).delete()
+        db_session.query(Depot).delete()
+        db_session.query(Scenario).delete()
+        db_session.commit()
+
         modifier = DepotGenerator()
 
         with pytest.raises(ValueError, match="No scenario found in the database"):
@@ -315,17 +330,13 @@ class TestDepotGenerator:
 
     def test_depot_generator_multiple_scenarios_error(self, temp_db: Path, db_session: Session):
         """Test that multiple scenarios raise an error."""
-        # Create two scenarios
-        scenario1 = Scenario(name="Scenario 1", name_short="S1")
-        scenario2 = Scenario(name="Scenario 2", name_short="S2")
-        db_session.add_all([scenario1, scenario2])
+        scenario2 = Scenario(name="Extra Scenario", name_short="EXTRA")
+        db_session.add(scenario2)
         db_session.commit()
 
         modifier = DepotGenerator()
 
-        with pytest.raises(
-            ValueError, match="Expected exactly one scenario in the database, found 2"
-        ):
+        with pytest.raises(ValueError, match="Expected exactly one scenario in the database"):
             modifier.modify(session=db_session, params={})
 
     def test_depot_generator_default_properties(self):
@@ -433,28 +444,36 @@ class TestDepotGenerator:
 class TestSimulation:
     """Test suite for Simulation modifier."""
 
+    # ------------------------------------------------------------------
+    # Fixture overrides: use the module-scoped small_multi_depot_db from
+    # tests/steps/conftest.py so multi_depot_scenario() runs once per
+    # module instead of once per test.
+    # ------------------------------------------------------------------
+
+    @pytest.fixture
+    def temp_db(self, writable_scenario_db: Path) -> Path:
+        return writable_scenario_db
+
+    @pytest.fixture
+    def db_session(self, writable_scenario_db: Path):
+        db_url = f"sqlite:///{writable_scenario_db.absolute().as_posix()}"
+        engine = eflips.model.create_engine(db_url)
+        session = Session(engine)
+        yield session
+        session.close()
+        engine.dispose()
+
     @pytest.fixture
     def simulation_scenario(self, db_session: Session) -> Scenario:
-        """Create a test scenario with depot infrastructure ready for simulation."""
-        # Create the base scenario with rotations
-        scenario = multi_depot_scenario(
-            db_session,
-            num_depots=2,
-            lines_per_depot=4,
-            trips_per_line=10,
-        )
+        """Set up depot infrastructure on the writable scenario copy, ready for simulation."""
+        scenario = db_session.query(Scenario).one()
 
-        # Delete Depot objects created by multi_depot_scenario
+        # Delete Depot objects created by multi_depot_scenario; DepotGenerator recreates them
         db_session.query(Depot).filter_by(scenario_id=scenario.id).delete()
         db_session.commit()
 
-        # Generate depot infrastructure
-        depot_generator = DepotGenerator()
-        depot_generator.modify(
-            session=db_session,
-            params={
-                "DepotGenerator.charging_power_kw": 150.0,
-            },
+        DepotGenerator().modify(
+            session=db_session, params={"DepotGenerator.charging_power_kw": 150.0}
         )
         db_session.commit()
 

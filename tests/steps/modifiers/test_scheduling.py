@@ -2,9 +2,8 @@
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from tempfile import gettempdir
-from zipfile import ZipFile
 
+import eflips.model
 import pytest
 import pytz
 from eflips.depot.api import generate_consumption_result, simple_consumption_simulation
@@ -24,7 +23,6 @@ from geoalchemy2.shape import from_shape
 from shapely import Point
 from sqlalchemy.orm import Session
 
-from eflips.x.steps.generators import BVGXMLIngester
 from eflips.x.steps.modifiers.scheduling import (
     VehicleScheduling,
     DepotAssignment,
@@ -38,65 +36,29 @@ import os
 class TestVehicleScheduling:
     """Test suite for VehicleScheduling modifier."""
 
+    # ------------------------------------------------------------------
+    # Fixture overrides: use the module-scoped bvg_xml_scenario_db from
+    # tests/steps/modifiers/conftest.py so BVG XML ingestion happens once
+    # per module rather than once per test.
+    # ------------------------------------------------------------------
+
     @pytest.fixture
-    def scenario_with_vehicle_types(self, db_session: Session, test_data_dir: Path) -> Scenario:
-        """
-        Create a test scenario with vehicle types and rotations.
-        Uses BVGXMLIngester to load Berlin Testing data.
-        """
-        # Get XML files from test data directory
-        xml_files = sorted(test_data_dir.glob("*.xml"))
-        assert len(xml_files) > 0, f"No XML files found in {test_data_dir}"
+    def temp_db(self, writable_bvg_scenario_db: Path) -> Path:
+        return writable_bvg_scenario_db
 
-        # Use only a subset of files for faster testing
-        xml_files = xml_files[:3]
+    @pytest.fixture
+    def db_session(self, writable_bvg_scenario_db: Path):
+        db_url = f"sqlite:///{writable_bvg_scenario_db.absolute().as_posix()}"
+        engine = eflips.model.create_engine(db_url)
+        session = Session(engine)
+        yield session
+        session.close()
+        engine.dispose()
 
-        # Create ingester and generate scenario
-        ingester = BVGXMLIngester(input_files=xml_files, cache_enabled=False)
-        params = {
-            "log_level": "WARNING",
-            f"{ingester.__class__.__name__}.multithreading": False,
-        }
-        ingester.generate(db_session, params)
-
-        # Get the created scenario
-        scenario = db_session.query(Scenario).one()
-
-        # Create a vehicle class
-        vehicle_class = VehicleClass(
-            name="Standard Bus",
-            scenario_id=scenario.id,
-        )
-        db_session.add(vehicle_class)
-        db_session.flush()
-
-        # Create vehicle types with constant consumption for the rotations
-        # Get all unique rotations
-        rotations = db_session.query(Rotation).filter(Rotation.scenario_id == scenario.id).all()
-
-        # Create a simple vehicle type with constant consumption
-        vehicle_type = VehicleType(
-            name="Electric Bus 12m",
-            name_short="EB12",
-            scenario_id=scenario.id,
-            battery_capacity=350.0,  # kWh
-            battery_capacity_reserve=0.0,
-            charging_curve=[[0, 150], [1, 150]],  # Simple constant charging curve
-            opportunity_charging_capable=True,
-            minimum_charging_power=10,
-            empty_mass=10000,
-            allowed_mass=20000,
-            consumption=1.2,  # kWh/km - constant consumption value
-        )
-        db_session.add(vehicle_type)
-        db_session.flush()
-
-        # Assign all rotations to this vehicle type
-        for rotation in rotations:
-            rotation.vehicle_type_id = vehicle_type.id
-
-        db_session.commit()
-        return scenario
+    @pytest.fixture
+    def scenario_with_vehicle_types(self, db_session: Session) -> Scenario:
+        """Return the pre-built BVG scenario (no ingestion needed per test)."""
+        return db_session.query(Scenario).one()
 
     def test_vehicle_scheduling_basic(
         self,
@@ -278,27 +240,30 @@ class TestVehicleScheduling:
 
     def test_vehicle_scheduling_no_vehicle_types_error(self, temp_db: Path, db_session: Session):
         """Test that VehicleScheduling raises error when no vehicle types exist."""
-        # Create a minimal scenario without vehicle types
-        scenario = Scenario(name="Empty Scenario", name_short="EMPTY")
-        db_session.add(scenario)
+        from eflips.model import VehicleType, Rotation, Trip
+
+        db_session.query(Trip).delete()
+        db_session.query(Rotation).delete()
+        db_session.query(VehicleType).delete()
         db_session.commit()
 
         modifier = VehicleScheduling()
 
         with pytest.raises(ValueError, match="No vehicle types found in the database"):
-            modifier.modify(session=db_session, params={})
+            modifier.modify(
+                session=db_session,
+                params={"VehicleScheduling.charge_type": ChargeType.OPPORTUNITY},
+            )
 
     def test_vehicle_scheduling_multiple_scenarios_error(self, temp_db: Path, db_session: Session):
         """Test that VehicleScheduling raises error with multiple scenarios."""
-        # Create two scenarios
-        scenario1 = Scenario(name="Scenario 1", name_short="S1")
-        scenario2 = Scenario(name="Scenario 2", name_short="S2")
-        db_session.add_all([scenario1, scenario2])
+        scenario2 = Scenario(name="Extra Scenario", name_short="EXTRA")
+        db_session.add(scenario2)
         db_session.commit()
 
         modifier = VehicleScheduling()
 
-        with pytest.raises(ValueError, match="Expected exactly one scenario, found 2"):
+        with pytest.raises(ValueError, match="Expected exactly one scenario"):
             modifier.modify(session=db_session, params={})
 
     def test_vehicle_scheduling_with_longer_break_times(
@@ -601,25 +566,15 @@ class TestVehicleScheduling:
 class TestDepotAssignment:
     """Test suite for DepotAssignment modifier."""
 
-    @pytest.fixture(autouse=True)
-    def set_cache_directory(self):
-        """Add the DEPOT_ROTATION_MATCHING_ORS_CACHE to the enironment variables before each test."""
-        if os.environ.get("DEPOT_ROTATION_MATCHING_ORS_CACHE") is None:
-            path_to_this_file = Path(__file__).resolve().parent
-            path_to_cache_zip = path_to_this_file / "depot_rotation_match_cache.zip"
-            temp_dir = gettempdir()
-            with ZipFile(path_to_cache_zip, "r") as zip_ref:
-                zip_ref.extractall(temp_dir)
-            os.environ["DEPOT_ROTATION_MATCHING_ORS_CACHE"] = os.path.join(
-                temp_dir, "DEPOT_ROTATION_MATCHING_ORS_CACHE"
-            )
+    # ------------------------------------------------------------------
+    # Class-scoped pre-built DB: 3 depots, 10 lines, 9 trips, 2 vehicle
+    # types.  Built once per class; each test gets a cheap writable copy.
+    # set_cache_directory removed — ors_cache in conftest.py handles it.
+    # ------------------------------------------------------------------
 
-    @pytest.fixture
-    def multi_depot_scenario_fixture(self, db_session: Session, tmp_path: Path) -> Scenario:
-        """
-        Create a test scenario using the multi_depot_scenario function from util.py.
-        Uses the same parameters as in util.py's __main__ section.
-        """
+    @pytest.fixture(scope="class")
+    def _depot_assignment_db(self, tmp_path_factory) -> Path:
+        import shutil
         from tests.util import (
             _create_depot_with_lines,
             CENTER_LAT,
@@ -629,17 +584,20 @@ class TestDepotAssignment:
             DEPOT_RING_DIAMETER,
         )
 
-        # Parameters matching the __main__ section in util.py
-        num_depots = 3
-        lines_per_depot = 10
-        trips_per_line = 9
+        db_path = tmp_path_factory.mktemp("depot_assign") / "scenario.db"
+        db_url = f"sqlite:///{db_path.absolute().as_posix()}"
+        engine = eflips.model.create_engine(db_url)
+        from eflips.model import Base
 
-        # Create scenario
+        Base.metadata.create_all(engine)
+        session = Session(engine)
+
+        num_depots, lines_per_depot, trips_per_line = 3, 10, 9
+
         scenario = Scenario(name="Multi-Depot Test Scenario", name_short="MDTS")
-        db_session.add(scenario)
-        db_session.flush()
+        session.add(scenario)
+        session.flush()
 
-        # Create TWO vehicle types
         vehicle_type_1 = VehicleType(
             name="Electric Bus 12m Type 1",
             name_short="EB12-1",
@@ -653,8 +611,8 @@ class TestDepotAssignment:
             allowed_mass=20000,
             consumption=1.2,
         )
-        db_session.add(vehicle_type_1)
-        db_session.flush()
+        session.add(vehicle_type_1)
+        session.flush()
 
         vehicle_type_2 = VehicleType(
             name="Electric Bus 12m Type 2",
@@ -669,20 +627,16 @@ class TestDepotAssignment:
             allowed_mass=21000,
             consumption=1.3,
         )
-        db_session.add(vehicle_type_2)
-        db_session.flush()
+        session.add(vehicle_type_2)
+        session.flush()
 
-        # Berlin timezone
         berlin_tz = pytz.timezone("Europe/Berlin")
         base_date = datetime(2024, 1, 15, tzinfo=berlin_tz)
-
-        # Center point for depot ring
         center_point = from_shape(Point(CENTER_LON, CENTER_LAT), srid=4326)
 
-        # Create depots - initially with vehicle_type_1, we'll update rotations later
         for depot_idx in range(num_depots):
             _create_depot_with_lines(
-                db_session,
+                session,
                 scenario.id,
                 vehicle_type_1.id,
                 depot_idx,
@@ -696,14 +650,36 @@ class TestDepotAssignment:
                 DEPOT_RING_DIAMETER,
             )
 
-        # Now assign every second rotation to vehicle_type_2
-        all_rotations = db_session.query(Rotation).filter_by(scenario_id=scenario.id).all()
-        for i, rotation in enumerate(all_rotations):
+        for i, rotation in enumerate(session.query(Rotation).filter_by(scenario_id=scenario.id)):
             if i % 2 == 0:
                 rotation.vehicle_type_id = vehicle_type_2.id
 
-        db_session.commit()
-        return scenario
+        session.commit()
+        session.close()
+        engine.dispose()
+        yield db_path
+
+    @pytest.fixture
+    def temp_db(self, _depot_assignment_db: Path, tmp_path: Path) -> Path:
+        import shutil
+
+        db_copy = tmp_path / "depot_assign_writable.db"
+        shutil.copy2(_depot_assignment_db, db_copy)
+        return db_copy
+
+    @pytest.fixture
+    def db_session(self, temp_db: Path):
+        db_url = f"sqlite:///{temp_db.absolute().as_posix()}"
+        engine = eflips.model.create_engine(db_url)
+        session = Session(engine)
+        yield session
+        session.close()
+        engine.dispose()
+
+    @pytest.fixture
+    def multi_depot_scenario_fixture(self, db_session: Session) -> Scenario:
+        """Return the pre-built scenario (no scenario creation needed per test)."""
+        return db_session.query(Scenario).one()
 
     def test_depot_assignment_with_multi_depot_network(
         self,
@@ -975,7 +951,7 @@ class TestDepotAssignment:
 
         mock_depot_config = []
 
-        with pytest.raises(ValueError, match="Expected exactly one scenario, found 2"):
+        with pytest.raises(ValueError, match="Expected exactly one scenario"):
             modifier.modify(
                 session=db_session,
                 params={
@@ -1504,7 +1480,7 @@ class TestIntegratedScheduling:
         # Should raise ValueError when max iterations exceeded
         with pytest.raises(
             ValueError,
-            match="Reached maximum number of iterations .* without finding a feasible schedule",
+            match=r"IntegratedScheduling did not converge after .* iteration\(s\)",
         ):
             modifier.modify(session=db_session, params=params)
 
