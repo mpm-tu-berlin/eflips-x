@@ -159,7 +159,10 @@ class IntegratedScheduling(Modifier):
             iteration += 1
             if iteration > max_iterations:
                 raise ValueError(
-                    f"Reached maximum number of iterations ({max_iterations}) without finding a feasible schedule."
+                    f"IntegratedScheduling did not converge after {max_iterations} iteration(s). "
+                    f"Infeasible rotations remain. "
+                    f"Consider increasing IntegratedScheduling.max_iterations or adding "
+                    f"VehicleScheduling.minimum_break_time."
                 )
             self.logger.info(f"Integrated scheduling iteration {iteration}")
 
@@ -187,10 +190,12 @@ class IntegratedScheduling(Modifier):
                     )
                     break
                 else:
+                    infeasible_ids = insufficient_charging_analyzer_result["rotation_ids"]
                     self.logger.info(
                         f"Schedule is not feasible, "
-                        f"{len(insufficient_charging_analyzer_result['rotation_ids'])} rotations "
-                        "have insufficient charging time. Adding longer breaks and retrying."
+                        f"{len(infeasible_ids)} rotations "
+                        f"have insufficient charging time (IDs: {infeasible_ids}). "
+                        "Adding longer breaks and retrying."
                     )
                     # Identify which trips should have longer breaks and compute dynamic duration
                     new_trips_to_add_longer_breaks = self.find_trips_to_add_longer_breaks(
@@ -209,7 +214,8 @@ class IntegratedScheduling(Modifier):
                     self.logger.info(
                         f"Retrying scheduling with longer breaks on "
                         f"{len(new_trips_to_add_longer_breaks)} new trips "
-                        f"(duration={dynamic_duration})."
+                        f"(duration={dynamic_duration}). "
+                        f"Cumulative trips with extended breaks: {len(ids_of_trips_to_add_longer_breaks)}."
                     )
                     # Rollback the nested session to discard changes
             finally:
