@@ -1480,7 +1480,7 @@ class TestIntegratedScheduling:
         # Should raise ValueError when max iterations exceeded
         with pytest.raises(
             ValueError,
-            match="Reached maximum number of iterations .* without finding a feasible schedule",
+            match=r"IntegratedScheduling did not converge after .* iteration\(s\)",
         ):
             modifier.modify(session=db_session, params=params)
 
