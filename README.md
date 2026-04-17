@@ -179,6 +179,9 @@ poetry run python -m eflips.x.flows.gtfs_flow --plots
 
 # Run agencies in parallel
 poetry run python -m eflips.x.flows.gtfs_flow --parallel
+
+# Abort on the first agency failure instead of collecting failures
+poetry run python -m eflips.x.flows.gtfs_flow --no-tolerate-failures
 ```
 
 See [`eflips/x/flows/gtfs_flow.py`](eflips/x/flows/gtfs_flow.py) for the full source.
@@ -385,48 +388,57 @@ with pipeline.get_session() as session:
 
 #### Modifiers
 
-| Step | Description |
-|---|---|
-| **Scheduling** | |
-| `VehicleScheduling` | Create optimal vehicle rotation plans |
-| `DepotAssignment` | Assign vehicles to depots (requires Gurobi) |
-| `IntegratedScheduling` | Iterative scheduling + depot assignment for feasible opportunity charging schedules (requires Gurobi) |
-| `StationElectrification` | Determine which stations to electrify for opportunity charging |
-| **General Utilities** | |
-| `RemoveUnusedData` | Remove orphaned database objects |
-| `AddTemperatures` | Add temperature data for consumption simulation |
-| `ConfigureVehicleTypes` | Set battery capacity, consumption, and charging curves (GTFS utility) |
-| `CalculateConsumptionScaling` | Calculate consumption scaling factors |
-| `RemoveConsumptionLuts` | Remove consumption lookup tables |
-| **BVG-Specific** | |
-| `SetUpBvgVehicleTypes` | Configure BVG vehicle types |
-| `RemoveUnusedRotations` | Remove unused rotations from BVG data |
-| `MergeStations` | Merge duplicate or nearby stations |
-| `ReduceToNDaysNDepots` | Reduce dataset to N days and N depots |
-| **Simulation** | |
-| `DepotGenerator` | Generate depot infrastructure objects |
-| `Simulation` | Run the vehicle and charging simulation |
+| Step                          | Description                                                                                           |
+|-------------------------------|-------------------------------------------------------------------------------------------------------|
+| **Scheduling**                |                                                                                                       |
+| `VehicleScheduling`           | Create optimal vehicle rotation plans                                                                 |
+| `DepotAssignment`             | Assign vehicles to depots (requires Gurobi)                                                           |
+| `IntegratedScheduling`        | Iterative scheduling + depot assignment for feasible opportunity charging schedules (requires Gurobi) |
+| `StationElectrification`      | Determine which stations to electrify for opportunity charging                                        |
+| **General Utilities**         |                                                                                                       |
+| `RemoveUnusedData`            | Remove orphaned database objects                                                                      |
+| `AddTemperatures`             | Add temperature data for consumption simulation                                                       |
+| `ConfigureVehicleTypes`       | Set battery capacity, consumption, and charging curves (GTFS utility)                                 |
+| `CalculateConsumptionScaling` | Calculate consumption scaling factors                                                                 |
+| `RemoveConsumptionLuts`       | Remove consumption lookup tables                                                                      |
+| **Charging**                  |                                                                                                       |
+| `SmartCharging`               | Apply a smart charging strategy to an already-simulated scenario                                      |
+| **BVG-Specific**              |                                                                                                       |
+| `SetUpBvgVehicleTypes`        | Configure BVG vehicle types                                                                           |
+| `RemoveUnusedRotations`       | Remove unused rotations from BVG data                                                                 |
+| `MergeStations`               | Merge duplicate or nearby stations                                                                    |
+| `ReduceToNDaysNDepots`        | Reduce dataset to N days and N depots                                                                 |
+| **Simulation**                |                                                                                                       |
+| `DepotGenerator`              | Generate depot infrastructure objects                                                                 |
+| `Simulation`                  | Run the vehicle and charging simulation                                                               |
 
 #### Analyzers
 
-| Step | Description |
-|---|---|
-| **Pre-Simulation** (work before simulation) | |
-| `RotationInfoAnalyzer` | Overview of rotation data |
-| `GeographicTripPlotAnalyzer` | Geographic visualization of trips (Folium map) |
-| `SingleRotationInfoAnalyzer` | Detailed view of a single rotation (Cytoscape graph) |
-| **Post-Simulation** (require simulation results) | |
-| `DepartureArrivalSocAnalyzer` | State of charge at departures/arrivals |
-| `SpecificEnergyConsumptionAnalyzer` | Energy consumption analysis |
-| `VehicleSocAnalyzer` | Vehicle state of charge over time |
-| `DepotEventAnalyzer` | Depot event analysis |
-| `DepotActivityAnalyzer` | Depot activity visualization (animated video) |
-| `PowerAndOccupancyAnalyzer` | Power demand and occupancy analysis |
-| `InteractiveMapAnalyzer` | Interactive map with links to depot/station plots |
-| **Export** | |
-| `ScenarioJsonExporter` | Export scenario data as JSON |
-| `VehicleTypeDepotPlotAnalyzer` | Vehicle type distribution across depots (BVG-specific) |
-| `InsufficientChargingTimeAnalyzer` | Identify rotations with insufficient charging time |
+| Step                                             | Description                                              |
+|--------------------------------------------------|----------------------------------------------------------|
+| **Pre-Simulation** (work before simulation)      |                                                          |
+| `RotationInfoAnalyzer`                           | Overview of rotation data                                |
+| `GeographicTripPlotAnalyzer`                     | Geographic visualization of trips (Folium map)           |
+| `SingleRotationInfoAnalyzer`                     | Detailed view of a single rotation (Cytoscape graph)     |
+| **Post-Simulation** (require simulation results) |                                                          |
+| `DepartureArrivalSocAnalyzer`                    | State of charge at departures/arrivals                   |
+| `SpecificEnergyConsumptionAnalyzer`              | Energy consumption analysis                              |
+| `EnergyConsumptionByVehicleTypeAnalyzer`         | Aggregate energy consumption broken down by vehicle type |
+| `VehicleSocAnalyzer`                             | Vehicle state of charge over time                        |
+| `DepotEventAnalyzer`                             | Depot event analysis                                     |
+| `DepotActivityAnalyzer`                          | Depot activity visualization (animated video)            |
+| `PowerAndOccupancyAnalyzer`                      | Power demand and occupancy analysis                      |
+| `InteractiveMapAnalyzer`                         | Interactive map with links to depot/station plots        |
+| `TCOAnalyzer`                                    | Total cost of ownership analysis                         |
+| `InsufficientChargingTimeAnalyzer`               | Identify rotations with insufficient charging time       |
+| **Multi-Scenario / BVG-Specific**                |                                                          |
+| `VehicleTypeDepotPlotAnalyzer`                   | Vehicle type distribution across depots                  |
+| `RevenueServiceTimelineAnalyzer`                 | Revenue-service timeline comparison                      |
+| `SchedulingEfficiencyAnalyzer`                   | Scheduling efficiency metrics                            |
+| `RepresentativeVehicleSocAnalyzer`               | SoC profile of a representative vehicle                  |
+| `ScenarioComparisonAnalyzer`                     | Side-by-side comparison across scenarios                 |
+| **Export**                                       |                                                          |
+| `ScenarioJsonExporter`                           | Export scenario data as JSON                             |
 
 ## Testing
 

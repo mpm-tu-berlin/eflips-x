@@ -11,11 +11,7 @@ The full API reference is generated from source by ``sphinx-autoapi``:
    :maxdepth: 2
    :caption: API reference:
 
-   autoapi/eflips/x/framework/index
-   autoapi/eflips/x/steps/generators/index
-   autoapi/eflips/x/steps/modifiers/index
-   autoapi/eflips/x/steps/analyzers/index
-   autoapi/eflips/x/flows/index
+   autoapi/index
 
 Indices and tables
 ==================

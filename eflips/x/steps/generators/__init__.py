@@ -468,6 +468,7 @@ class GTFSIngester(Generator):
         (later-filtered-out) rail service runs.
 
         Handles the common edge cases:
+
         - ``calendar.txt`` row with all day-of-week flags = 0 contributes no dates
           (e.g. placeholder rows for agencies whose service is defined entirely via
           ``calendar_dates.txt`` additions).

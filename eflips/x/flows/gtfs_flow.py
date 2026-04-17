@@ -123,6 +123,7 @@ def parse_depot_locations(excel_path: Path) -> List[AgencyConfig]:
     """Parse the depot_locations Excel file into a list of AgencyConfig.
 
     Rows are grouped by ``simulation_id``. Within a simulation group:
+
     - ``file_name`` is taken from the (only) non-null value (rows may leave
       it blank; all non-blank values in the group must agree).
     - Each row with a non-null ``agency_id`` contributes one agency.
