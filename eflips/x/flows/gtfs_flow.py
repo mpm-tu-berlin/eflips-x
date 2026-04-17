@@ -34,7 +34,6 @@ from eflips.x.steps.generators import GTFSIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import MergeStations
 from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData
 from eflips.x.steps.modifiers.gtfs_utilities import ConfigureVehicleTypes
-from eflips.x.steps.analyzers.bvg_tools import RepresentativeVehicleSocAnalyzer
 from eflips.x.steps.modifiers.scheduling import (
     VehicleScheduling,
     DepotAssignment,
@@ -343,28 +342,34 @@ def run_opportunity_variant(
 
     if insufficient_result is not None:
         critical_ids = insufficient_result["rotation_ids"]
-        logger.warning(
-            f"[{agency.agency_name}] {len(critical_ids)} rotation(s) are infeasible "
-            f"even with all termini electrified — StationElectrification will likely fail. "
-            f"Critical rotation IDs: {critical_ids}"
-        )
+        soc_data = insufficient_result.get("soc_data", {})
+        charging_power_kw = params.get("InsufficientChargingTimeAnalyzer.charging_power_kw", 450.0)
 
-        if enable_plots:
-            import matplotlib.pyplot as plt
-
-            critical_plots_dir = output_dir / "visualizations" / "critical_rotations"
-            critical_plots_dir.mkdir(parents=True, exist_ok=True)
-            for rot_id, (
-                soc_df,
-                event_spans,
-                rot_start,
-                rot_end,
-            ) in insufficient_result["soc_data"].items():
-                fig = RepresentativeVehicleSocAnalyzer.visualize(
-                    soc_df, event_spans, xlim_start=rot_start, xlim_end=rot_end
+        lines = []
+        for rot_id in critical_ids:
+            if rot_id in soc_data:
+                soc_df, _event_spans, rot_start, rot_end = soc_data[rot_id]
+                min_soc = float(soc_df["soc"].min())
+                deficit_kwh = abs(min_soc) * agency.battery_capacity
+                lines.append(
+                    f"  Rotation {rot_id}: min SoC={min_soc:.3f} "
+                    f"(deficit ≈{deficit_kwh:.0f} kWh), "
+                    f"window {rot_start} – {rot_end}"
                 )
-                fig.savefig(critical_plots_dir / f"critical_rotation_{rot_id}_soc.png", dpi=150)
-                plt.close(fig)
+            else:
+                lines.append(f"  Rotation {rot_id}: no SoC data available")
+
+        raise RuntimeError(
+            f"[{agency.agency_name}] Opportunity charging is not feasible: "
+            f"{len(critical_ids)} rotation(s) cannot accumulate enough charge even with all "
+            f"termini electrified at {charging_power_kw:.0f} kW "
+            f"and a {agency.battery_capacity:.0f} kWh battery.\n"
+            f"These routes are structurally too long or have too few break opportunities.\n"
+            f"Infeasible rotations:\n"
+            + "\n".join(lines)
+            + "\nPossible remedies: increase battery_capacity, add a minimum_break_time, "
+            "or accept DEPOT-only charging for this agency."
+        )
 
     post_steps: List[PipelineStep] = [
         StationElectrification(),
@@ -400,6 +405,7 @@ def run_agency_flow(
     output_base_root: Path,
     agency_name: str,  # used for flow_run_name only
     enable_plots: bool = False,
+    tolerate_failures: bool = True,
 ) -> None:
     """Run the full pipeline (common → depot + opportunity) for a single agency."""
     gtfs_stem = agency.gtfs_file.stem
@@ -439,6 +445,7 @@ def gtfs_flow(
     agency_filter: str | None = None,
     gtfs_dir: Path | None = None,
     parallel: bool = False,
+    tolerate_failures: bool = True,
 ) -> None:
     """Run DEPOT and OPPORTUNITY charging variants for all configured GTFS agencies."""
     if gtfs_dir is None:
@@ -465,6 +472,8 @@ def gtfs_flow(
     cache_base_root = PROJECT_ROOT / "data" / "cache" / "gtfs"
     output_base_root = PROJECT_ROOT / "data" / "output" / "gtfs"
 
+    failed_agencies: List[Tuple[AgencyConfig, Exception]] = []
+
     if parallel:
         max_workers = min(len(agencies), multiprocessing.cpu_count())
         logger.info(f"Running {len(agencies)} agencies in parallel (max_workers={max_workers})")
@@ -477,6 +486,7 @@ def gtfs_flow(
                     output_base_root=output_base_root,
                     agency_name=agency.agency_name,
                     enable_plots=enable_plots,
+                    tolerate_failures=tolerate_failures,
                 ): agency
                 for agency in agencies
             }
@@ -486,16 +496,44 @@ def gtfs_flow(
                     future.result()
                 except Exception as exc:
                     logger.error(f"Agency '{agency.agency_name}' failed: {exc}")
-                    raise
+                    if tolerate_failures:
+                        failed_agencies.append((agency, exc))
+                    else:
+                        raise
     else:
         for agency in agencies:
-            run_agency_flow(
-                agency=agency,
-                cache_base_root=cache_base_root,
-                output_base_root=output_base_root,
-                agency_name=agency.agency_name,
-                enable_plots=enable_plots,
-            )
+            if tolerate_failures:
+                try:
+                    run_agency_flow(
+                        agency=agency,
+                        cache_base_root=cache_base_root,
+                        output_base_root=output_base_root,
+                        agency_name=agency.agency_name,
+                        enable_plots=enable_plots,
+                        tolerate_failures=tolerate_failures,
+                    )
+                except Exception as exc:
+                    logger.error(f"Agency '{agency.agency_name}' failed: {exc}")
+                    failed_agencies.append((agency, exc))
+            else:
+                run_agency_flow(
+                    agency=agency,
+                    cache_base_root=cache_base_root,
+                    output_base_root=output_base_root,
+                    agency_name=agency.agency_name,
+                    enable_plots=enable_plots,
+                    tolerate_failures=tolerate_failures,
+                )
+
+    if failed_agencies:
+        summary_lines = [
+            f"  {a.agency_name}: {type(exc).__name__}: {str(exc).splitlines()[0]}"
+            for a, exc in failed_agencies
+        ]
+        raise RuntimeError(
+            f"{len(failed_agencies)} of {len(agencies)} agency run(s) failed:\n"
+            + "\n".join(summary_lines)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +560,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Run agencies in parallel using processes (one process per agency)",
     )
+    parser.add_argument(
+        "--no-tolerate-failures",
+        action="store_true",
+        help="Abort immediately when any agency fails instead of collecting all failures",
+    )
     args = parser.parse_args()
 
     gtfs_flow(
@@ -529,4 +572,5 @@ if __name__ == "__main__":
         agency_filter=args.agency,
         gtfs_dir=args.gtfs_dir,
         parallel=args.parallel,
+        tolerate_failures=not args.no_tolerate_failures,
     )
