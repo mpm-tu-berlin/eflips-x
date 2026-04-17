@@ -58,12 +58,17 @@ def ors_cache() -> None:
     )
     if not path_to_cache_zip.exists():
         return
-    temp_dir = tempfile.gettempdir()
-    with ZipFile(path_to_cache_zip, "r") as zip_ref:
-        zip_ref.extractall(temp_dir)
-    os.environ["DEPOT_ROTATION_MATCHING_ORS_CACHE"] = os.path.join(
-        temp_dir, "DEPOT_ROTATION_MATCHING_ORS_CACHE"
-    )
+    # Per-worker extraction dir so pytest-xdist workers don't race on the same path.
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    worker_root = Path(tempfile.gettempdir()) / f"eflips_ors_cache_{worker}"
+    target = worker_root / "DEPOT_ROTATION_MATCHING_ORS_CACHE"
+    marker = worker_root / ".extracted"
+    if not marker.exists():
+        worker_root.mkdir(parents=True, exist_ok=True)
+        with ZipFile(path_to_cache_zip, "r") as zip_ref:
+            zip_ref.extractall(worker_root)
+        marker.touch()
+    os.environ["DEPOT_ROTATION_MATCHING_ORS_CACHE"] = str(target)
 
 
 @pytest.fixture(scope="session")

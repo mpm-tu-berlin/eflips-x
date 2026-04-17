@@ -41,7 +41,9 @@ def db_session(small_scenario_session: Session) -> Session:
 @pytest.fixture
 def test_scenario(db_session: Session) -> Scenario:
     """Return the pre-built scenario (no multi_depot_scenario() call needed)."""
-    return db_session.query(Scenario).first()
+    scenario = db_session.query(Scenario).one_or_none()
+    assert scenario is not None, "Expected a pre-built Scenario in the shared test database."
+    return scenario
 
 
 class TestRotationInfoAnalyzer:

@@ -191,12 +191,17 @@ class IntegratedScheduling(Modifier):
                     break
                 else:
                     infeasible_ids = insufficient_charging_analyzer_result["rotation_ids"]
+                    preview = list(infeasible_ids[:20])
+                    suffix = (
+                        f"…(+{len(infeasible_ids) - 20} more)" if len(infeasible_ids) > 20 else ""
+                    )
                     self.logger.info(
                         f"Schedule is not feasible, "
                         f"{len(infeasible_ids)} rotations "
-                        f"have insufficient charging time (IDs: {infeasible_ids}). "
+                        f"have insufficient charging time (IDs: {preview}{suffix}). "
                         "Adding longer breaks and retrying."
                     )
+                    self.logger.debug(f"Full infeasible rotation IDs: {infeasible_ids}")
                     # Identify which trips should have longer breaks and compute dynamic duration
                     new_trips_to_add_longer_breaks = self.find_trips_to_add_longer_breaks(
                         insufficient_charging_analyzer_result, session, params

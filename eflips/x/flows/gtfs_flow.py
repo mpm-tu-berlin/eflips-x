@@ -109,6 +109,17 @@ def _parse_depot_row(row: "pd.Series[Any]") -> DepotConfig | None:
     )
 
 
+def _norm_id(v: Any) -> str:
+    """Normalize an Excel cell value to a string id.
+
+    Why: pandas reads int-like columns as float64 when NaNs are present, so
+    ``str(123)`` silently becomes ``'123.0'`` and stops matching GTFS ids.
+    """
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+
 def _single_file_name(group: "pd.DataFrame", sim_id: str) -> str:
     """Return the single distinct non-null ``file_name`` in a simulation group."""
     file_names = {str(v) for v in group["file_name"].dropna()}
@@ -151,8 +162,8 @@ def parse_depot_locations(excel_path: Path) -> List[AgencyConfig]:
         file_name = _single_file_name(group, sim_id)
 
         agencies_mask = group["agency_id"].notna()
-        agency_ids = [str(v) for v in group.loc[agencies_mask, "agency_id"]]
-        agency_names = [str(v) for v in group.loc[agencies_mask, "agency_name"].dropna()]
+        agency_ids = [_norm_id(v) for v in group.loc[agencies_mask, "agency_id"]]
+        agency_names = [_norm_id(v) for v in group.loc[agencies_mask, "agency_name"].dropna()]
         depots = [d for d in (_parse_depot_row(r) for _, r in group.iterrows()) if d]
 
         if not depots:
