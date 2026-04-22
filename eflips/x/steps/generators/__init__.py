@@ -586,7 +586,7 @@ class GTFSIngester(Generator):
         target: date
         active_set: set[date] | None
 
-        if names or ids:
+        if (names or ids) and len(feed.agency) > 1:
             # Agency-aware path. _resolve_agency_ids raises a clear
             # "agency not found" error if any requested name/id is missing,
             # distinct from the "no active services" case below.
