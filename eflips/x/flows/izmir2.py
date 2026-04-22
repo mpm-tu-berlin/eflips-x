@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import gettempdir
 from typing import List, Any, Dict, Type, Optional
+from eflips.x.steps.modifiers.gtfs_utilities import ConfigureVehicleTypes
 
 # Add the project root to sys.path to allow importing from eflips.x
 project_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -104,9 +105,7 @@ def query_all_ids(
 @flow(name="Izmir GTFS Flow (IZBB)")
 def main() -> None:
     ### Step 1: Initialize Pipeline ###
-    work_dir = Path(gettempdir()) / (
-        "eflips_izmir_flow_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    )
+    work_dir = Path("data/cache/eflips_izmir_flow")
     work_dir.mkdir(parents=True, exist_ok=True)
     print(f"Working directory: {work_dir}")
 
@@ -114,18 +113,6 @@ def main() -> None:
         "log_level": "INFO",
         "GTFSIngester.agency_name": None,
         "GTFSIngester.bus_only": False,
-        "GTFSIngester.vehicle_types": [
-            {
-                "name": "TEMSA Avenue Electron",
-                "name_short": "TEMSA_AE",
-                "vehicle_class": "Bus",
-                "empty_mass": 12500,
-                "allowed_mass": 18500,
-                "battery_capacity": 240,
-                "max_charging_power": 150,
-                "consumption_model": "physic",
-            }
-        ],
         "AddTemperatures.temperature_celsius": 15.0,
         "GTFSIngester.route_ids": [
             "53",
@@ -141,8 +128,16 @@ def main() -> None:
             "240",
             "335",
         ],
-        # Set to False to bypass the 'parent_station' filtering error
-        # "GTFSIngester.route_ids": ["123", "456"], # Optional: Filter for specific routes to speed up
+        # TEMSA Avenue Electron. GTFSIngester produces a single placeholder
+        # vehicle type ("default_bus") — rename and re-spec it here so
+        # DepotAssignment can look it up by name_short.
+        "ConfigureVehicleTypes.name": "TEMSA Avenue Electron",
+        "ConfigureVehicleTypes.name_short": "TEMSA_AE",
+        "ConfigureVehicleTypes.battery_capacity": 240,
+        "ConfigureVehicleTypes.consumption": 1.5,
+        "ConfigureVehicleTypes.charging_curve": [[0.0, 450.0], [1.0, 450.0]],
+        "ConfigureVehicleTypes.empty_mass": 12500,
+        "ConfigureVehicleTypes.allowed_mass": 18500,
     }
 
     steps: List[PipelineStep] = []
@@ -156,14 +151,20 @@ def main() -> None:
 
     ### Step 3: General Data Cleanup ###
     steps.append(RemoveUnusedData())
+    steps.append(ConfigureVehicleTypes())
     steps.append(AddTemperatures())
 
     ### Step 4: Vehicle Scheduling ###
     params["VehicleScheduling.charge_type"] = ChargeType.DEPOT
     params["VehicleScheduling.minimum_break_time"] = timedelta(
-        minutes=15
-    )  # Slightly increased to prune graph
-    params["VehicleScheduling.maximum_schedule_duration"] = timedelta(hours=4)
+        minutes=0
+    )
+    params["VehicleScheduling.maximum_break_time"] = timedelta(
+        minutes=10
+    )
+    params["VehicleScheduling.maximum_break_time"] = timedelta(
+        minutes=20
+    )
     steps.append(VehicleScheduling())
 
     ### Step 5: Depot Assignment ###
@@ -173,43 +174,43 @@ def main() -> None:
         {
             "name": "Adatepe",
             "depot_station": (27.1860, 38.3850),
-            "vehicle_type": ["EN", "GN"],
+            "vehicle_type": ["TEMSA_AE"],
             "capacity": 200,
         },
         {
             "name": "Mersinli",
             "depot_station": (27.1712, 38.4335),
-            "vehicle_type": ["EN", "GN"],
+            "vehicle_type": ["TEMSA_AE"],
             "capacity": 200,
         },
         {
             "name": "Çiğli",
             "depot_station": (27.0704, 38.4846),
-            "vehicle_type": ["EN", "GN"],
+            "vehicle_type": ["TEMSA_AE"],
             "capacity": 200,
         },
         {
             "name": "Urla",
             "depot_station": (26.7548, 38.3260),
-            "vehicle_type": ["EN", "GN"],
+            "vehicle_type": ["TEMSA_AE"],
             "capacity": 100,
         },
         {
             "name": "Çakalburnu",
             "depot_station": (27.0636, 38.4049),
-            "vehicle_type": ["EN", "GN"],
+            "vehicle_type": ["TEMSA_AE"],
             "capacity": 200,
         },
         {
             "name": "Bergama",
             "depot_station": (27.1180, 39.0839),
-            "vehicle_type": ["EN", "GN"],
+            "vehicle_type": ["TEMSA_AE"],
             "capacity": 100,
         },
         {
             "name": "Gaziemir",
             "depot_station": (27.1199, 38.3481),
-            "vehicle_type": ["EN", "GN"],
+            "vehicle_type": ["TEMSA_AE"],
             "capacity": 200,
         },
     ]

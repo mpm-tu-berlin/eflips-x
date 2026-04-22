@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Izmir (IZBB) full-scenario flow.
+Izmir (IZBB) one-day flow.
 
-This variant runs the entire Eshot GTFS feed for one week. It is the most
-computationally expensive of the three Izmir variants and is currently too
-slow to complete end-to-end — kept here as the reference baseline. For faster
-iteration use ``izmir_one_day`` (one day, full network) or
-``izmir_reduced_lines`` (one week, 12-route subset).
+Runs the full Eshot network but only for a single day. Faster to iterate on
+than the week-long ``izmir`` (full) flow while still exercising every route.
+For a week-long subset see ``izmir_reduced_lines``.
 """
 import logging
 import sys
@@ -103,15 +101,16 @@ def query_all_ids(
         return [getattr(obj, id_attr) for obj in session.query(model_class).all()]
 
 
-@flow(name="Izmir Full (IZBB)")
+@flow(name="Izmir One Day (IZBB)")
 def main() -> None:
     ### Step 1: Initialize Pipeline ###
-    work_dir = Path("data/cache/eflips_izmir_full")
+    work_dir = Path("data/cache/eflips_izmir_one_day")
     work_dir.mkdir(parents=True, exist_ok=True)
     print(f"Working directory: {work_dir}")
 
     params: Dict[str, Any] = {
         "log_level": "INFO",
+        "GTFSIngester.duration": 'DAY',
         "GTFSIngester.agency_name": None,
         "GTFSIngester.bus_only": False,
         "AddTemperatures.temperature_celsius": 15.0,
@@ -143,9 +142,6 @@ def main() -> None:
 
     ### Step 4: Vehicle Scheduling ###
     params["VehicleScheduling.charge_type"] = ChargeType.DEPOT
-    params["VehicleScheduling.minimum_break_time"] = timedelta(minutes=0)
-    params["VehicleScheduling.regular_break_time"] = timedelta(minutes=10)
-    params["VehicleScheduling.maximum_break_time"] = timedelta(minutes=20)
     steps.append(VehicleScheduling())
 
     ### Step 5: Depot Assignment ###
@@ -155,43 +151,43 @@ def main() -> None:
         {
             "name": "Adatepe",
             "depot_station": (27.1860, 38.3850),
-            "vehicle_type": ["TEMSA_AE"],
+            "vehicle_type": ["TEMSA_AE",],
             "capacity": 200,
         },
         {
             "name": "Mersinli",
             "depot_station": (27.1712, 38.4335),
-            "vehicle_type": ["TEMSA_AE"],
+            "vehicle_type": ["TEMSA_AE",],
             "capacity": 200,
         },
         {
             "name": "Çiğli",
             "depot_station": (27.0704, 38.4846),
-            "vehicle_type": ["TEMSA_AE"],
+            "vehicle_type": ["TEMSA_AE",],
             "capacity": 200,
         },
         {
             "name": "Urla",
             "depot_station": (26.7548, 38.3260),
-            "vehicle_type": ["TEMSA_AE"],
+            "vehicle_type": ["TEMSA_AE",],
             "capacity": 100,
         },
         {
             "name": "Çakalburnu",
             "depot_station": (27.0636, 38.4049),
-            "vehicle_type": ["TEMSA_AE"],
+            "vehicle_type": ["TEMSA_AE",],
             "capacity": 200,
         },
         {
             "name": "Bergama",
             "depot_station": (27.1180, 39.0839),
-            "vehicle_type": ["TEMSA_AE"],
+            "vehicle_type": ["TEMSA_AE",],
             "capacity": 100,
         },
         {
             "name": "Gaziemir",
             "depot_station": (27.1199, 38.3481),
-            "vehicle_type": ["TEMSA_AE"],
+            "vehicle_type": ["TEMSA_AE",],
             "capacity": 200,
         },
     ]

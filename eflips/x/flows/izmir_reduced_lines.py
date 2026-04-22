@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Izmir (IZBB) full-scenario flow.
+Izmir (IZBB) reduced-lines flow.
 
-This variant runs the entire Eshot GTFS feed for one week. It is the most
-computationally expensive of the three Izmir variants and is currently too
-slow to complete end-to-end — kept here as the reference baseline. For faster
-iteration use ``izmir_one_day`` (one day, full network) or
-``izmir_reduced_lines`` (one week, 12-route subset).
+Runs a subset of 12 Eshot routes for one week so the pipeline can complete in
+a tractable amount of time. Use this variant when iterating on scheduling /
+depot-assignment logic. For a one-day slice of the full network see
+``izmir_one_day``; for the full week/full network reference see ``izmir``.
 """
 import logging
 import sys
@@ -103,10 +102,10 @@ def query_all_ids(
         return [getattr(obj, id_attr) for obj in session.query(model_class).all()]
 
 
-@flow(name="Izmir Full (IZBB)")
+@flow(name="Izmir Reduced Lines (IZBB)")
 def main() -> None:
     ### Step 1: Initialize Pipeline ###
-    work_dir = Path("data/cache/eflips_izmir_full")
+    work_dir = Path("data/cache/eflips_izmir_reduced_lines")
     work_dir.mkdir(parents=True, exist_ok=True)
     print(f"Working directory: {work_dir}")
 
@@ -115,6 +114,20 @@ def main() -> None:
         "GTFSIngester.agency_name": None,
         "GTFSIngester.bus_only": False,
         "AddTemperatures.temperature_celsius": 15.0,
+        "GTFSIngester.route_ids": [
+            "53",
+            "77",
+            "78",
+            "102",
+            "125",
+            "140",
+            "147",
+            "148",
+            "154",
+            "168",
+            "240",
+            "335",
+        ],
         # TEMSA Avenue Electron. GTFSIngester produces a single placeholder
         # vehicle type ("default_bus") — rename and re-spec it here so
         # DepotAssignment can look it up by name_short.
@@ -143,9 +156,6 @@ def main() -> None:
 
     ### Step 4: Vehicle Scheduling ###
     params["VehicleScheduling.charge_type"] = ChargeType.DEPOT
-    params["VehicleScheduling.minimum_break_time"] = timedelta(minutes=0)
-    params["VehicleScheduling.regular_break_time"] = timedelta(minutes=10)
-    params["VehicleScheduling.maximum_break_time"] = timedelta(minutes=20)
     steps.append(VehicleScheduling())
 
     ### Step 5: Depot Assignment ###
