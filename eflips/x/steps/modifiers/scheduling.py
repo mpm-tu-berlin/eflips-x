@@ -7,7 +7,6 @@ such as creating optimal rotation plans for different vehicle types.
 
 import logging
 import os
-import typing
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -646,6 +645,16 @@ class VehicleScheduling(Modifier):
         return timedelta(seconds=0)
 
     @staticmethod
+    def _get_default_regular_break_time() -> timedelta:
+        """Get the default regular break time."""
+        return timedelta(minutes=30)
+
+    @staticmethod
+    def _get_default_maximum_break_time() -> timedelta:
+        """Get the default maximum break time."""
+        return timedelta(minutes=60)
+
+    @staticmethod
     def _get_default_maximum_schedule_duration() -> timedelta:
         """Get the default maximum schedule duration."""
         return timedelta(hours=24)
@@ -698,6 +707,20 @@ class VehicleScheduling(Modifier):
             Default: timedelta(seconds=0)
             Type: timedelta
             Example: timedelta(minutes=15)
+            """.strip(),
+            f"{cls.__name__}.regular_break_time": """
+            Regular break time between trips, passed to eflips.opt.scheduling.create_graph.
+
+            Default: timedelta(minutes=30)
+            Type: timedelta
+            Example: timedelta(minutes=20)
+            """.strip(),
+            f"{cls.__name__}.maximum_break_time": """
+            Maximum break time between trips, passed to eflips.opt.scheduling.create_graph.
+
+            Default: timedelta(minutes=60)
+            Type: timedelta
+            Example: timedelta(minutes=90)
             """.strip(),
             f"{cls.__name__}.maximum_schedule_duration": """
             Maximum duration of a vehicle schedule.
@@ -802,12 +825,16 @@ class VehicleScheduling(Modifier):
         """
         # Get parameters
         min_break_key = f"{self.__class__.__name__}.minimum_break_time"
+        regular_break_key = f"{self.__class__.__name__}.regular_break_time"
+        maximum_break_key = f"{self.__class__.__name__}.maximum_break_time"
         max_duration_key = f"{self.__class__.__name__}.maximum_schedule_duration"
         battery_margin_key = f"{self.__class__.__name__}.battery_margin"
         longer_break_trips_key = f"{self.__class__.__name__}.longer_break_time_trips"
         longer_break_duration_key = f"{self.__class__.__name__}.longer_break_time_duration"
 
         minimum_break_time = params.get(min_break_key, self._get_default_minimum_break_time())
+        regular_break_time = params.get(regular_break_key, self._get_default_regular_break_time())
+        maximum_break_time = params.get(maximum_break_key, self._get_default_maximum_break_time())
         maximum_schedule_duration = params.get(
             max_duration_key, self._get_default_maximum_schedule_duration()
         )
@@ -831,6 +858,14 @@ class VehicleScheduling(Modifier):
         if not isinstance(minimum_break_time, timedelta):
             raise ValueError(
                 f"minimum_break_time must be a timedelta, got {type(minimum_break_time).__name__}"
+            )
+        if not isinstance(regular_break_time, timedelta):
+            raise ValueError(
+                f"regular_break_time must be a timedelta, got {type(regular_break_time).__name__}"
+            )
+        if not isinstance(maximum_break_time, timedelta):
+            raise ValueError(
+                f"maximum_break_time must be a timedelta, got {type(maximum_break_time).__name__}"
             )
         if not isinstance(maximum_schedule_duration, timedelta):
             raise ValueError(
@@ -886,6 +921,8 @@ class VehicleScheduling(Modifier):
         self.logger.info(
             f"Vehicle scheduling parameters: "
             f"minimum_break_time={minimum_break_time}, "
+            f"regular_break_time={regular_break_time}, "
+            f"maximum_break_time={maximum_break_time}, "
             f"maximum_schedule_duration={maximum_schedule_duration}, "
             f"battery_margin={battery_margin}, "
             f"longer_break_time_trips={longer_break_time_trips}, "
@@ -946,6 +983,8 @@ class VehicleScheduling(Modifier):
                 delta_socs=delta_socs,
                 maximum_schedule_duration=maximum_schedule_duration,
                 minimum_break_time=minimum_break_time,
+                regular_break_time=regular_break_time,
+                maximum_break_time=maximum_break_time,
                 longer_break_time_trips=longer_break_time_trips,
                 longer_break_time_duration=longer_break_time_duration,
             )
