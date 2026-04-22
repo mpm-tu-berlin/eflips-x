@@ -405,6 +405,12 @@ class GTFSIngester(Generator):
                 "If True (default), only import bus routes (route_type 3 or 700-799). "
                 "If False, import all transit types (rail, subway, bus, ferry, etc.)."
             ),
+            f"{cls.__name__}.route_ids": (
+                "Optional restriction to specific route_id(s) from the feed's routes.txt. "
+                "Accepts a single string, a list of strings, or None/empty for no filter. "
+                "If given together with agency_name/agency_ids, all listed route_ids must "
+                "belong to one of those agencies."
+            ),
         }
 
     @staticmethod
@@ -689,6 +695,7 @@ class GTFSIngester(Generator):
         start_date = params.get(f"{self.__class__.__name__}.start_date")
         duration = params.get(f"{self.__class__.__name__}.duration", "WEEK")
         bus_only = params.get(f"{self.__class__.__name__}.bus_only", True)
+        route_ids = params.get(f"{self.__class__.__name__}.route_ids", None)
 
         # Auto-select start date if not provided
         if not start_date or start_date == "":
@@ -702,6 +709,10 @@ class GTFSIngester(Generator):
                 bus_only=bus_only,
             )
             logger.info(f"Auto-selected start_date: {start_date}")
+
+        # Validate that the given route_ids belong to the given agencies
+        if route_ids and (agency_ids or agency_name):
+            self._validate_routes_match_agencies(gtfs_zip_file, route_ids, agency_ids, agency_name)
 
         # Extract database URL from session
         if session.bind is None:
@@ -749,6 +760,7 @@ class GTFSIngester(Generator):
             agency_name=agency_name,
             agency_id=agency_ids,
             bus_only=bus_only,
+            route_ids=route_ids,
         )
 
         if not success:
@@ -788,6 +800,53 @@ class GTFSIngester(Generator):
         logger.info(
             f"GTFS ingestion completed successfully: {trip_count} trips, {rotation_count} rotations"
         )
+
+    def _validate_routes_match_agencies(
+        self,
+        gtfs_zip_file: Path,
+        route_ids: str | Iterable[str],
+        agency_ids: str | Iterable[str],
+        agency_name: str | Iterable[str],
+    ) -> None:
+        """Cross-check that every requested route_id is owned by one of the
+        requested agencies.
+
+        Missing-route-id validation lives on the eflips-ingest side (see
+        ``GtfsIngester.filter_feed_by_route_ids``), which is authoritative for
+        both direct callers and this pipeline step. Only the agency-intent
+        cross-check is unique to this layer, so that's all we do here.
+
+        A no-op when no route_ids are supplied or when no agency scoping is
+        requested.
+        """
+        routes = self._coerce_str_list(route_ids)
+        names = self._coerce_str_list(agency_name)
+        ids = self._coerce_str_list(agency_ids)
+        if not routes or not (names or ids):
+            return
+
+        feed = gk.read_feed(gtfs_zip_file, dist_units="m")
+        resolved_ids = set(GTFSIngester._resolve_agency_ids(feed, names, ids))
+
+        if feed.routes is None or "agency_id" not in feed.routes.columns:
+            if len(feed.agency) > 1:
+                raise ValueError(
+                    "routes.txt has no agency_id column but the feed has multiple agencies; "
+                    "cannot verify route_ids belong to the requested agencies."
+                )
+            return  # single-agency feed: routes implicitly belong to that agency
+
+        owning = set(
+            feed.routes.loc[feed.routes["route_id"].astype(str).isin(routes), "agency_id"].astype(
+                str
+            )
+        )
+        extras = owning - resolved_ids
+        if extras:
+            raise ValueError(
+                f"route_ids include routes owned by agencies outside the requested "
+                f"agency set: {sorted(extras)}."
+            )
 
 
 class CopyCreator(Generator):

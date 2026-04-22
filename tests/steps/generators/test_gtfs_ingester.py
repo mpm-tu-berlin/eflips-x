@@ -266,3 +266,192 @@ class TestGTFSIngester:
 
         routes = db_session.query(Route).all()
         assert len(routes) > 0, "No routes were created"
+
+
+class TestAutoSelectStartDateAgencyGate:
+    """Cover the single-vs-multi-agency gate in ``_auto_select_start_date``.
+
+    ``sample-feed-1.zip`` contains exactly one agency (``DTA`` / "Demo Transit
+    Authority"), so passing a matching ``agency_name`` must NOT take the
+    agency-aware path — the feed's ``len(feed.agency) > 1`` clause should
+    short-circuit it to the global-validity fallback. Regression guard for
+    the single-agency feed case that previously hit ``feed.routes["agency_id"]``
+    in ``_compute_agency_active_dates`` even when the column was missing or
+    redundant.
+    """
+
+    @pytest.fixture
+    def sample_gtfs_file(self, gtfs_test_data_dir: Path) -> Path:
+        f = gtfs_test_data_dir / "sample-feed-1.zip"
+        if not f.exists():
+            pytest.skip(f"Sample GTFS file not found: {f}")
+        return f
+
+    def test_single_agency_with_matching_name_uses_fallback(self, sample_gtfs_file: Path):
+        """With one agency in the feed, a matching agency_name still picks a Monday
+        from the global validity period rather than raising."""
+        result = GTFSIngester._auto_select_start_date(
+            sample_gtfs_file,
+            agency_name="Demo Transit Authority",
+            bus_only=False,
+        )
+        from datetime import datetime
+
+        parsed = datetime.strptime(result, "%Y-%m-%d")
+        assert parsed.weekday() == 0  # Monday
+
+    def test_single_agency_with_matching_id_uses_fallback(self, sample_gtfs_file: Path):
+        """Same as above but via agency_ids."""
+        result = GTFSIngester._auto_select_start_date(
+            sample_gtfs_file,
+            agency_ids="DTA",
+            bus_only=False,
+        )
+        from datetime import datetime
+
+        parsed = datetime.strptime(result, "%Y-%m-%d")
+        assert parsed.weekday() == 0
+
+    def test_single_agency_unknown_name_is_ignored(self, sample_gtfs_file: Path):
+        """Consequence of the ``len(feed.agency) > 1`` gate: on a single-agency feed
+        an unknown ``agency_name`` does not trigger agency resolution at all — we
+        silently fall back to global feed validity. Documenting this as intentional
+        behavior (the single agency IS the whole feed, so the typo is harmless),
+        but worth a regression guard."""
+        from datetime import datetime
+
+        result = GTFSIngester._auto_select_start_date(
+            sample_gtfs_file,
+            agency_name="Nonexistent Authority",
+            bus_only=False,
+        )
+        parsed = datetime.strptime(result, "%Y-%m-%d")
+        assert parsed.weekday() == 0
+
+
+class TestValidateRoutesMatchAgencies:
+    """Cover ``GTFSIngester._validate_routes_match_agencies``.
+
+    ``sample-feed-1.zip`` has a single agency (DTA) owning five routes
+    (AB, BFC, STBA, CITY, AAMV), and ``routes.txt`` carries the ``agency_id``
+    column. This exercises the happy paths and the no-op early returns;
+    the "routes owned by agency outside requested set" branch requires a
+    multi-agency feed and is not covered here.
+    """
+
+    @pytest.fixture
+    def sample_gtfs_file(self, gtfs_test_data_dir: Path) -> Path:
+        f = gtfs_test_data_dir / "sample-feed-1.zip"
+        if not f.exists():
+            pytest.skip(f"Sample GTFS file not found: {f}")
+        return f
+
+    @pytest.fixture
+    def ingester(self, sample_gtfs_file: Path) -> GTFSIngester:
+        return GTFSIngester(input_files=[sample_gtfs_file], cache_enabled=False)
+
+    def test_noop_when_route_ids_empty(self, ingester: GTFSIngester, sample_gtfs_file: Path):
+        """Empty route_ids ⇒ nothing to validate, must not raise even with agencies set."""
+        ingester._validate_routes_match_agencies(
+            sample_gtfs_file, route_ids="", agency_ids="DTA", agency_name=""
+        )
+        ingester._validate_routes_match_agencies(
+            sample_gtfs_file, route_ids=[], agency_ids="", agency_name="Demo Transit Authority"
+        )
+
+    def test_noop_when_no_agency_scoping(self, ingester: GTFSIngester, sample_gtfs_file: Path):
+        """With route_ids but no agency/name, there is no agency intent to cross-check."""
+        ingester._validate_routes_match_agencies(
+            sample_gtfs_file, route_ids=["AB"], agency_ids="", agency_name=""
+        )
+
+    def test_happy_path_route_belongs_to_requested_agency(
+        self, ingester: GTFSIngester, sample_gtfs_file: Path
+    ):
+        """Route AB is owned by DTA — requesting DTA must not raise."""
+        ingester._validate_routes_match_agencies(
+            sample_gtfs_file, route_ids=["AB", "CITY"], agency_ids="DTA", agency_name=""
+        )
+        ingester._validate_routes_match_agencies(
+            sample_gtfs_file,
+            route_ids="AB",
+            agency_ids="",
+            agency_name="Demo Transit Authority",
+        )
+
+    def test_nonexistent_route_id_is_not_this_layers_job(
+        self, ingester: GTFSIngester, sample_gtfs_file: Path
+    ):
+        """After the trim, route-membership is validated on the eflips-ingest side.
+        The x-side cross-check must no longer raise on unknown route_ids."""
+        ingester._validate_routes_match_agencies(
+            sample_gtfs_file,
+            route_ids=["DEFINITELY_NOT_A_ROUTE"],
+            agency_ids="DTA",
+            agency_name="",
+        )
+
+    def test_unknown_agency_raises(self, ingester: GTFSIngester, sample_gtfs_file: Path):
+        """Unknown agency bubbles up from ``_resolve_agency_ids`` with a clear message."""
+        with pytest.raises(ValueError, match="Agency not found"):
+            ingester._validate_routes_match_agencies(
+                sample_gtfs_file,
+                route_ids=["AB"],
+                agency_ids="NO_SUCH_ID",
+                agency_name="",
+            )
+        with pytest.raises(ValueError, match="Agency not found"):
+            ingester._validate_routes_match_agencies(
+                sample_gtfs_file,
+                route_ids=["AB"],
+                agency_ids="",
+                agency_name="Imaginary Transit",
+            )
+
+    def test_end_to_end_route_ids_restrict_ingest(
+        self, db_session: Session, sample_gtfs_file: Path
+    ):
+        """End-to-end: run ``GTFSIngester.generate`` with ``route_ids`` set to two
+        of sample-feed-1's five routes and verify the final eflips-model scenario
+        only contains data for those two routes.
+
+        sample-feed-1 route_ids: AB, BFC, STBA, CITY, AAMV (all owned by DTA).
+        Restrict to {"AB", "CITY"} and confirm exactly those survived into the DB.
+        """
+        ingester = GTFSIngester(input_files=[sample_gtfs_file], cache_enabled=False)
+        params = {
+            "log_level": "WARNING",
+            f"{ingester.__class__.__name__}.start_date": "2007-01-01",
+            f"{ingester.__class__.__name__}.duration": "WEEK",
+            f"{ingester.__class__.__name__}.bus_only": False,
+            f"{ingester.__class__.__name__}.route_ids": ["AB", "CITY"],
+        }
+
+        ingester.generate(db_session, params)
+
+        scenarios = db_session.query(Scenario).all()
+        assert len(scenarios) == 1
+        scenario_id = scenarios[0].id
+
+        # sample-feed-1 has 5 routes total; restricting to {"AB", "CITY"} must
+        # cut that to exactly 2 Lines in the scenario.
+        lines = db_session.query(Line).filter(Line.scenario_id == scenario_id).all()
+        assert len(lines) == 2, (
+            f"Expected 2 Lines (for route_ids AB and CITY), got {len(lines)}: "
+            f"{[l.name for l in lines]}"
+        )
+
+        # AB has route_short_name 10, CITY has 40 — confirm those survived
+        # (rather than e.g. BFC=20 / STBA=30 / AAMV=50).
+        line_short_codes = {line.name.split(":", 1)[0].strip() for line in lines}
+        assert line_short_codes == {"10", "40"}, (
+            f"Lines match wrong route_ids: {[l.name for l in lines]}"
+        )
+
+        # Trips must reference only the surviving lines.
+        trips = db_session.query(Trip).filter(Trip.scenario_id == scenario_id).all()
+        assert len(trips) > 0, "route_id filter yielded no trips"
+        trip_line_ids = {t.route.line_id for t in trips}
+        assert trip_line_ids == {line.id for line in lines}, (
+            "Trips reference lines outside the restricted set"
+        )
