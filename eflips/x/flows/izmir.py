@@ -8,7 +8,6 @@ This flow:
 2. Runs scheduling and simulation with 7 specific depots
 3. Analyzes and visualize results
 """
-import logging
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,7 +24,7 @@ import eflips.model
 import folium  # type: ignore[import-untyped]
 import matplotlib
 import plotly  # type: ignore[import-untyped]
-from eflips.model import ChargeType, Vehicle, Depot, Area, Rotation, Event
+from eflips.model import ChargeType, Vehicle, Depot, Rotation
 from prefect import flow
 
 from eflips.x.flows import run_steps
@@ -35,7 +34,6 @@ from eflips.x.steps.analyzers import (
     DepartureArrivalSocAnalyzer,
     SpecificEnergyConsumptionAnalyzer,
     VehicleSocAnalyzer,
-    DepotActivityAnalyzer,
     GeographicTripPlotAnalyzer,
     SingleRotationInfoAnalyzer,
     DepotEventAnalyzer,
@@ -112,7 +110,7 @@ def main() -> None:
 
     params: Dict[str, Any] = {
         "log_level": "INFO",
-        "GTFSIngester.agency_name": None,
+        "GTFSIngester.agency_name": "Eshot",
         "GTFSIngester.bus_only": False,
         "GTFSIngester.vehicle_types": [
             {
@@ -133,9 +131,9 @@ def main() -> None:
             "78",
             "102",
             "125",
-            " 140",
+            "140",
             "147",
-            "148 ",
+            "148",
             "154",
             "168",
             "240",
