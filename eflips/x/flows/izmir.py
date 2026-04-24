@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 
 """
-Izmir (IZBB) full-scenario flow.
+Izmir (IZBB) flow with three variants.
 
-This variant runs the entire Eshot GTFS feed for one week. It is the most
-computationally expensive of the three Izmir variants and is currently too
-slow to complete end-to-end — kept here as the reference baseline. For faster
-iteration use ``izmir_one_day`` (one day, full network) or
-``izmir_reduced_lines`` (one week, 12-route subset).
+Variants:
+
+* ``"full"`` — entire Eshot GTFS feed for one week. The reference baseline;
+  currently too slow to complete end-to-end.
+* ``"one_day"`` — full network for a single service day. Fastest way to
+  exercise every route end-to-end.
+* ``"reduced_lines"`` — week-long subset of 12 hand-picked routes. Good for
+  iterating on scheduling/depot-assignment logic.
+
+Sibling files ``izmir_one_day.py`` and ``izmir_reduced_lines.py`` are thin
+stubs that call ``main(variant=...)`` with the right argument.
 """
-import logging
+import argparse
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
-from tempfile import gettempdir
-from typing import List, Any, Dict, Type, Optional
-from eflips.x.steps.modifiers.gtfs_utilities import ConfigureVehicleTypes
+from typing import Any, Dict, List, Optional, Type
 
 # Add the project root to sys.path to allow importing from eflips.x
 project_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -27,27 +31,119 @@ import eflips.model
 import folium  # type: ignore[import-untyped]
 import matplotlib
 import plotly  # type: ignore[import-untyped]
-from eflips.model import ChargeType, Vehicle, Depot, Area, Rotation, Event
+from eflips.model import ChargeType, Depot, Rotation, Vehicle
 from prefect import flow
 
 from eflips.x.flows import run_steps
-from eflips.x.framework import PipelineStep, PipelineContext, Analyzer
+from eflips.x.framework import Analyzer, PipelineContext, PipelineStep
 from eflips.x.steps.analyzers import (
-    RotationInfoAnalyzer,
     DepartureArrivalSocAnalyzer,
+    DepotEventAnalyzer,
+    GeographicTripPlotAnalyzer,
+    InteractiveMapAnalyzer,
+    PowerAndOccupancyAnalyzer,
+    RotationInfoAnalyzer,
+    SingleRotationInfoAnalyzer,
     SpecificEnergyConsumptionAnalyzer,
     VehicleSocAnalyzer,
-    DepotActivityAnalyzer,
-    GeographicTripPlotAnalyzer,
-    SingleRotationInfoAnalyzer,
-    DepotEventAnalyzer,
-    PowerAndOccupancyAnalyzer,
-    InteractiveMapAnalyzer,
 )
 from eflips.x.steps.generators import GTFSIngester
-from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData, AddTemperatures
-from eflips.x.steps.modifiers.scheduling import VehicleScheduling, DepotAssignment
+from eflips.x.steps.modifiers.general_utilities import AddTemperatures, RemoveUnusedData
+from eflips.x.steps.modifiers.gtfs_utilities import (
+    ConfigureVehicleTypes,
+    LongDistanceVehicleType,
+)
+from eflips.x.steps.modifiers.scheduling import DepotAssignment, VehicleScheduling
 from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
+
+
+VALID_VARIANTS = ("full", "one_day", "reduced_lines")
+
+# Per-variant overrides. Keys absent here inherit the shared defaults below.
+_VARIANT_CONFIG: Dict[str, Dict[str, Any]] = {
+    "full": {
+        "work_dir": Path("data/cache/eflips_izmir_full"),
+        "gtfs_route_ids": None,
+        "gtfs_duration": None,  # default = WEEK
+        "vehicle_scheduling_breaks": {
+            "minimum_break_time": timedelta(minutes=0),
+            "regular_break_time": timedelta(minutes=10),
+            "maximum_break_time": timedelta(minutes=20),
+        },
+    },
+    "one_day": {
+        "work_dir": Path("data/cache/eflips_izmir_one_day"),
+        "gtfs_route_ids": None,
+        "gtfs_duration": "DAY",
+        "vehicle_scheduling_breaks": {},
+    },
+    "reduced_lines": {
+        "work_dir": Path("data/cache/eflips_izmir_reduced_lines"),
+        "gtfs_route_ids": [
+            "53",
+            "77",
+            "78",
+            "102",
+            "125",
+            "140",
+            "147",
+            "148",
+            "154",
+            "168",
+            "240",
+            "335",
+        ],
+        "gtfs_duration": None,
+        "vehicle_scheduling_breaks": {},
+    },
+}
+
+# Izmir Depot Locations. Coordinates are (longitude, latitude) — the order
+# eflips.opt expects and PostGIS uses internally.
+DEPOT_CONFIGS: List[Dict[str, Any]] = [
+    {
+        "name": "Adatepe Depot",
+        "depot_station": (27.1860, 38.3850),
+        "vehicle_type": ["TEMSA_AE", "TEMSA_AE_LD"],
+        "capacity": 300,
+    },
+    {
+        "name": "Mersinli Depot",
+        "depot_station": (27.1712, 38.4335),
+        "vehicle_type": ["TEMSA_AE", "TEMSA_AE_LD"],
+        "capacity": 300,
+    },
+    {
+        "name": "Çiğli",
+        "depot_station": (27.0704, 38.4846),
+        "vehicle_type": ["TEMSA_AE", "TEMSA_AE_LD"],
+        "capacity": 300,
+    },
+    {
+        "name": "Urla",
+        "depot_station": (26.7548, 38.3260),
+        "vehicle_type": ["TEMSA_AE", "TEMSA_AE_LD"],
+        "capacity": 150,
+    },
+    {
+        "name": "Çakalburnu",
+        "depot_station": (27.0636, 38.4049),
+        "vehicle_type": ["TEMSA_AE", "TEMSA_AE_LD"],
+        "capacity": 300,
+    },
+    {
+        "name": "Bergama",
+        "depot_station": (27.1180, 39.0839),
+        "vehicle_type": ["TEMSA_AE", "TEMSA_AE_LD"],
+        "capacity": 150,
+    },
+    {
+        "name": "Gaziemir",
+        "depot_station": (27.1199, 38.3481),
+        "vehicle_type": ["TEMSA_AE", "TEMSA_AE_LD"],
+        "capacity": 300,
+    },
+]
 
 
 def save_visualization(vis: Any, output_file: Path, analyzer: Optional[Analyzer] = None) -> None:
@@ -103,10 +199,15 @@ def query_all_ids(
         return [getattr(obj, id_attr) for obj in session.query(model_class).all()]
 
 
-@flow(name="Izmir Full (IZBB)")
-def main() -> None:
+@flow(name="Izmir (IZBB)", flow_run_name="Izmir {variant}")
+def main(variant: str = "full") -> None:
+    if variant not in VALID_VARIANTS:
+        raise ValueError(f"variant must be one of {VALID_VARIANTS}, got {variant!r}")
+
+    variant_cfg = _VARIANT_CONFIG[variant]
+
     ### Step 1: Initialize Pipeline ###
-    work_dir = Path("data/cache/eflips_izmir_full")
+    work_dir: Path = variant_cfg["work_dir"]
     work_dir.mkdir(parents=True, exist_ok=True)
     print(f"Working directory: {work_dir}")
 
@@ -125,15 +226,30 @@ def main() -> None:
         "ConfigureVehicleTypes.charging_curve": [[0.0, 450.0], [1.0, 450.0]],
         "ConfigureVehicleTypes.empty_mass": 12500,
         "ConfigureVehicleTypes.allowed_mass": 18500,
+        # LongDistanceVehicleType. Adds a second VehicleType (500 kWh, 1.2
+        # kWh/km) and reassigns trips on routes longer than the threshold.
+        "LongDistanceVehicleType.long_distance_vehicle_threshold": 61.0,
+        "LongDistanceVehicleType.battery_capacity": 500.0,
+        "LongDistanceVehicleType.consumption": 1.2,
     }
+
+    if variant_cfg["gtfs_duration"] is not None:
+        params["GTFSIngester.duration"] = variant_cfg["gtfs_duration"]
+    if variant_cfg["gtfs_route_ids"] is not None:
+        params["GTFSIngester.route_ids"] = variant_cfg["gtfs_route_ids"]
+
+    ### Step 4: Vehicle Scheduling params ###
+    params["VehicleScheduling.charge_type"] = ChargeType.DEPOT
+    for break_key, break_val in variant_cfg["vehicle_scheduling_breaks"].items():
+        params[f"VehicleScheduling.{break_key}"] = break_val
+
+    ### Step 5: Depot Assignment ###
+    params["DepotAssignment.depot_config"] = DEPOT_CONFIGS
 
     steps: List[PipelineStep] = []
 
     ### Step 2: Configure Data Ingestion ###
-    path_to_this_file = Path(__file__).resolve()
-    gtfs_file = (
-        path_to_this_file.parent.parent.parent.parent / "data" / "input" / "GTFS" / "izmir.zip"
-    )
+    gtfs_file = project_root / "data" / "input" / "GTFS" / "izmir.zip"
     steps.append(GTFSIngester(input_files=[gtfs_file]))
 
     ### Step 3: General Data Cleanup ###
@@ -142,60 +258,10 @@ def main() -> None:
     steps.append(AddTemperatures())
 
     ### Step 4: Vehicle Scheduling ###
-    params["VehicleScheduling.charge_type"] = ChargeType.DEPOT
-    params["VehicleScheduling.minimum_break_time"] = timedelta(minutes=0)
-    params["VehicleScheduling.regular_break_time"] = timedelta(minutes=10)
-    params["VehicleScheduling.maximum_break_time"] = timedelta(minutes=20)
+    steps.append(LongDistanceVehicleType())
     steps.append(VehicleScheduling())
 
     ### Step 5: Depot Assignment ###
-    # Izmir Depot Locations
-    # Note: coordinates are (longitude, latitude)
-    depot_configs = [
-        {
-            "name": "Adatepe",
-            "depot_station": (27.1860, 38.3850),
-            "vehicle_type": ["TEMSA_AE"],
-            "capacity": 200,
-        },
-        {
-            "name": "Mersinli",
-            "depot_station": (27.1712, 38.4335),
-            "vehicle_type": ["TEMSA_AE"],
-            "capacity": 200,
-        },
-        {
-            "name": "Çiğli",
-            "depot_station": (27.0704, 38.4846),
-            "vehicle_type": ["TEMSA_AE"],
-            "capacity": 200,
-        },
-        {
-            "name": "Urla",
-            "depot_station": (26.7548, 38.3260),
-            "vehicle_type": ["TEMSA_AE"],
-            "capacity": 100,
-        },
-        {
-            "name": "Çakalburnu",
-            "depot_station": (27.0636, 38.4049),
-            "vehicle_type": ["TEMSA_AE"],
-            "capacity": 200,
-        },
-        {
-            "name": "Bergama",
-            "depot_station": (27.1180, 39.0839),
-            "vehicle_type": ["TEMSA_AE"],
-            "capacity": 100,
-        },
-        {
-            "name": "Gaziemir",
-            "depot_station": (27.1199, 38.3481),
-            "vehicle_type": ["TEMSA_AE"],
-            "capacity": 200,
-        },
-    ]
-    params["DepotAssignment.depot_config"] = depot_configs
     steps.append(DepotAssignment())
 
     ### Step 6: Run Simulation ###
@@ -209,7 +275,7 @@ def main() -> None:
     ### Step 8: Analyze and Visualize Results ###
     output_directory = work_dir / "analysis"
 
-    simple_analyzers = [
+    simple_analyzers: List[Type[Analyzer]] = [
         RotationInfoAnalyzer,
         GeographicTripPlotAnalyzer,
         DepartureArrivalSocAnalyzer,
@@ -220,7 +286,7 @@ def main() -> None:
 
     for analyzer_class in simple_analyzers:
         try:
-            execute_and_save_simple_analyzer(analyzer_class, pipeline, output_directory)  # type: ignore[type-abstract]
+            execute_and_save_simple_analyzer(analyzer_class, pipeline, output_directory)
         except Exception as e:
             print(f"Error running analyzer {analyzer_class.__name__}: {e}")
 
@@ -272,4 +338,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Izmir (IZBB) pipeline flow")
+    parser.add_argument(
+        "--variant",
+        choices=VALID_VARIANTS,
+        default="full",
+        help="Pipeline variant to run (default: full).",
+    )
+    args = parser.parse_args()
+    main(variant=args.variant)

@@ -1301,6 +1301,30 @@ class DepotAssignment(Modifier):
         # Set the base URL for routing service
         os.environ["BASE_URL"] = base_url
 
+        # Bump the ORS "snap to road" radius from its 400 m default to 1000 m
+        # so stops inside gated complexes / poorly-mapped OSM areas still route
+        # (tracked for the Izmir GTFS feed, see scripts/check_izmir_station_routability.py).
+        import openrouteservice as _ors_module
+
+        _ors_snap_radius_m = 1000
+        if not getattr(_ors_module.Client.request, "_snap_radius_patched", False):
+            _orig_client_request = _ors_module.Client.request
+
+            def _patched_request(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                post_json = kwargs.get("post_json")
+                if (
+                    isinstance(post_json, dict)
+                    and "coordinates" in post_json
+                    and "radiuses" not in post_json
+                ):
+                    post_json["radiuses"] = [_ors_snap_radius_m] * len(
+                        post_json["coordinates"]
+                    )
+                return _orig_client_request(self, *args, **kwargs)
+
+            _patched_request._snap_radius_patched = True  # type: ignore[attr-defined]
+            _ors_module.Client.request = _patched_request  # type: ignore[method-assign]
+
         # Initialize the Optimizer
         optimizer = DepotRotationOptimizer(session, scenario.id)
         original_capacities = [depot["capacity"] for depot in depot_config]
