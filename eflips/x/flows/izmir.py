@@ -67,8 +67,8 @@ _VARIANT_CONFIG: Dict[str, Dict[str, Any]] = {
         "gtfs_duration": None,  # default = WEEK
         "vehicle_scheduling_breaks": {
             "minimum_break_time": timedelta(minutes=0),
-            "regular_break_time": timedelta(minutes=10),
-            "maximum_break_time": timedelta(minutes=20),
+            "regular_break_time": timedelta(minutes=20),
+            "maximum_break_time": timedelta(minutes=40),
         },
     },
     "one_day": {
@@ -270,7 +270,17 @@ def main(variant: str = "full") -> None:
 
     ### Step 7: Execute Pipeline ###
     pipeline = PipelineContext(work_dir=work_dir, params=params)
-    run_steps(steps=steps, context=pipeline)
+    # Inject ignore_unstable_simulation only around the Simulation step so it does
+    # not enter the cache-key hash for any other step (cache keys hash the full
+    # params dict — see framework.PipelineStep.compute_cache_key).
+    unstable_key = "Simulation.ignore_unstable_simulation"
+    for step in steps:
+        if isinstance(step, Simulation):
+            pipeline.params[unstable_key] = True
+        try:
+            step.execute(context=pipeline)
+        finally:
+            pipeline.params.pop(unstable_key, None)
 
     ### Step 8: Analyze and Visualize Results ###
     output_directory = work_dir / "analysis"
