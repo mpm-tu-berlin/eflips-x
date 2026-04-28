@@ -2,13 +2,15 @@
 """
 Benchmark eflips-x pipeline flows and collect per-step timing data.
 
-Runs GTFS and/or BVG flows with a clean cache each time, extracts Prefect task-level
-timing, and writes a CSV with problem-size features and per-step runtimes.
+Runs GTFS and/or BVG flows with a clean cache each time, extracts Prefect
+task-level timing, and writes a CSV with problem-size features and per-step
+runtimes.
 
 Features:
 - Incremental CSV writing (rows appended after each round)
-- Resumable via a JSON state file
-- Logging redirected to file; tqdm progress bar on console
+- Resumable via a JSON state file: ``--resume`` skips already-completed
+  rounds *before* running their flows.
+- Logging redirected to file; tqdm progress bar on console.
 
 Usage:
     python -m eflips.x.flows.benchmark --mode gtfs --repetitions 10 --agency "Havel"
@@ -17,6 +19,8 @@ Usage:
     python -m eflips.x.flows.benchmark --mode gtfs --repetitions 10 --resume
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
@@ -24,8 +28,19 @@ import sys
 import tempfile
 import traceback
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import (
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    TYPE_CHECKING,
+    Tuple,
+    TypedDict,
+    cast,
+)
 from uuid import UUID
 
 import pandas as pd
@@ -40,9 +55,59 @@ from tqdm import tqdm
 
 from eflips.model import Rotation, Trip, Vehicle
 
+if TYPE_CHECKING:
+    from eflips.x.flows.gtfs_flow import AgencyConfig
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+FlowType = Literal["gtfs", "bvg"]
+Row = Dict[str, Any]
+CompletedKey = Tuple[str, str, int]
+
+
+class CompletedEntry(TypedDict):
+    flow_type: str
+    agency: str
+    repetition: int
+
+
+class BenchmarkArgs(TypedDict, total=False):
+    mode: str
+    agency: Optional[str]
+    repetitions: int
+
+
+class BenchmarkState(TypedDict):
+    completed: List[CompletedEntry]
+    args: BenchmarkArgs
+
+
+@dataclass
+class WorkItem:
+    """One unit of benchmark work: a single (flow, agency, repetition) round."""
+
+    flow_type: FlowType
+    agency: str
+    repetition: int
+    payload: Optional["AgencyConfig"] = None
+
+    @property
+    def key(self) -> CompletedKey:
+        return (self.flow_type, self.agency, self.repetition)
+
+    def to_completed_entry(self) -> CompletedEntry:
+        return {
+            "flow_type": self.flow_type,
+            "agency": self.agency,
+            "repetition": self.repetition,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +164,7 @@ def _extract_step_class(task_run_name: str) -> Optional[str]:
     return base
 
 
-def collect_task_timings(root_flow_run_id: UUID) -> OrderedDict[str, float]:
+def collect_task_timings(root_flow_run_id: UUID) -> "OrderedDict[str, float]":
     """Return an ordered dict of ``{variant/ClassName: seconds}`` for every
     pipeline-step task in the flow tree.
 
@@ -116,11 +181,11 @@ def collect_task_timings(root_flow_run_id: UUID) -> OrderedDict[str, float]:
         )
 
     seen: Dict[str, int] = {}
-    timings: OrderedDict[str, float] = OrderedDict()
+    timings: "OrderedDict[str, float]" = OrderedDict()
 
     for tr in task_runs:
         step_class = _extract_step_class(tr.name)
-        if step_class is None:
+        if step_class is None or tr.flow_run_id is None:
             continue
 
         variant = _extract_variant(flow_runs.get(tr.flow_run_id, "unknown"))
@@ -145,7 +210,7 @@ def get_flow_run_total_time(flow_run_id: UUID) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Feature extraction from final database
+# Feature extraction
 # ---------------------------------------------------------------------------
 
 
@@ -170,6 +235,29 @@ def _find_final_db(search_dir: Path) -> Path:
     return dbs[-1]
 
 
+def _assemble_row(item: WorkItem, flow_run_id: UUID, final_db: Path) -> Row:
+    """Build a CSV row from a completed flow run."""
+    total_s = get_flow_run_total_time(flow_run_id)
+    timings = collect_task_timings(flow_run_id)
+    features = extract_features(final_db)
+
+    row: Row = {
+        "flow_type": item.flow_type,
+        "agency": item.agency,
+        "repetition": item.repetition,
+        **features,
+        "total_runtime_s": total_s,
+    }
+    for label, secs in timings.items():
+        row[label] = secs
+
+    logger.info(
+        f"  -> {total_s:.1f}s  trips={features['n_trips']}  "
+        f"rotations={features['n_rotations']}  vehicles={features['n_vehicles']}"
+    )
+    return row
+
+
 # ---------------------------------------------------------------------------
 # State management
 # ---------------------------------------------------------------------------
@@ -177,15 +265,19 @@ def _find_final_db(search_dir: Path) -> Path:
 _STATE_FILENAME = "benchmark_state.json"
 
 
-def _load_state(state_dir: Path) -> Dict[str, Any]:
-    """Load the state file, returning an empty structure if it doesn't exist."""
-    state_path = state_dir / _STATE_FILENAME
-    if state_path.exists():
-        return json.loads(state_path.read_text())
+def _empty_state() -> BenchmarkState:
     return {"completed": [], "args": {}}
 
 
-def _save_state(state_dir: Path, state: Dict[str, Any]) -> None:
+def _load_state(state_dir: Path) -> BenchmarkState:
+    """Load the state file, returning an empty structure if it doesn't exist."""
+    state_path = state_dir / _STATE_FILENAME
+    if state_path.exists():
+        return cast(BenchmarkState, json.loads(state_path.read_text()))
+    return _empty_state()
+
+
+def _save_state(state_dir: Path, state: BenchmarkState) -> None:
     """Write the state file atomically."""
     state_dir.mkdir(parents=True, exist_ok=True)
     state_path = state_dir / _STATE_FILENAME
@@ -194,24 +286,17 @@ def _save_state(state_dir: Path, state: Dict[str, Any]) -> None:
     tmp_path.replace(state_path)
 
 
-def _is_completed(state: Dict[str, Any], flow_type: str, agency: str, rep: int) -> bool:
-    """Check whether a specific round is already recorded as completed."""
-    for entry in state["completed"]:
-        if (
-            entry["flow_type"] == flow_type
-            and entry["agency"] == agency
-            and entry["repetition"] == rep
-        ):
-            return True
-    return False
+def _completed_keys(state: BenchmarkState) -> frozenset[CompletedKey]:
+    """Build an O(1)-lookup set of completed (flow_type, agency, repetition) keys."""
+    return frozenset((e["flow_type"], e["agency"], e["repetition"]) for e in state["completed"])
 
 
 # ---------------------------------------------------------------------------
-# CSV helpers
+# CSV
 # ---------------------------------------------------------------------------
 
 
-def _append_row_to_csv(csv_path: Path, row: Dict[str, Any]) -> None:
+def _append_row_to_csv(csv_path: Path, row: Row) -> None:
     """Append a single row to the CSV, writing the header if the file doesn't exist."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not csv_path.exists() or csv_path.stat().st_size == 0
@@ -219,23 +304,20 @@ def _append_row_to_csv(csv_path: Path, row: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# GTFS benchmarking (generator)
+# Planning
 # ---------------------------------------------------------------------------
 
 
-def _iter_gtfs_work_items(
-    agency_filter: Optional[str],
-    gtfs_dir: Optional[Path],
-    repetitions: int,
-) -> List[Tuple[str, int]]:
-    """Return list of (agency_name, repetition) pairs for GTFS benchmarking."""
+def _resolve_gtfs_agencies(
+    agency_filter: Optional[str], gtfs_dir: Optional[Path]
+) -> List["AgencyConfig"]:
+    """Parse depot_locations.xlsx and apply the optional agency filter."""
     from eflips.x.flows.gtfs_flow import parse_depot_locations
 
     if gtfs_dir is None:
         gtfs_dir = PROJECT_ROOT / "data" / "input" / "GTFS"
 
-    excel_path = gtfs_dir / "depot_locations.xlsx"
-    agencies = parse_depot_locations(excel_path)
+    agencies = parse_depot_locations(gtfs_dir / "depot_locations.xlsx")
 
     if agency_filter:
         fl = agency_filter.lower()
@@ -246,143 +328,99 @@ def _iter_gtfs_work_items(
         ]
         if not agencies:
             raise ValueError(f"No agencies matched filter '{agency_filter}'")
-
-    items = []
-    for rep in range(repetitions):
-        for agency in agencies:
-            items.append((agency.agency_name, rep + 1))
-    return items
+    return agencies
 
 
-def benchmark_gtfs_iter(
-    repetitions: int,
-    agency_filter: Optional[str],
-    gtfs_dir: Optional[Path],
-) -> Iterator[Dict[str, Any]]:
-    """Yield one result dict per agency/repetition."""
-    from eflips.x.flows.gtfs_flow import parse_depot_locations, run_agency_flow
+def _plan_gtfs(
+    repetitions: int, agency_filter: Optional[str], gtfs_dir: Optional[Path]
+) -> List[WorkItem]:
+    agencies = _resolve_gtfs_agencies(agency_filter, gtfs_dir)
+    return [
+        WorkItem(flow_type="gtfs", agency=a.agency_name, repetition=rep + 1, payload=a)
+        for rep in range(repetitions)
+        for a in agencies
+    ]
 
-    if gtfs_dir is None:
-        gtfs_dir = PROJECT_ROOT / "data" / "input" / "GTFS"
 
-    excel_path = gtfs_dir / "depot_locations.xlsx"
-    agencies = parse_depot_locations(excel_path)
+def _plan_bvg(repetitions: int) -> List[WorkItem]:
+    return [
+        WorkItem(flow_type="bvg", agency="BVG", repetition=rep + 1) for rep in range(repetitions)
+    ]
 
-    if agency_filter:
-        fl = agency_filter.lower()
-        agencies = [
-            a
-            for a in agencies
-            if fl in a.simulation_id.lower() or any(fl in n.lower() for n in a.agency_names)
-        ]
-        if not agencies:
-            raise ValueError(f"No agencies matched filter '{agency_filter}'")
 
-    for rep in range(repetitions):
-        for agency in agencies:
-            logger.info(f"[GTFS] rep {rep + 1}/{repetitions}  agency='{agency.agency_name}'")
-
-            try:
-                with tempfile.TemporaryDirectory(prefix="eflips_bench_gtfs_") as tmpdir:
-                    cache_root = Path(tmpdir) / "cache"
-                    output_root = Path(tmpdir) / "output"
-
-                    state = run_agency_flow(
-                        agency=agency,
-                        cache_base_root=cache_root,
-                        output_base_root=output_root,
-                        agency_name=agency.agency_name,
-                        enable_plots=False,
-                        tolerate_failures=False,
-                        return_state=True,
-                    )
-
-                    flow_run_id = state.state_details.flow_run_id
-                    total_s = get_flow_run_total_time(flow_run_id)
-                    timings = collect_task_timings(flow_run_id)
-
-                    gtfs_stem = agency.gtfs_file.stem
-                    slug = agency.slug
-                    depot_dir = cache_root / gtfs_stem / slug / "depot"
-                    features = extract_features(_find_final_db(depot_dir))
-
-                    row: Dict[str, Any] = {
-                        "flow_type": "gtfs",
-                        "agency": agency.agency_name,
-                        "repetition": rep + 1,
-                        **features,
-                        "total_runtime_s": total_s,
-                    }
-                    for label, secs in timings.items():
-                        row[label] = secs
-
-                    logger.info(
-                        f"  -> {total_s:.1f}s  trips={features['n_trips']}  "
-                        f"rotations={features['n_rotations']}  vehicles={features['n_vehicles']}"
-                    )
-                    yield row
-            except Exception:
-                logger.exception(
-                    f"[GTFS] FAILED rep {rep + 1}/{repetitions}  " f"agency='{agency.agency_name}'"
-                )
-                yield {
-                    "flow_type": "gtfs",
-                    "agency": agency.agency_name,
-                    "repetition": rep + 1,
-                    "error": traceback.format_exc(),
-                }
+def _plan_all(args: argparse.Namespace) -> List[WorkItem]:
+    plan: List[WorkItem] = []
+    if args.mode in ("gtfs", "both"):
+        plan.extend(_plan_gtfs(args.repetitions, args.agency, args.gtfs_dir))
+    if args.mode in ("bvg", "both"):
+        plan.extend(_plan_bvg(args.repetitions))
+    return plan
 
 
 # ---------------------------------------------------------------------------
-# BVG benchmarking (generator)
+# Per-item runners
 # ---------------------------------------------------------------------------
 
 
-def benchmark_bvg_iter(repetitions: int) -> Iterator[Dict[str, Any]]:
-    """Yield one result dict per repetition."""
+def _run_gtfs(item: WorkItem) -> Row:
+    from eflips.x.flows.gtfs_flow import run_agency_flow
+
+    assert item.payload is not None, "GTFS work item missing AgencyConfig payload"
+    agency = item.payload
+
+    with tempfile.TemporaryDirectory(prefix="eflips_bench_gtfs_") as tmpdir:
+        cache_root = Path(tmpdir) / "cache"
+        output_root = Path(tmpdir) / "output"
+
+        flow_state = run_agency_flow(
+            agency=agency,
+            cache_base_root=cache_root,
+            output_base_root=output_root,
+            agency_name=agency.agency_name,
+            enable_plots=False,
+            tolerate_failures=False,
+            return_state=True,
+        )
+
+        flow_run_id = flow_state.state_details.flow_run_id
+        assert flow_run_id is not None, "Prefect flow state has no flow_run_id"
+        depot_dir = cache_root / agency.gtfs_file.stem / agency.slug / "depot"
+        return _assemble_row(item, flow_run_id, _find_final_db(depot_dir))
+
+
+def _run_bvg(item: WorkItem) -> Row:
     import eflips.x.flows.bvg as bvg_module
 
-    for rep in range(repetitions):
-        logger.info(f"[BVG] rep {rep + 1}/{repetitions}")
+    with tempfile.TemporaryDirectory(prefix="eflips_bench_bvg_") as tmpdir:
+        original_work_dir = bvg_module.WORK_DIR_BASE
+        bvg_module.WORK_DIR_BASE = Path(tmpdir) / "cache"
+        try:
+            flow_state = bvg_module.bvg_three_scenario_flow(return_state=True)
+            flow_run_id = flow_state.state_details.flow_run_id
+            assert flow_run_id is not None, "Prefect flow state has no flow_run_id"
+            common_dir = Path(tmpdir) / "cache" / "common"
+            return _assemble_row(item, flow_run_id, _find_final_db(common_dir))
+        finally:
+            bvg_module.WORK_DIR_BASE = original_work_dir
 
-        with tempfile.TemporaryDirectory(prefix="eflips_bench_bvg_") as tmpdir:
-            original_work_dir = bvg_module.WORK_DIR_BASE
-            bvg_module.WORK_DIR_BASE = Path(tmpdir) / "cache"
 
-            try:
-                flow_state = bvg_module.bvg_three_scenario_flow(return_state=True)
-                flow_run_id = flow_state.state_details.flow_run_id
-                total_s = get_flow_run_total_time(flow_run_id)
-                timings = collect_task_timings(flow_run_id)
-
-                common_dir = Path(tmpdir) / "cache" / "common"
-                features = extract_features(_find_final_db(common_dir))
-
-                row: Dict[str, Any] = {
-                    "flow_type": "bvg",
-                    "agency": "BVG",
-                    "repetition": rep + 1,
-                    **features,
-                    "total_runtime_s": total_s,
-                }
-                for label, secs in timings.items():
-                    row[label] = secs
-
-                logger.info(
-                    f"  -> {total_s:.1f}s  trips={features['n_trips']}  "
-                    f"rotations={features['n_rotations']}  vehicles={features['n_vehicles']}"
-                )
-                yield row
-            except Exception:
-                logger.exception(f"[BVG] FAILED rep {rep + 1}/{repetitions}")
-                yield {
-                    "flow_type": "bvg",
-                    "agency": "BVG",
-                    "repetition": rep + 1,
-                    "error": traceback.format_exc(),
-                }
-            finally:
-                bvg_module.WORK_DIR_BASE = original_work_dir
+def _run(item: WorkItem) -> Row:
+    """Run one work item. On failure, return a row dict with an ``error`` key."""
+    logger.info(f"[{item.flow_type.upper()}] rep {item.repetition}  agency='{item.agency}'")
+    try:
+        if item.flow_type == "gtfs":
+            return _run_gtfs(item)
+        return _run_bvg(item)
+    except Exception:
+        logger.exception(
+            f"[{item.flow_type.upper()}] FAILED rep {item.repetition}  " f"agency='{item.agency}'"
+        )
+        return {
+            "flow_type": item.flow_type,
+            "agency": item.agency,
+            "repetition": item.repetition,
+            "error": traceback.format_exc(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +428,7 @@ def benchmark_bvg_iter(repetitions: int) -> Iterator[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Benchmark eflips-x flows and collect per-step timing data"
     )
@@ -441,15 +479,16 @@ def main() -> None:
         default=Path("data/cache"),
         help="Directory for the benchmark log file (default: data/cache)",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # --- Set up logging to file instead of console ---
-    args.log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = args.log_dir / "benchmark.log"
+
+def _setup_logging(log_dir: Path) -> Path:
+    """Redirect root logging to a file under *log_dir*; keep tqdm on console."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "benchmark.log"
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
-    # Remove any default handlers (e.g. StreamHandler to stderr)
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     file_handler = logging.FileHandler(log_path, mode="a")
@@ -457,100 +496,70 @@ def main() -> None:
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
     root_logger.addHandler(file_handler)
+    return log_path
 
-    # Also redirect stdout/stderr from subprocesses and Prefect to the log
-    # (tqdm writes to its own fd so it stays visible)
+
+def _warn_args_mismatch(saved: BenchmarkArgs, current: argparse.Namespace) -> None:
+    if saved.get("mode") and saved["mode"] != current.mode:
+        logger.warning(
+            f"Resuming with mode={current.mode} but state was saved with " f"mode={saved['mode']}"
+        )
+    if saved.get("agency") and saved["agency"] != current.agency:
+        logger.warning(
+            f"Resuming with agency={current.agency} but state was saved with "
+            f"agency={saved['agency']}"
+        )
+
+
+def main() -> None:
+    args = _parse_args()
+    log_path = _setup_logging(args.log_dir)
     print(f"Logging to {log_path.resolve()}", file=sys.stderr)
 
     # --- Load / initialize state ---
-    state = {"completed": [], "args": {}}
+    state: BenchmarkState = _empty_state()
     if args.resume:
         state = _load_state(args.state_dir)
-        saved_args = state.get("args", {})
-        if saved_args.get("mode") and saved_args["mode"] != args.mode:
-            logger.warning(
-                f"Resuming with mode={args.mode} but state was saved with "
-                f"mode={saved_args['mode']}"
-            )
-        if saved_args.get("agency") and saved_args["agency"] != args.agency:
-            logger.warning(
-                f"Resuming with agency={args.agency} but state was saved with "
-                f"agency={saved_args['agency']}"
-            )
-        n_completed = len(state["completed"])
-        print(f"Resuming: {n_completed} rounds already completed", file=sys.stderr)
+        _warn_args_mismatch(state.get("args", {}), args)
+        print(
+            f"Resuming: {len(state['completed'])} rounds already completed",
+            file=sys.stderr,
+        )
 
-    # Save args into state for future resume validation
     state["args"] = {
         "mode": args.mode,
         "agency": args.agency,
         "repetitions": args.repetitions,
     }
 
-    # --- Compute total work items for the progress bar ---
-    total_items = 0
-    already_done = 0
-
-    if args.mode in ("gtfs", "both"):
-        gtfs_items = _iter_gtfs_work_items(args.agency, args.gtfs_dir, args.repetitions)
-        total_items += len(gtfs_items)
-        for agency_name, rep in gtfs_items:
-            if _is_completed(state, "gtfs", agency_name, rep):
-                already_done += 1
-
-    if args.mode in ("bvg", "both"):
-        bvg_count = args.repetitions
-        total_items += bvg_count
-        for rep in range(1, bvg_count + 1):
-            if _is_completed(state, "bvg", "BVG", rep):
-                already_done += 1
-
-    if total_items == 0:
+    # --- Plan and filter ---
+    plan = _plan_all(args)
+    if not plan:
         print("No work items to run.", file=sys.stderr)
         return
 
-    # --- Main loop with tqdm ---
-    pbar = tqdm(total=total_items, initial=already_done, desc="Benchmark", unit="run")
+    done = _completed_keys(state)
+    remaining = [item for item in plan if item.key not in done]
+    already_done = len(plan) - len(remaining)
+
+    # --- Execute remaining items ---
+    pbar = tqdm(total=len(plan), initial=already_done, desc="Benchmark", unit="run")
     rows_written = 0
-
     failures = 0
-
-    def _process_row(row: Dict[str, Any]) -> None:
-        nonlocal rows_written, failures
-        flow_type = row["flow_type"]
-        agency = row["agency"]
-        rep = row["repetition"]
-
-        if _is_completed(state, flow_type, agency, rep):
-            pbar.update(1)
-            return
-
-        _append_row_to_csv(args.output, row)
-        rows_written += 1
-
-        if "error" in row:
-            failures += 1
-            pbar.set_postfix_str(f"FAILED {agency} rep {rep}")
-        else:
-            pbar.set_postfix_str(f"{agency} rep {rep}")
-
-        state["completed"].append({"flow_type": flow_type, "agency": agency, "repetition": rep})
-        _save_state(args.state_dir, state)
-
-        pbar.update(1)
-
     try:
-        if args.mode in ("gtfs", "both"):
-            for row in benchmark_gtfs_iter(
-                repetitions=args.repetitions,
-                agency_filter=args.agency,
-                gtfs_dir=args.gtfs_dir,
-            ):
-                _process_row(row)
+        for item in remaining:
+            row = _run(item)
+            _append_row_to_csv(args.output, row)
+            state["completed"].append(item.to_completed_entry())
+            _save_state(args.state_dir, state)
 
-        if args.mode in ("bvg", "both"):
-            for row in benchmark_bvg_iter(repetitions=args.repetitions):
-                _process_row(row)
+            if "error" in row:
+                failures += 1
+                pbar.set_postfix_str(f"FAILED {item.agency} rep {item.repetition}")
+            else:
+                pbar.set_postfix_str(f"{item.agency} rep {item.repetition}")
+            rows_written += 1
+            pbar.update(1)
     finally:
         pbar.close()
 
@@ -567,7 +576,6 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    # Print summary if CSV exists
     if args.output.exists():
         df = pd.read_csv(args.output)
         print(f"Total rows in CSV: {len(df)}", file=sys.stderr)
