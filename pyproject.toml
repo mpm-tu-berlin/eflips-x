@@ -9,7 +9,7 @@ license = {text = "AGPL-3.0-or-later"}
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "eflips-model",
+    "eflips-model (>=11.0.0)",
     "eflips-depot",
     "eflips-ingest",
     "eflips-eval",

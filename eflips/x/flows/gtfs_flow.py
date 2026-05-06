@@ -220,6 +220,7 @@ def run_common_phase(
         "GTFSIngester.bus_only": True,
         "GTFSIngester.duration": "WEEK",
         "GTFSIngester.agency_ids": agency.agency_ids,
+        "ConfigureVehicleTypes.vehicle_type_names": ["default"],
         "ConfigureVehicleTypes.battery_capacity": agency.battery_capacity,
         "ConfigureVehicleTypes.consumption": agency.consumption,
         "ConfigureVehicleTypes.charging_curve": agency.charging_curve,
