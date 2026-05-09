@@ -31,7 +31,8 @@ from eflips.model import (
     Scenario,
 )
 from fuzzywuzzy import fuzz  # type: ignore[import-untyped]
-from geoalchemy2.shape import to_shape
+from geoalchemy2.shape import from_shape, to_shape
+from shapely.geometry import Point
 from sqlalchemy import not_, func
 from sqlalchemy.orm import Session, joinedload
 
@@ -1032,15 +1033,19 @@ Uses the Levenshtein distance ratio (0-100) to compare station names.
         stations_in_use = session.query(Station).filter(Station.id.in_(station_ids_in_use)).all()
 
         for station in stations_in_use:
-            geom_wkb = to_shape(station.geom).wkb  # type: ignore[arg-type]
+            # Drop Z so SpatiaLite's spheroid ST_Distance (which returns NULL for POINTZ)
+            # works regardless of whether the column stores 2D or 3D geometries.
+            station_pt = to_shape(station.geom)  # type: ignore[arg-type]
+            geom_2d_wkb = Point(station_pt.x, station_pt.y).wkb
 
-            # Do a fancy geospatial query to find all stations within the given distance
             nearby_stations = (
                 session.query(Station)
                 .filter(Station.id != station.id)
                 .filter(Station.id.in_(station_ids_in_use))
                 .filter(
-                    func.ST_Distance(Station.geom, func.ST_GeomFromWKB(geom_wkb), 1)
+                    func.ST_Distance(
+                        func.CastToXY(Station.geom), func.ST_GeomFromWKB(geom_2d_wkb), 1
+                    )
                     <= max_distance_meters
                 )
                 .all()

@@ -368,8 +368,12 @@ def _create_route_with_stations(
 
     # Calculate distance based on geometry
     if route_geom is not None:
-        # Use the routed distance (in meters) returned by the routing service / cache.
-        distance = routed_distance
+        # The Route table has a CHECK constraint that distance must match ST_Length(geom)
+        # within 50m. ORS-reported road distance can drift further from ST_Length over the
+        # polyline (different sampling/projection), so derive distance from the geometry.
+        line_2d = LineString([(lon, lat) for lon, lat, *_ in to_shape(route_geom).coords])
+        line_2d_geom = from_shape(line_2d, srid=4326)
+        distance = db_session.query(func.ST_Length(line_2d_geom, True)).scalar()
     else:
         # Fall back to straight-line distance. Use 2D to avoid POINTZ issues with ST_Distance.
         dep_geom_2d = from_shape(Point(dep_pt.x, dep_pt.y), srid=4326)

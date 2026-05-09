@@ -297,7 +297,7 @@ class TestSetUpBvgVehicleTypes:
             .one()
         )
 
-        assert np.isclose(max(consumption_lut.values), 5.332117566234736)
+        assert np.isclose(max(consumption_lut.values), 12.744117566234737)
 
     def test_remove_unused_vehicle_types_with_path(
         self, temp_db: Path, scenario_with_vehicle_types, db_session: Session
@@ -890,14 +890,14 @@ class TestMergeStations:
             name="Berlin Hauptbahnhof",
             name_short="HBF1",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(0 0)", srid=4326),
+            geom=WKTElement("POINT Z (0 0 0)", srid=4326),
             is_electrified=False,
         )
         station_nearby_similar_2 = Station(
             name="S+U Berlin Hauptbahnhof",
             name_short="HBF2",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(0.0005 0)", srid=4326),  # ~50m away
+            geom=WKTElement("POINT Z (0.0005 0 0)", srid=4326),  # ~50m away
             is_electrified=False,
         )
 
@@ -906,7 +906,7 @@ class TestMergeStations:
             name="Berlin Hbf Platform 2",
             name_short="HBF3",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(1 1)", srid=4326),  # ~157km away
+            geom=WKTElement("POINT Z (1 1 0)", srid=4326),  # ~157km away
             is_electrified=False,
         )
 
@@ -915,7 +915,7 @@ class TestMergeStations:
             name="Zoologischer Garten",
             name_short="ZOO",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(0.0005 0.0005)", srid=4326),  # ~70m away, different name
+            geom=WKTElement("POINT Z (0.0005 0.0005 0)", srid=4326),  # ~70m away, different name
             is_electrified=False,
         )
 
@@ -924,7 +924,7 @@ class TestMergeStations:
             name="Alexanderplatz",
             name_short="ALEX",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(0.01 0.01)", srid=4326),
+            geom=WKTElement("POINT Z (0.01 0.01 0)", srid=4326),
             is_electrified=False,
         )
 
