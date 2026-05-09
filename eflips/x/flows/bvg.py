@@ -24,7 +24,7 @@ from matplotlib.figure import Figure
 from prefect import flow
 from sqlalchemy.orm import Session
 
-from eflips.x.flows import run_steps
+from eflips.x.flows import run_steps, save_plot_to_files_in_output_dir as _save_plot
 from eflips.x.framework import Modifier
 from eflips.x.framework import PipelineContext, PipelineStep, ScenarioDisplayConfig
 from eflips.x.steps.analyzers import (
@@ -329,22 +329,8 @@ class CleanSimulationResults(Modifier):
 
 
 def save_plot_to_files_in_output_dir(fig: Figure, basename: str, dpi: int = 300) -> None:
-    """
-    Utility method to save a figure to the output directory with given basename.
-
-    :param fig: A Matplotlib Figure object
-    :param basename: The base name for the output files (without extension)
-    :param dpi: Resolution in dots per inch (used for both PDF and PNG)
-    :return: None
-    """
-    data_dir = output_dir()
-    data_dir.mkdir(parents=True, exist_ok=True)
-    output_pdf = data_dir / f"{basename}.pdf"
-    fig.savefig(output_pdf, bbox_inches="tight", dpi=dpi)
-    logger.info(f"Saved plot to: {output_pdf}")
-    output_png = data_dir / f"{basename}.png"
-    fig.savefig(output_png, bbox_inches="tight", dpi=dpi)
-    logger.info(f"Saved plot to: {output_png}")
+    """Save a figure to BVG's output directory under {basename}.{pdf,png}."""
+    _save_plot(fig, output_dir(), basename, dpi)
 
 
 def output_dir() -> Path:

@@ -130,7 +130,7 @@ class VehicleTypeDepotPlotAnalyzer(Analyzer):
     and PNG formats.
     """
 
-    def __init__(self, code_version: str = "v1.0.5", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v1.0.6", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -142,6 +142,8 @@ Default: None (auto-detect)
             """.strip(),
             f"{cls.__name__}.depot_short_names": f"""
 List of depot short names to include in the analysis.
+Falls back to enumerating every Depot in the scenario when none of the provided
+short names match a Station.name_short (e.g. for non-BVG feeds).
 Default: {BVG_DEPOT_SHORT_NAMES}
             """.strip(),
             f"{cls.__name__}.weeks_per_year": """
@@ -175,22 +177,30 @@ Default: 52 weeks
             session.query(VehicleType).filter(VehicleType.scenario_id == scenario_id).all()
         )
 
+        # Resolve the configured depot_short_names against actual Station rows.
+        # When none match (e.g. for non-BVG feeds whose stations don't carry the
+        # BVG short codes), fall back to enumerating every Depot in the scenario
+        # and using the depot's station name directly.
+        resolved_depots: List[Tuple[str, "Station"]] = []
+        for depot_short_name in depot_short_names:
+            depot_station = (
+                session.query(Station).filter(Station.name_short == depot_short_name).first()
+            )
+            if depot_station is not None:
+                resolved_depots.append((depot_short_name, depot_station))
+        if not resolved_depots:
+            for depot in session.query(Depot).all():
+                if depot.station is not None:
+                    resolved_depots.append((depot.station.name, depot.station))
+
         for vehicle_type in vehicle_types:
-            for depot_short_name in depot_short_names:
-                # Get depot station
-                depot_station = (
-                    session.query(Station).filter(Station.name_short == depot_short_name).first()
-                )
-
-                if not depot_station:
-                    warnings.warn(
-                        f"Depot station with short name '{depot_short_name}' not found for vehicle type '{vehicle_type.name_short}'. Skipping."
-                    )
-                    continue
-
+            for depot_short_name, depot_station in resolved_depots:
                 depot_station_name = clean_depot_name(depot_station.name)
 
-                # Query rotations originating from this depot with this vehicle type
+                # Query rotations originating from this depot with this vehicle type.
+                # Match on Station.id rather than name_short so we work for feeds
+                # whose stations lack a short code (the BVG default code path
+                # already resolved the Station via name_short above).
                 rotations = (
                     session.query(Rotation)
                     .join(Trip)
@@ -200,7 +210,7 @@ Default: 52 weeks
                     .filter(
                         Rotation.scenario_id == scenario_id,
                         VehicleType.id == vehicle_type.id,
-                        Station.name_short == depot_short_name,
+                        Station.id == depot_station.id,
                     )
                     .all()
                 )
@@ -277,8 +287,12 @@ Default: 52 weeks
             index="depot", columns="Fahrzeugtyp", values="Fahrzeugkilometer"
         )
 
-        # Reorder columns to match standard vehicle type ordering
+        # Reorder columns to match BVG's canonical vehicle type ordering;
+        # fall back to whatever the data has when no BVG types are present
+        # (e.g. non-BVG feeds like Izmir).
         available_types = [vt for vt in VEHICLE_TYPE_ORDER if vt in df_pivot.columns]
+        if not available_types:
+            available_types = list(df_pivot.columns)
         df_pivot = df_pivot[available_types]
 
         # Use seaborn Set2 color palette
@@ -310,7 +324,7 @@ class RevenueServiceTimelineAnalyzer(Analyzer):
     in revenue (PASSENGER) service at each minute of the day, grouped by vehicle type.
     """
 
-    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v1.0.1", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -360,10 +374,12 @@ Default: "Europe/Berlin"
 
         df_events = pd.DataFrame(events)
 
-        # Build running count per vehicle type
-        vehicle_types_present = [
-            vt for vt in VEHICLE_TYPE_ORDER if vt in df_events["vehicle_type"].unique()
-        ]
+        # Build running count per vehicle type — use BVG's canonical order
+        # when applicable, otherwise fall back to whatever the data has.
+        all_vts = list(df_events["vehicle_type"].unique())
+        vehicle_types_present = [vt for vt in VEHICLE_TYPE_ORDER if vt in all_vts]
+        if not vehicle_types_present:
+            vehicle_types_present = sorted(all_vts)
 
         # Create minute-resolution time index covering full data range
         time_min = df_events["time"].min().floor("min")
@@ -413,8 +429,11 @@ Default: "Europe/Berlin"
             1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained"
         )
 
-        # Order columns by VEHICLE_TYPE_ORDER
+        # Order columns by BVG's canonical ordering; fall back to whatever
+        # the data has when no BVG types are present (e.g. Izmir's TEMSA_AE).
         columns = [vt for vt in VEHICLE_TYPE_ORDER if vt in prepared_data.columns]
+        if not columns:
+            columns = list(prepared_data.columns)
         palette = sns.color_palette("Set2", n_colors=len(columns))
 
         stack_data = [prepared_data[col].values for col in columns]
