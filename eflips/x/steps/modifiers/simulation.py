@@ -343,7 +343,7 @@ Default: 6
 
 class Simulation(Modifier):
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.0.1", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -360,6 +360,11 @@ Default: auto-detected based on the scenario.
 Set a eflips.depot.api.SmartChargingStrategy to be used during the simulation. If not set, no smart charging
 will be applied (SmartChargingStrategy.NONE).
 Default: SmartChargingStrategy.NONE
+            """.strip(),
+            f"{cls.__name__}.calculate_timeseries": """
+If True, the simulation will calculate detailed timeseries for all events, which can be used for in-depth analysis and 
+visualization. This may significantly increase runtime and database size.
+Default: False
             """.strip(),
             f"{cls.__name__}.ignore_unstable_simulation": """
 If True, the simulation will not raise an exception if it becomes unstable.
@@ -397,6 +402,7 @@ Default: False
             f"{self.__class__.__name__}.smart_charging",
             SmartChargingStrategy.NONE,
         )
+        calculate_timeseries = params.get(f"{self.__class__.__name__}.calculate_timeseries", False)
         ignore_unstable_simulation = params.get(
             f"{self.__class__.__name__}.ignore_unstable_simulation", False
         )
@@ -413,6 +419,7 @@ Default: False
             initialize_vehicles=True,
             consumption_result=consumption_results,
             terminus_deadtime=terminus_deadtime,
+            calculate_timeseries=calculate_timeseries,
         )
 
         ##### Step 2: Run the simulation
@@ -431,6 +438,7 @@ Default: False
             initialize_vehicles=False,
             consumption_result=consumption_results,
             terminus_deadtime=terminus_deadtime,
+            calculate_timeseries=calculate_timeseries,
         )
 
 
