@@ -657,7 +657,7 @@ class TestSimulation:
         assert "Simulation.ignore_unstable_simulation" in docs
         assert "Simulation.ignore_delayed_trips" in docs
         assert "terminus_deadtime_s" in docs
-        assert "calculate_timeseries" in docs
+        assert "Simulation.calculate_timeseries" in docs
 
         # Check that descriptions are non-empty
         for key, value in docs.items():
