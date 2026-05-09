@@ -651,18 +651,37 @@ class TestSimulation:
         docs = modifier.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 6
+        assert len(docs) == 7
         assert "Simulation.repetition_period" in docs
         assert "Simulation.smart_charging" in docs
         assert "Simulation.ignore_unstable_simulation" in docs
         assert "Simulation.ignore_delayed_trips" in docs
         assert "terminus_deadtime_s" in docs
         assert "Simulation.calculate_timeseries" in docs
+        assert "Simulation.shrink_to_peak_usage" in docs
 
         # Check that descriptions are non-empty
         for key, value in docs.items():
             assert isinstance(value, str)
             assert len(value) > 0
+
+    def test_simulation_with_shrink_to_peak_usage_false(
+        self, temp_db: Path, simulation_scenario: Scenario, db_session: Session
+    ):
+        """Test simulation runs with shrink_to_peak_usage explicitly disabled."""
+        modifier = Simulation()
+        result = modifier.modify(
+            session=db_session,
+            params={
+                "Simulation.shrink_to_peak_usage": False,
+            },
+        )
+        db_session.commit()
+
+        assert result is None
+
+        events = db_session.query(Event).all()
+        assert len(events) > 0
 
     def test_simulation_creates_vehicle_soc_data(
         self, temp_db: Path, simulation_scenario: Scenario, db_session: Session

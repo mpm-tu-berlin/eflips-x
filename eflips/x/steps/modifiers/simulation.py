@@ -343,7 +343,7 @@ Default: 6
 
 class Simulation(Modifier):
 
-    def __init__(self, code_version: str = "v1.0.1", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.0.2", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -362,19 +362,25 @@ will be applied (SmartChargingStrategy.NONE).
 Default: SmartChargingStrategy.NONE
             """.strip(),
             f"{cls.__name__}.calculate_timeseries": """
-If True, the simulation will calculate detailed timeseries for all events, which can be used for in-depth analysis and 
+If True, the simulation will calculate detailed timeseries for all events, which can be used for in-depth analysis and
 visualization. This may significantly increase runtime and database size.
 Default: False
             """.strip(),
             f"{cls.__name__}.ignore_unstable_simulation": """
 If True, the simulation will not raise an exception if it becomes unstable.
-            
+
 Default: False
             """.strip(),
             f"{cls.__name__}.ignore_delayed_trips": """
 If True, the simulation will ignore delayed trips instead of raising an exception.
 
 Default: False
+            """.strip(),
+            f"{cls.__name__}.shrink_to_peak_usage": """
+If True, depot Areas and electrified opportunity-charging Stations are shrunk to their peak observed usage
+after the simulation has written events to the database. See eflips.depot.api.simulate_scenario for details.
+
+Default: True
             """.strip(),
             "terminus_deadtime_s": """
             Global parameter: the total time overhead in seconds (attach + detach) for
@@ -407,6 +413,9 @@ Default: False
             f"{self.__class__.__name__}.ignore_unstable_simulation", False
         )
         ignore_delayed_trips = params.get(f"{self.__class__.__name__}.ignore_delayed_trips", False)
+        shrink_to_peak_usage = params.get(
+            f"{self.__class__.__name__}.shrink_to_peak_usage", True
+        )
         terminus_deadtime_s: float = params.get("terminus_deadtime_s", 60.0)
         terminus_deadtime = timedelta(seconds=terminus_deadtime_s)
 
@@ -429,6 +438,7 @@ Default: False
             smart_charging_strategy=smart_charging,
             ignore_unstable_simulation=ignore_unstable_simulation,
             ignore_delayed_trips=ignore_delayed_trips,
+            shrink_to_peak_usage=shrink_to_peak_usage,
         )
 
         ##### Step 3: Consumption simulation
