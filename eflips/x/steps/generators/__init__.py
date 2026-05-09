@@ -36,7 +36,9 @@ from eflips.model import (
     Rotation,
 )
 from geoalchemy2.functions import ST_Distance
+from geoalchemy2.shape import from_shape, to_shape
 from prefect.artifacts import create_progress_artifact, update_progress_artifact
+from shapely.geometry import Point
 from sqlalchemy import func, text
 
 from eflips.x.framework import Generator
@@ -231,11 +233,16 @@ class BVGXMLIngester(Generator):
             .filter(Route.distance >= 1e6 * 1000)
         )
         for route in long_route_q:
-            first_point = route.departure_station.geom
-            last_point = route.arrival_station.geom
+            # Drop Z before ST_Transform: SpatiaLite's planar ST_Distance returns NULL
+            # for 3D inputs, which would set distance = NULL and trip the positive-check
+            # constraint when this fallback fires.
+            first_pt = to_shape(route.departure_station.geom)
+            last_pt = to_shape(route.arrival_station.geom)
+            first_point_2d = from_shape(Point(first_pt.x, first_pt.y), srid=4326)
+            last_point_2d = from_shape(Point(last_pt.x, last_pt.y), srid=4326)
 
-            first_point_soldner = func.ST_Transform(first_point, 3068)
-            last_point_soldner = func.ST_Transform(last_point, 3068)
+            first_point_soldner = func.ST_Transform(first_point_2d, 3068)
+            last_point_soldner = func.ST_Transform(last_point_2d, 3068)
             dist_q = ST_Distance(first_point_soldner, last_point_soldner)
 
             dist = session.query(dist_q).one()[0]
