@@ -32,7 +32,7 @@ from eflips.model import (
 )
 from fuzzywuzzy import fuzz  # type: ignore[import-untyped]
 from geoalchemy2.shape import from_shape, to_shape
-from shapely.geometry import Point
+from shapely.geometry import Point  # type: ignore[import-untyped]
 from sqlalchemy import not_, func
 from sqlalchemy.orm import Session, joinedload
 

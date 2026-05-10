@@ -38,7 +38,7 @@ from eflips.model import (
 from geoalchemy2.functions import ST_Distance
 from geoalchemy2.shape import from_shape, to_shape
 from prefect.artifacts import create_progress_artifact, update_progress_artifact
-from shapely.geometry import Point
+from shapely.geometry import Point  # type: ignore[import-untyped]
 from sqlalchemy import func, text
 
 from eflips.x.framework import Generator
@@ -236,8 +236,8 @@ class BVGXMLIngester(Generator):
             # Drop Z before ST_Transform: SpatiaLite's planar ST_Distance returns NULL
             # for 3D inputs, which would set distance = NULL and trip the positive-check
             # constraint when this fallback fires.
-            first_pt = to_shape(route.departure_station.geom)
-            last_pt = to_shape(route.arrival_station.geom)
+            first_pt = to_shape(route.departure_station.geom)  # type: ignore[arg-type]
+            last_pt = to_shape(route.arrival_station.geom)  # type: ignore[arg-type]
             first_point_2d = from_shape(Point(first_pt.x, first_pt.y), srid=4326)
             last_point_2d = from_shape(Point(last_pt.x, last_pt.y), srid=4326)
 
