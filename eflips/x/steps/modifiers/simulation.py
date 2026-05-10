@@ -413,9 +413,7 @@ Default: True
             f"{self.__class__.__name__}.ignore_unstable_simulation", False
         )
         ignore_delayed_trips = params.get(f"{self.__class__.__name__}.ignore_delayed_trips", False)
-        shrink_to_peak_usage = params.get(
-            f"{self.__class__.__name__}.shrink_to_peak_usage", True
-        )
+        shrink_to_peak_usage = params.get(f"{self.__class__.__name__}.shrink_to_peak_usage", True)
         terminus_deadtime_s: float = params.get("terminus_deadtime_s", 60.0)
         terminus_deadtime = timedelta(seconds=terminus_deadtime_s)
 
