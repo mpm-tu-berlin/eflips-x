@@ -79,10 +79,13 @@ class AgencyConfig:
     battery_capacity: float = 360.0
     consumption: float = 1.5
     charging_curve: List[List[float]] = field(default_factory=lambda: [[0.0, 450.0], [1.0, 450.0]])
-    # 12m solo bus mass values (matching the EN values used in eflips/x/flows/bvg.py).
-    # allowed_mass follows the bvg_tools.py convention: empty_mass + 70 passengers * 68 kg.
-    empty_mass_kg = 9950.0
-    allowed_mass = empty_mass_kg + 70 * 68
+    # 12m solo bus empty mass (matching the EN value used in eflips/x/flows/bvg.py).
+    empty_mass_kg: float = 9950.0
+
+    @property
+    def allowed_mass(self) -> float:
+        """empty_mass + 70 passengers * 68 kg, per the bvg_tools.py convention."""
+        return self.empty_mass_kg + 70 * 68
 
     @property
     def agency_name(self) -> str:
