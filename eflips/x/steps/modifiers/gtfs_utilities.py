@@ -259,9 +259,8 @@ class ConfigureVehicleTypes(Modifier):
         vehicle_class.vehicle_types.append(vehicle_type)
 
         df = load_consumption_lut_df(lut_member)
-        scenario = session.get(Scenario, scenario_id)
         lut = DbConsumptionLut.df_to_consumption_obj(
-            df, scenario_or_id=scenario, vehicle_class_or_id=vehicle_class
+            df, scenario_or_id=scenario_id, vehicle_class_or_id=vehicle_class
         )
         lut.name = f"{lut_member.name} for {vehicle_type.name}"
         session.add(lut)
