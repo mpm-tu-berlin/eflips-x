@@ -304,12 +304,20 @@ Default: 6
             self.logger.info(
                 f"Generating depots using {len(depot_wishes)} depot configuration wishes."
             )
-            generate_optimal_depot_layout(
-                depot_config_wishes=depot_wishes,
-                scenario=scenario,
-                database_url=None,  # Use the current session
-                delete_existing_depot=True,
-            )
+            # eflips-depot's create_depots_from_wish issues queries while
+            # holding partially-constructed Process/Area objects in the
+            # session. The implicit autoflush before those queries triggers
+            # an identity-map collision (hardcoded PKs vs. autoincrement),
+            # which crashes non-deterministically on Python 3.12 inside
+            # SQLAlchemy's _register_persistent. SQLAlchemy's own warning at
+            # the call site recommends no_autoflush here.
+            with session.no_autoflush:
+                generate_optimal_depot_layout(
+                    depot_config_wishes=depot_wishes,
+                    scenario=scenario,
+                    database_url=None,  # Use the current session
+                    delete_existing_depot=True,
+                )
 
         else:
             # depot_wishes is not set, use automatic generation
