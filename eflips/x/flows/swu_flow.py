@@ -444,11 +444,12 @@ class TripProfileAnalyzer(Analyzer):
             (df["arrival_time"] >= event.time_start) & (df["arrival_time"] <= event.time_end)
         ].reset_index(drop=True)
         # Keep only rows where arrival_time strictly advances (removes same-second duplicates)
-        df = df[df["arrival_time"].diff().dt.total_seconds().fillna(1) > 0].reset_index(drop=True)
+        arrival_diff = pd.to_timedelta(df["arrival_time"].diff())
+        df = df[arrival_diff.dt.total_seconds().fillna(1) > 0].reset_index(drop=True)
 
         df["delta_soc"] = df["soc"].diff()
         df["delta_km"] = df["distance_km"].diff()
-        df["delta_h"] = df["arrival_time"].diff().dt.total_seconds() / 3600.0
+        df["delta_h"] = pd.to_timedelta(df["arrival_time"].diff()).dt.total_seconds() / 3600.0
         df["consumption_kwh_per_km"] = -battery_kwh * df["delta_soc"] / df["delta_km"]
         df["speed_kmh"] = df["delta_km"] / df["delta_h"]
 
