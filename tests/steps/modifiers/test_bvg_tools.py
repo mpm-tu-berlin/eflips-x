@@ -16,7 +16,6 @@ from eflips.model import (
     Station,
     VehicleType,
     TripType,
-    ConsistencyWarning,
     ConsumptionLut,
     VehicleClass,
     AssocVehicleTypeVehicleClass,
@@ -211,11 +210,13 @@ class TestSetUpBvgVehicleTypes:
             )
 
             # Check that warnings were emitted for using defaults
-            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
-
-            assert len(non_consistency_warnings) == 2
-            assert "new_vehicle_types" in str(non_consistency_warnings[0].message)
-            assert "vehicle_type_conversion" in str(non_consistency_warnings[1].message)
+            # Filter to UserWarning only: simplefilter("always") otherwise lets
+            # unrelated SADeprecationWarnings/SAWarnings re-fire depending on
+            # test ordering and inflate the count.
+            user_warnings = [wa for wa in w if wa.category is UserWarning]
+            messages = [str(wa.message) for wa in user_warnings]
+            assert any("new_vehicle_types" in m for m in messages)
+            assert any("vehicle_type_conversion" in m for m in messages)
 
         # Check that exactly 3 new vehicle types exist (EN, GN, DD)
         vehicle_types = db_session.query(VehicleType).all()
@@ -281,11 +282,13 @@ class TestSetUpBvgVehicleTypes:
             )
 
             # Check that warnings were emitted for using defaults
-            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
-
-            assert len(non_consistency_warnings) == 2
-            assert "new_vehicle_types" in str(non_consistency_warnings[0].message)
-            assert "vehicle_type_conversion" in str(non_consistency_warnings[1].message)
+            # Filter to UserWarning only: simplefilter("always") otherwise lets
+            # unrelated SADeprecationWarnings/SAWarnings re-fire depending on
+            # test ordering and inflate the count.
+            user_warnings = [wa for wa in w if wa.category is UserWarning]
+            messages = [str(wa.message) for wa in user_warnings]
+            assert any("new_vehicle_types" in m for m in messages)
+            assert any("vehicle_type_conversion" in m for m in messages)
 
         # Cehck that the new "GN" short name vehicle type has a consumption lut
         consumption_lut = (
@@ -326,11 +329,13 @@ class TestSetUpBvgVehicleTypes:
             )
 
             # Check that warnings were emitted for using defaults
-            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
-
-            assert len(non_consistency_warnings) == 2
-            assert "new_vehicle_types" in str(non_consistency_warnings[0].message)
-            assert "vehicle_type_conversion" in str(non_consistency_warnings[1].message)
+            # Filter to UserWarning only: simplefilter("always") otherwise lets
+            # unrelated SADeprecationWarnings/SAWarnings re-fire depending on
+            # test ordering and inflate the count.
+            user_warnings = [wa for wa in w if wa.category is UserWarning]
+            messages = [str(wa.message) for wa in user_warnings]
+            assert any("new_vehicle_types" in m for m in messages)
+            assert any("vehicle_type_conversion" in m for m in messages)
 
         # Cehck that the new "GN" short name vehicle type has a consumption lut
         consumption_lut = (
@@ -785,10 +790,10 @@ class TestRemoveUnusedRotations:
             warnings.simplefilter("always")
             modifier.modify(session=db_session, params={})
 
-            # Check that warning was emitted for using defaults
-            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
-            assert len(non_consistency_warnings) == 1
-            assert "depot_station_short_names" in str(non_consistency_warnings[0].message)
+            # Filter to the UserWarning the modifier emits (see note above).
+            user_warnings = [wa for wa in w if wa.category is UserWarning]
+            messages = [str(wa.message) for wa in user_warnings]
+            assert any("depot_station_short_names" in m for m in messages)
 
         # Default depot names include "BF L" and "BF M", so 2 valid rotations should remain
         rotations = db_session.query(Rotation).all()

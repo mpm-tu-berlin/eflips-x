@@ -40,6 +40,13 @@ class TestDepotGenerator:
         scenario = db_session.query(Scenario).one()
         db_session.query(Depot).filter_by(scenario_id=scenario.id).delete()
         db_session.commit()
+        # Drop cached Process/Area/Depot instances from the identity map.
+        # eflips-depot's create_depots_from_wish inserts new rows with
+        # hardcoded PKs that would otherwise collide with the stale cached
+        # objects and trip SQLAlchemy's autoflush identity-map reconciliation
+        # (seen as a non-deterministic AttributeError on Python 3.12).
+        db_session.expunge_all()
+        scenario = db_session.query(Scenario).one()
         return scenario
 
     def _get_depot_stations(self, db_session: Session, scenario: Scenario) -> list[Station]:

@@ -1334,14 +1334,14 @@ shapely = ">=2.0.5,<3.0.0"
 
 [[package]]
 name = "eflips-ingest"
-version = "1.6.4"
+version = "1.6.5"
 description = "A collection of import scripts for converting bus schedule data into the [eflips-model](https://github.com/mpm-tu-berlin/eflips-model) data format."
 optional = false
 python-versions = "<3.14,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_ingest-1.6.4-py3-none-any.whl", hash = "sha256:22fdb636eae5f8d53956913b517d5148d60c5de75c15f7e22823b9002b49e2ce"},
-    {file = "eflips_ingest-1.6.4.tar.gz", hash = "sha256:c9776c031e364a40b77b6ebdeaa5c575f01c2143906db93ee9e1d37b9cea8613"},
+    {file = "eflips_ingest-1.6.5-py3-none-any.whl", hash = "sha256:e6430fcc48672e0ce30dd86867166bfb17a8078f85fe091afc7a1e856ebdb6c1"},
+    {file = "eflips_ingest-1.6.5.tar.gz", hash = "sha256:51f94f7716bc560d0cd735b44c868b5ad8be6782dc8f3c9a58cb01f5a052e62d"},
 ]
 
 [package.dependencies]
@@ -1358,14 +1358,14 @@ xsdata = {version = ">=24.1,<25.0", extras = ["cli", "lxml"]}
 
 [[package]]
 name = "eflips-model"
-version = "11.0.1"
+version = "11.0.2"
 description = "A common data model for the eflips family of electric vehicle simulation & optimization tools."
 optional = false
 python-versions = "<4.0,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_model-11.0.1-py3-none-any.whl", hash = "sha256:0a7cae7e46d64783cb3fbd870e09505b040d3b0e168bbd99f529210e9344de10"},
-    {file = "eflips_model-11.0.1.tar.gz", hash = "sha256:32fb122d6ecb65e825dfbb3355fa9a556c15a4b8a40e67a7bdc483b5ecf194a3"},
+    {file = "eflips_model-11.0.2-py3-none-any.whl", hash = "sha256:2f3464b09f6c5a105071687c2a813546ab94433c3c141e861778e8520dacdacb"},
+    {file = "eflips_model-11.0.2.tar.gz", hash = "sha256:d891fa52332152b0dd5dade093d4dc1217dd5ecc76991e16b7502b879a245623"},
 ]
 
 [package.dependencies]
