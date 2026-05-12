@@ -16,6 +16,10 @@ dependencies = [
     "eflips-opt (>=1.0.9,<2.0.0)",
     "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@feature/revenue-km",
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
+    # Pin griffe <2: griffe 2.x removed the top-level Docstring symbol that prefect 3.x
+    # imports, breaking `from prefect import flow` at import time. Remove once a prefect
+    # release adopts the new griffe API.
+    "griffe (>=1.0,<2.0)",
     "fuzzywuzzy (>=0.18.0,<0.19.0)",
     "python-levenshtein (>=0.27.1,<0.28.0)",
     "cartopy (>=0.25.0,<0.26.0)",

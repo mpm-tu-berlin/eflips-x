@@ -290,7 +290,7 @@ class TestSetUpBvgVehicleTypes:
             assert any("new_vehicle_types" in m for m in messages)
             assert any("vehicle_type_conversion" in m for m in messages)
 
-        # Cehck that the new "GN" short name vehicle type has a consumption lut
+        # Check that the new "GN" short name vehicle type has a consumption lut
         consumption_lut = (
             db_session.query(ConsumptionLut)
             .join(VehicleClass)
@@ -337,7 +337,7 @@ class TestSetUpBvgVehicleTypes:
             assert any("new_vehicle_types" in m for m in messages)
             assert any("vehicle_type_conversion" in m for m in messages)
 
-        # Cehck that the new "GN" short name vehicle type has a consumption lut
+        # Check that the new "GN" short name vehicle type has a consumption lut
         consumption_lut = (
             db_session.query(ConsumptionLut)
             .join(VehicleClass)

@@ -13,19 +13,29 @@ Usage:
 
 import argparse
 import logging
-from datetime import timedelta
+from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, cast
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import seaborn as sns  # type: ignore[import-untyped]
+from geoalchemy2.shape import to_shape
 from sqlalchemy.orm import Session
 
 from eflips.depot.api import SmartChargingStrategy  # type: ignore[import-untyped]
-from eflips.model import ChargeType, Line, Rotation, Trip, TripType
+from eflips.model import ChargeType, Event, Line, Rotation, Trip, TripType
 from prefect import flow
 
 from eflips.x.flows import generate_all_plots, run_steps
 from eflips.x.framework import Analyzer, Modifier, PipelineContext, PipelineStep
+from eflips.x.steps.analyzers.bvg_tools import (
+    PLOT_HEIGHT_INCH,
+    PLOT_WIDTH_INCH,
+    configure_latex_plotting,
+)
 from eflips.x.steps.generators import GTFSIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import MergeStations
 from eflips.x.steps.modifiers.consumption_luts import ConsumptionLut
@@ -117,7 +127,7 @@ DEPOT_CONFIG: List[Dict[str, Any]] = [
     {
         "depot_station": (9.967748831666805, 48.39658695394624),  # (lon, lat)
         "name": "SWU Betriebshof",
-        "vehicle_type": ["DB"],  # Matches ConfigureVehicleTypes.name_short
+        "vehicle_type": ["DEFAULT"],  # Matches ConfigureVehicleTypes.name_short
         "capacity": 9999,
     },
 ]
@@ -148,7 +158,7 @@ def run_common_phase() -> Path:
         "ConfigureVehicleTypes.charging_curve": CHARGING_CURVE,
         "ConfigureVehicleTypes.empty_mass": EMPTY_MASS_KG,
         "ConfigureVehicleTypes.allowed_mass": ALLOWED_MASS_KG,
-        "ConfigureVehicleTypes.name_short": "DB",
+        "ConfigureVehicleTypes.name_short": "DEFAULT",
         "AddTemperatures.temperature_celsius": 10.0,
     }
 
@@ -317,21 +327,29 @@ def swu_flow(enable_plots: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_TRIP_PROFILE_ROUTE_ID = 6
+
+
 class TripProfileAnalyzer(Analyzer):
     """
     Plots altitude (with stop labels), mean speed, and energy consumption per segment
     for a single DRIVING event from the simulation database.
     """
 
-    def __init__(self, code_version: str = "v1.0.4", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v1.0.5", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
     def document_params(cls) -> Dict[str, str]:
         return {
             f"{cls.__name__}.event_id": (
-                "ID of the DRIVING Event to plot. "
-                "Default: None (picks the event with the longest route distance that has timeseries data)."
+                "ID of the DRIVING Event to plot. If set, this takes precedence over "
+                "route_id and the event must exist."
+            ),
+            f"{cls.__name__}.route_id": (
+                "Route ID to filter by when event_id is not set. The first matching "
+                f"DRIVING Event is picked. Default: {DEFAULT_TRIP_PROFILE_ROUTE_ID} "
+                "(manually chosen for the SWU feed)."
             ),
         }
 
@@ -342,32 +360,39 @@ class TripProfileAnalyzer(Analyzer):
         Returns a DataFrame with columns: distance_km, altitude_m, stop_name,
         arrival_time, speed_kmh, consumption_kwh_per_km.
         """
-        import numpy as np
-        from datetime import datetime as _dt
-
-        from geoalchemy2.shape import to_shape
-        from eflips.model import Event, EventType
-
         event_id = params.get(f"{self.__class__.__name__}.event_id", None)
+        route_id = params.get(f"{self.__class__.__name__}.route_id", DEFAULT_TRIP_PROFILE_ROUTE_ID)
 
-        event: Optional[Event]
         if event_id is not None:
-            event = session.query(Event).filter(Event.id == event_id).one()
+            event = session.query(Event).filter(Event.id == event_id).one_or_none()
+            if event is None:
+                raise ValueError(
+                    f"{self.__class__.__name__}: no Event found with id={event_id}. "
+                    f"Set {self.__class__.__name__}.event_id to an existing DRIVING "
+                    f"Event id, or leave it unset to fall back to route_id."
+                )
         else:
-            event = session.query(Event).join(Trip).filter(Trip.route_id == 6).first()
-
-        if event is None:
-            return pd.DataFrame()
+            event = session.query(Event).join(Trip).filter(Trip.route_id == route_id).first()
+            if event is None:
+                raise ValueError(
+                    f"{self.__class__.__name__}: no Event found for route_id={route_id}. "
+                    f"Set {self.__class__.__name__}.route_id to a route present in the "
+                    f"current database, or pin a specific event via "
+                    f"{self.__class__.__name__}.event_id."
+                )
 
         def _altitude(station: Any) -> float:
             return to_shape(station.geom).z if station.geom is not None else float("nan")
 
         battery_kwh: float = event.vehicle_type.battery_capacity
         event_start = event.time_start
+        # timeseries["time"] is documented as ISO 8601 strings with TZ (eflips.model.Event);
+        # cast narrows the column's Union type. fromisoformat returns a tz-aware datetime,
+        # event_start is tz-aware, so the subtraction stays tz-consistent.
         ts_times_s = np.array(
             [
-                (_dt.fromisoformat(str(t)) - event_start).total_seconds()
-                for t in event.timeseries["time"]
+                (datetime.fromisoformat(t) - event_start).total_seconds()
+                for t in cast(List[str], event.timeseries["time"])
             ]
         )
         ts_socs = np.array(event.timeseries["soc"], dtype=float)
@@ -379,9 +404,6 @@ class TripProfileAnalyzer(Analyzer):
             (a.elapsed_distance, a.station_id, a.station)
             for a in event.trip.route.assoc_route_stations
         ]
-
-        # Map station_id → list of (elapsed_distance, station) for multi-occurrence lookup
-        from collections import defaultdict
 
         dist_by_station: Dict[int, List[float]] = defaultdict(list)
         for elapsed, sid, sta in route_seq:
@@ -469,16 +491,6 @@ class TripProfileAnalyzer(Analyzer):
         Returns:
             matplotlib Figure
         """
-        import numpy as np
-        import matplotlib.pyplot as plt
-        import seaborn as sns  # type: ignore[import-untyped]
-
-        from eflips.x.steps.analyzers.bvg_tools import (
-            configure_latex_plotting,
-            PLOT_WIDTH_INCH,
-            PLOT_HEIGHT_INCH,
-        )
-
         configure_latex_plotting()
 
         fig, axes = plt.subplots(

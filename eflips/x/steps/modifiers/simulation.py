@@ -385,8 +385,12 @@ If True, the simulation will ignore delayed trips instead of raising an exceptio
 Default: False
             """.strip(),
             f"{cls.__name__}.shrink_to_peak_usage": """
-If True, depot Areas and electrified opportunity-charging Stations are shrunk to their peak observed usage
-after the simulation has written events to the database. See eflips.depot.api.simulate_scenario for details.
+If True, after the simulation has written events to the database the layout is downsized to the smallest
+size that still fits the observed usage: each depot Area's bay count is reduced to its peak simultaneous
+occupancy, and each electrified terminus Station's charger count is reduced to its peak simultaneous
+charging-vehicle count. Idle capacity above the peak is removed so the resulting scenario reflects what
+the simulation actually used. Pass False to keep the originally sized layout (useful when comparing
+fleet sizes or designing for headroom). See eflips.depot.api.simulate_scenario for details.
 
 Default: True
             """.strip(),

@@ -363,8 +363,9 @@ def _create_route_with_stations(
     dep_point = (dep_pt.y, dep_pt.x)
     arr_point = (arr_pt.y, arr_pt.x)
 
-    # Try to get routed geometry
-    routed_distance, route_geom = route(dep_point[0], dep_point[1], arr_point[0], arr_point[1])
+    # Try to get routed geometry. The ORS-reported distance is discarded — see the
+    # ST_Length branch below for why we derive distance from the polyline instead.
+    _routed_distance, route_geom = route(dep_point[0], dep_point[1], arr_point[0], arr_point[1])
 
     # Calculate distance based on geometry
     if route_geom is not None:

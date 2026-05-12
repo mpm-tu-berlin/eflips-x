@@ -29,11 +29,8 @@ from eflips.x.steps.modifiers.consumption_luts import (
 logger = logging.getLogger(__name__)
 
 
-class _Unset:
-    """Sentinel: 'do not pass this kwarg, let the model use its server default'."""
-
-
-_UNSET = _Unset()
+# Sentinel: "do not pass this kwarg, let the model use its server default".
+_UNSET: Any = object()
 
 
 # Per-VehicleType field defaults. Each can be overridden in `params` as either
@@ -103,9 +100,7 @@ class ConfigureVehicleTypes(Modifier):
             ),
         }
         for field, default in _FIELD_DEFAULTS.items():
-            shown_default = (
-                "(model server default)" if isinstance(default, _Unset) else repr(default)
-            )
+            shown_default = "(model server default)" if default is _UNSET else repr(default)
             docs[f"{prefix}.{field}"] = (
                 f"{scalar_or_dict} Maps to VehicleType.{field}. " f"Default: {shown_default}."
             )
@@ -223,7 +218,7 @@ class ConfigureVehicleTypes(Modifier):
         is_lut = isinstance(consumption_value, ConsumptionLut)
 
         vt_kwargs: Dict[str, Any] = {
-            k: v for k, v in fields.items() if k != "consumption" and not isinstance(v, _Unset)
+            k: v for k, v in fields.items() if k != "consumption" and v is not _UNSET
         }
         vt = VehicleType(
             scenario_id=scenario_id,

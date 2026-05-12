@@ -77,7 +77,6 @@ class AgencyConfig:
     agency_names: List[str]
     depots: List[DepotConfig]
     battery_capacity: float = 360.0
-    consumption: float = 1.5
     charging_curve: List[List[float]] = field(default_factory=lambda: [[0.0, 450.0], [1.0, 450.0]])
     # 12m solo bus empty mass (matching the EN value used in eflips/x/flows/bvg.py).
     empty_mass_kg: float = 9950.0
@@ -195,7 +194,7 @@ def build_depot_config(depots: List[DepotConfig]) -> List[Dict[str, Any]]:
         {
             "depot_station": depot.coords,
             "name": depot.name,
-            "vehicle_type": ["DB"],  # Matches ConfigureVehicleTypes.name_short
+            "vehicle_type": ["DEFAULT"],  # Matches ConfigureVehicleTypes.name_short
             "capacity": depot.capacity,
         }
         for depot in depots
@@ -234,7 +233,7 @@ def run_common_phase(
         "ConfigureVehicleTypes.charging_curve": agency.charging_curve,
         "ConfigureVehicleTypes.empty_mass": agency.empty_mass_kg,
         "ConfigureVehicleTypes.allowed_mass": agency.allowed_mass,
-        "ConfigureVehicleTypes.name_short": "DB",
+        "ConfigureVehicleTypes.name_short": "DEFAULT",
         "AddTemperatures.temperature_celsius": 10.0,
     }
 
