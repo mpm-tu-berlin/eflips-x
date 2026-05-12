@@ -20,6 +20,7 @@ from eflips.depot.api import (  # type: ignore[import-untyped]
     DepotConfigurationWish,
     simulate_scenario,
     SmartChargingStrategy,
+    shrink_to_peak_usage,
 )
 from eflips.model import (
     Scenario,
@@ -425,7 +426,9 @@ Default: True
             f"{self.__class__.__name__}.ignore_unstable_simulation", False
         )
         ignore_delayed_trips = params.get(f"{self.__class__.__name__}.ignore_delayed_trips", False)
-        shrink_to_peak_usage = params.get(f"{self.__class__.__name__}.shrink_to_peak_usage", True)
+        do_shrink_to_peak_usage = params.get(
+            f"{self.__class__.__name__}.shrink_to_peak_usage", True
+        )
         terminus_deadtime_s: float = params.get("terminus_deadtime_s", 60.0)
         terminus_deadtime = timedelta(seconds=terminus_deadtime_s)
 
@@ -448,7 +451,7 @@ Default: True
             smart_charging_strategy=smart_charging,
             ignore_unstable_simulation=ignore_unstable_simulation,
             ignore_delayed_trips=ignore_delayed_trips,
-            shrink_to_peak_usage=shrink_to_peak_usage,
+            shrink_to_peak_usage=False,  # Not needed - we do it manually after subsequent consumption sim
         )
 
         ##### Step 3: Consumption simulation
@@ -460,6 +463,10 @@ Default: True
             terminus_deadtime=terminus_deadtime,
             calculate_timeseries=calculate_timeseries,
         )
+
+        ##### Step 4: Shrink to peak usage
+        if do_shrink_to_peak_usage:
+            shrink_to_peak_usage(scenario)
 
 
 class SmartCharging(Modifier):
