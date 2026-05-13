@@ -17,22 +17,74 @@ Usage:
 
 import argparse
 import logging
+import sqlite3
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import seaborn as sns  # type: ignore[import-untyped]
-from eflips.model import Depot, Event, EventType, Rotation
-from matplotlib.figure import Figure
-from prefect import flow, task
-from prefect_dask.task_runners import DaskTaskRunner
-from sqlalchemy.orm import joinedload
 
-from eflips.x.flows.swu_flow import (
+# ---------------------------------------------------------------------------
+# kv_cache concurrency patch — must be applied before any module that calls
+# ``eflips.model.util.geometry.get_altitude`` runs against the cache, but the
+# class-level monkey-patch is also safe to apply after the module-level store
+# was constructed (method lookup goes through the class).
+# ---------------------------------------------------------------------------
+
+
+def _patch_kv_cache_for_parallel_access() -> None:
+    """Make ``kv_cache.KVStore`` safe to share between many parallel workers.
+
+    The eflips altitude cache at ``~/.cache/eflips/.../eflips_ingest_altitude_cache.db``
+    is read on every depot-rotation matching iteration via ``get_altitude``.
+    Two design choices in ``kv_cache`` cause it to deadlock under high
+    parallelism:
+
+    1. ``KVStore.get()`` issues a ``DELETE`` for expired entries on **every**
+       read. The altitude cache never sets a TTL, so the delete touches
+       nothing — but it still acquires the SQLite write lock.
+    2. Connections are opened with the default 5-second ``busy_timeout``.
+       With dozens of Dask workers contending for that write lock, the
+       timeout fires before the lock is released.
+
+    We monkey-patch the class to skip the cleanup and to install a 60-second
+    busy timeout on every new connection. The patch is idempotent — calling
+    it from each worker process is harmless.
+    """
+    from kv_cache import main as kv_main  # type: ignore[import-untyped]
+
+    if getattr(kv_main.KVStore, "_eflips_x_patched", False):
+        return
+
+    def _noop_cleanup_expired(_self: Any) -> None:
+        return
+
+    def _get_connection_with_long_timeout(self: Any) -> sqlite3.Connection:
+        if not hasattr(self._conn, "connection"):
+            conn = sqlite3.connect(self.db_path, timeout=60.0)
+            conn.execute("PRAGMA busy_timeout = 60000")
+            self._conn.connection = conn
+        return self._conn.connection  # type: ignore[no-any-return]
+
+    kv_main.KVStore._cleanup_expired = _noop_cleanup_expired
+    kv_main.KVStore._get_connection = _get_connection_with_long_timeout
+    kv_main.KVStore._eflips_x_patched = True
+
+
+_patch_kv_cache_for_parallel_access()
+
+
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import seaborn as sns  # type: ignore[import-untyped]  # noqa: E402
+from eflips.model import Depot, Event, EventType, Rotation  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
+from prefect import flow, task  # noqa: E402
+from prefect_dask.task_runners import DaskTaskRunner  # noqa: E402
+from sqlalchemy.orm import joinedload  # noqa: E402
+
+from eflips.x.flows.swu_flow import (  # noqa: E402
     CACHE_BASE,
     OUTPUT_BASE,
     run_common_phase,
@@ -40,14 +92,14 @@ from eflips.x.flows.swu_flow import (
     run_opportunity_variant,
     run_pre_common_phase,
 )
-from eflips.x.framework import PipelineContext
-from eflips.x.steps.analyzers.bvg_tools import (
+from eflips.x.framework import PipelineContext  # noqa: E402
+from eflips.x.steps.analyzers.bvg_tools import (  # noqa: E402
     PLOT_HEIGHT_INCH,
     PLOT_WIDTH_INCH,
     ScenarioComparisonAnalyzer,
     configure_latex_plotting,
 )
-from eflips.x.steps.analyzers.output_analyzers import (
+from eflips.x.steps.analyzers.output_analyzers import (  # noqa: E402
     EnergyConsumptionByVehicleTypeAnalyzer,
     PowerAndOccupancyAnalyzer,
 )
@@ -119,6 +171,13 @@ OUTPUT_LABEL: Dict[str, str] = {
     "mean_depot_arrival_soc": "Mean depot-arrival SoC",
 }
 
+# Cap Dask parallelism. On a 64-core box, the LocalCluster default of one
+# worker per core overwhelms the shared on-disk caches (eflips altitude cache,
+# Prefect result store, OSR routing cache) and the in-process global state of
+# the SimPy-based depot simulation. Eight processes saturate the depot
+# simulation cleanly while keeping shared-resource contention low.
+MAX_DASK_WORKERS = 8
+
 
 # ---------------------------------------------------------------------------
 # Output / cache paths
@@ -132,7 +191,53 @@ SENSITIVITY_LOGS_DIR = SENSITIVITY_OUTPUT_DIR / "logs"
 
 
 # ---------------------------------------------------------------------------
-# Metric helpers
+# Cache directory layout
+# ---------------------------------------------------------------------------
+#
+# Two design constraints are in tension:
+#
+#   1. The framework's cache key uses ``work_dir.absolute().name`` (a basename),
+#      not the full path — see eflips/x/framework/__init__.py. So two iterations
+#      with the same work_dir *basename* compute the same cache key. On a
+#      cache hit, the framework checks whether the expected output file exists;
+#      if it doesn't, ``PipelineStep.execute`` silently calls ``execute_impl``
+#      directly to re-run the step. That means "shared cache key, different
+#      paths" produces silent recomputation — caching looks alive in the
+#      Prefect UI but is dead.
+#
+#   2. Parallel iterations writing to the same path race on SQLite locks and
+#      blow up with "attempt to write a readonly database".
+#
+# Resolution: serialise the common phase across iterations (it's the same
+# computation for many iterations anyway), then parallelise the variant phase.
+# Common phases share a single work_dir per (battery, temperature, terminus_kw)
+# tuple, so the framework's content-hash caching is fully effective there.
+# Variant work_dirs are unique per (factor, value, charge_type) cell, so
+# parallel writers never overlap.
+
+CommonKey = Tuple[float, float, float]  # (battery_kwh, temperature_c, terminus_kw)
+
+
+def _common_params_key(cfg: Dict[str, float]) -> CommonKey:
+    """Common-phase identity tuple: only the params the common phase depends on."""
+    return (
+        cfg["battery_capacity_kwh"],
+        cfg["temperature_celsius"],
+        cfg["terminus_charging_power_kw"],
+    )
+
+
+def _common_cache_subdir(key: CommonKey) -> str:
+    bat, temp, term = key
+    return f"sensitivity/common/b{int(bat)}_t{int(temp)}_c{int(term)}"
+
+
+def _variant_cache_subdir(factor: str, value: float, charge_type: str) -> str:
+    return f"sensitivity/variant/{factor}/{int(value)}/{charge_type}"
+
+
+# ---------------------------------------------------------------------------
+# Metric extraction
 # ---------------------------------------------------------------------------
 
 
@@ -206,14 +311,13 @@ def _rotation_metrics(context: PipelineContext) -> Dict[str, float]:
     }
 
 
-def _collect_row(
-    final_db: Path,
-    work_dir: Path,
-    factor: str,
-    value: float,
-    charge_type: str,
-) -> pd.DataFrame:
-    """Run all the analyzers on the final database and assemble a single-row DataFrame."""
+def _extract_metrics(final_db: Path, work_dir: Path, charge_type: str) -> Dict[str, float]:
+    """Run all analyzers on a finished variant DB and return a flat metric dict.
+
+    The keys match :data:`METRIC_COLUMNS`. Both the ScenarioComparisonAnalyzer
+    and the EnergyConsumptionByVehicleTypeAnalyzer return one row per vehicle
+    type; SWU has one vehicle type, so we read ``.iloc[0]`` from each.
+    """
     context = PipelineContext(
         work_dir=work_dir,
         params={
@@ -227,41 +331,56 @@ def _collect_row(
     energy_df = cast(
         pd.DataFrame, EnergyConsumptionByVehicleTypeAnalyzer().execute(context=context)
     )
-    peak_power_kw = _peak_depot_power_kw(context)
-    rot_metrics = _rotation_metrics(context)
-
-    # Both DataFrames have one row in the single-vehicle-type SWU case.
     comp = comp_df.iloc[0]
     mean_consumption = (
         float(energy_df["avg_consumption_kwh_per_km"].iloc[0])
         if not energy_df.empty
         else float("nan")
     )
+    rot_metrics = _rotation_metrics(context)
 
-    return pd.DataFrame(
-        [
-            {
-                "factor": factor,
-                "factor_value": value,
-                "charge_type": charge_type,
-                "status": "ok",
-                "error_short": None,
-                "mean_energy_consumption_kwh_per_km": mean_consumption,
-                "vehicle_count": int(comp["total_vehicles"]),
-                "electrified_termini": int(comp["electrified_termini"]),
-                "terminus_chargers_utilized": int(comp["terminus_chargers_utilized"]),
-                "depot_chargers": int(comp["depot_chargers"]),
-                "peak_depot_power_kw": peak_power_kw,
-                "mean_rotation_duration_h": rot_metrics["mean_rotation_duration_h"],
-                "mean_depot_arrival_soc": rot_metrics["mean_depot_arrival_soc"],
-            }
-        ]
-    )
+    return {
+        "mean_energy_consumption_kwh_per_km": mean_consumption,
+        "vehicle_count": int(comp["total_vehicles"]),
+        "electrified_termini": int(comp["electrified_termini"]),
+        "terminus_chargers_utilized": int(comp["terminus_chargers_utilized"]),
+        "depot_chargers": int(comp["depot_chargers"]),
+        "peak_depot_power_kw": _peak_depot_power_kw(context),
+        "mean_rotation_duration_h": rot_metrics["mean_rotation_duration_h"],
+        "mean_depot_arrival_soc": rot_metrics["mean_depot_arrival_soc"],
+    }
 
 
 # ---------------------------------------------------------------------------
-# Crash handling
+# Row assembly + crash handling
 # ---------------------------------------------------------------------------
+
+
+def _result_row(
+    *,
+    factor: str,
+    factor_value: float,
+    charge_type: str,
+    status: str,
+    error_short: Optional[str] = None,
+    metrics: Optional[Dict[str, float]] = None,
+) -> pd.DataFrame:
+    """Assemble a single sensitivity-table row.
+
+    Successful rows pass ``metrics``; failed rows leave it ``None`` and provide
+    ``error_short`` instead. Metric columns are always present (NaN on failure)
+    so concatenating ok and error rows produces a rectangular DataFrame.
+    """
+    row: Dict[str, Any] = {
+        "factor": factor,
+        "factor_value": factor_value,
+        "charge_type": charge_type,
+        "status": status,
+        "error_short": error_short,
+    }
+    for col in METRIC_COLUMNS:
+        row[col] = (metrics or {}).get(col, float("nan"))
+    return pd.DataFrame([row])
 
 
 def _log_failure(factor: str, value: float, charge_type: str, exc: BaseException) -> None:
@@ -274,74 +393,38 @@ def _log_failure(factor: str, value: float, charge_type: str, exc: BaseException
         traceback.print_exception(type(exc), exc, exc.__traceback__, file=f)
 
 
-def _failure_row(factor: str, value: float, charge_type: str, exc: BaseException) -> pd.DataFrame:
-    """Build a row with NaN metrics and a short error summary."""
-    row: Dict[str, Any] = {
-        "factor": factor,
-        "factor_value": value,
-        "charge_type": charge_type,
-        "status": "error",
-        "error_short": f"{type(exc).__name__}: {str(exc)[:200]}",
-    }
-    for col in METRIC_COLUMNS:
-        row[col] = float("nan")
-    return pd.DataFrame([row])
-
-
 # ---------------------------------------------------------------------------
-# Cache directory layout
+# Per-iteration task
 # ---------------------------------------------------------------------------
-#
-# Two design constraints are in tension:
-#
-#   1. The framework's cache key uses ``work_dir.absolute().name`` (a basename),
-#      not the full path — see eflips/x/framework/__init__.py lines 338, 414, 501.
-#      So two iterations with the same work_dir *basename* compute the same
-#      cache key. On a cache hit, the framework checks whether the expected
-#      output file exists; if it doesn't, ``PipelineStep.execute`` silently
-#      calls ``execute_impl`` directly to re-run the step (lines 240-248).
-#      That means "shared cache key, different paths" produces silent
-#      recomputation — caching looks alive in the Prefect UI but is dead.
-#
-#   2. Parallel iterations writing to the same path race on SQLite locks and
-#      blow up with "attempt to write a readonly database".
-#
-# Resolution: serialize the common phase across iterations (it's the same
-# computation for many iterations anyway), then parallelize the variant phase.
-# Common phases share a single work_dir per (battery, temp, charging_curve)
-# tuple, so the framework's content-hash caching is fully effective there.
-# Variant work_dirs are unique per (factor, value, charge_type) cell, so
-# parallel writers never overlap.
-
-CommonKey = Tuple[float, float, float]  # (battery_kwh, temperature_c, terminus_kw)
 
 
-def _common_params_key(cfg: Dict[str, float]) -> CommonKey:
-    """Common-phase identity tuple: only the params the common phase actually depends on."""
-    return (
-        cfg["battery_capacity_kwh"],
-        cfg["temperature_celsius"],
-        cfg["terminus_charging_power_kw"],
-    )
-
-
-def _common_cache_subdir(key: CommonKey) -> str:
-    """Deterministic, unique cache subdir for one common-phase config.
-
-    Same params → same path → real cache hit. Different params → different path.
-    """
-    bat, temp, term = key
-    return f"sensitivity/common/b{int(bat)}_t{int(temp)}_c{int(term)}"
-
-
-def _variant_cache_subdir(factor: str, value: float, charge_type: str) -> str:
-    """Unique cache subdir for one variant iteration. No overlap with any other cell."""
-    return f"sensitivity/variant/{factor}/{int(value)}/{charge_type}"
-
-
-# ---------------------------------------------------------------------------
-# Per-iteration task (variant phase only — common phase is precomputed)
-# ---------------------------------------------------------------------------
+def _run_variant(
+    charge_type: str,
+    common_db: Path,
+    cfg: Dict[str, float],
+    variant_root: str,
+) -> Tuple[Path, Path]:
+    """Run the DEP or TERM variant and return ``(final_db, work_dir)``."""
+    if charge_type == "DEP":
+        final_db = run_depot_variant(
+            common_db=common_db,
+            enable_plots=False,
+            depot_charging_power_kw=cfg["depot_charging_power_kw"],
+            cache_subdir=f"{variant_root}/depot",
+            output_subdir=None,
+        )
+        return final_db, CACHE_BASE / f"{variant_root}/depot"
+    if charge_type == "TERM":
+        final_db = run_opportunity_variant(
+            common_db=common_db,
+            enable_plots=False,
+            depot_charging_power_kw=cfg["depot_charging_power_kw"],
+            terminus_charging_power_kw=cfg["terminus_charging_power_kw"],
+            cache_subdir=f"{variant_root}/opportunity",
+            output_subdir=None,
+        )
+        return final_db, CACHE_BASE / f"{variant_root}/opportunity"
+    raise ValueError(f"Unknown charge_type: {charge_type!r}")
 
 
 @task(name="sensitivity-iteration", retries=0)
@@ -351,50 +434,46 @@ def run_one(
     charge_type: str,
     common_db: Path,
 ) -> pd.DataFrame:
-    """Run the variant phase for one (factor, factor_value, charge_type) cell.
+    """Run the variant phase for one ``(factor, value, charge_type)`` cell.
 
-    The common phase has already been precomputed by the parent flow and is
-    passed in as ``common_db``. Only the variant phase + analyzers run here, on
-    a Dask worker.
-
-    On any exception, write a traceback to the sensitivity ``logs/`` directory
-    and return a NaN-filled error row, so the sweep as a whole continues.
+    The common phase is precomputed by the parent flow and passed in as
+    ``common_db``. Only the variant phase + analyzers run here, on a Dask
+    worker. On any exception, a traceback is written to the sensitivity
+    ``logs/`` directory and a NaN-filled error row is returned so that the
+    sweep as a whole continues.
     """
+    # Each Dask worker is a fresh Python process; re-apply the kv_cache patch
+    # so workers don't deadlock on the shared altitude cache.
+    _patch_kv_cache_for_parallel_access()
+
     cfg = {**DEFAULTS, factor: value}
     variant_root = _variant_cache_subdir(factor, value, charge_type)
     try:
-        if charge_type == "DEP":
-            final_db = run_depot_variant(
-                common_db=common_db,
-                enable_plots=False,
-                depot_charging_power_kw=cfg["depot_charging_power_kw"],
-                cache_subdir=f"{variant_root}/depot",
-                output_subdir=None,
-            )
-            work_dir = CACHE_BASE / f"{variant_root}/depot"
-        elif charge_type == "TERM":
-            final_db = run_opportunity_variant(
-                common_db=common_db,
-                enable_plots=False,
-                depot_charging_power_kw=cfg["depot_charging_power_kw"],
-                terminus_charging_power_kw=cfg["terminus_charging_power_kw"],
-                cache_subdir=f"{variant_root}/opportunity",
-                output_subdir=None,
-            )
-            work_dir = CACHE_BASE / f"{variant_root}/opportunity"
-        else:
-            raise ValueError(f"Unknown charge_type: {charge_type!r}")
-        return _collect_row(final_db, work_dir, factor, value, charge_type)
-    except Exception as e:
+        final_db, work_dir = _run_variant(charge_type, common_db, cfg, variant_root)
+        metrics = _extract_metrics(final_db, work_dir, charge_type)
+        return _result_row(
+            factor=factor,
+            factor_value=value,
+            charge_type=charge_type,
+            status="ok",
+            metrics=metrics,
+        )
+    except Exception as exc:
         logger.warning(
             "Sensitivity iteration failed: factor=%s value=%s charge_type=%s — %s",
             factor,
             value,
             charge_type,
-            e,
+            exc,
         )
-        _log_failure(factor, value, charge_type, e)
-        return _failure_row(factor, value, charge_type, e)
+        _log_failure(factor, value, charge_type, exc)
+        return _result_row(
+            factor=factor,
+            factor_value=value,
+            charge_type=charge_type,
+            status="error",
+            error_short=f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -402,57 +481,77 @@ def run_one(
 # ---------------------------------------------------------------------------
 
 
-@flow(name="SWU Sensitivity Sweep", task_runner=DaskTaskRunner())  # type: ignore[arg-type]
-def swu_sensitivity_sweep() -> pd.DataFrame:
-    """Run the full sweep: common phases serial, variant phases parallel on Dask.
+def _iter_sweep_cells() -> List[Tuple[str, float, str]]:
+    """All ``(factor, value, charge_type)`` triples the sweep will iterate over.
 
-    Depot rows are skipped for the terminus_charging_power_kw sweep because
+    Depot rows are skipped for the ``terminus_charging_power_kw`` sweep because
     depot-only scenarios never use terminus chargers — those values would be
     identical to the default-power row and add no information.
     """
-    SENSITIVITY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Phase 1 — Pre-common (GTFS ingest + station merge + cleanup). Parameter-
-    # independent, so it runs exactly once for the whole sweep. This is the
-    # expensive step we want to dodge across iterations.
-    pre_common_db = run_pre_common_phase(cache_subdir="sensitivity/pre_common")
-    logger.info("Pre-common database: %s", pre_common_db)
-
-    # Phase 2 — Precompute every unique parameterised common-phase config
-    # sequentially. Each call here is now cheap (CopyCreator + ConfigureVT +
-    # AddTemperatures only) since the GTFS ingest is reused via pre_common_db.
-    # Serialised because parallel workers would otherwise race on shared
-    # work_dir output paths; the framework's content-hash caching makes the
-    # serialisation harmless across re-runs.
-    common_dbs: Dict[CommonKey, Path] = {}
-    for factor, values in SWEEPS.items():
-        for value in values:
-            cfg = {**DEFAULTS, factor: value}
-            ck = _common_params_key(cfg)
-            if ck in common_dbs:
-                continue
-            common_dbs[ck] = run_common_phase(
-                battery_capacity_kwh=ck[0],
-                charging_curve=[[0.0, ck[2]], [1.0, ck[2]]],
-                temperature_celsius=ck[1],
-                cache_subdir=_common_cache_subdir(ck),
-                pre_common_db=pre_common_db,
-            )
-    logger.info("Precomputed %d unique parameterised common databases", len(common_dbs))
-
-    # Phase 3 — Fan out variant iterations to Dask workers.
-    futures = []
+    cells: List[Tuple[str, float, str]] = []
     for factor, values in SWEEPS.items():
         for value in values:
             for charge_type in CHARGE_TYPES:
                 if charge_type == "DEP" and factor == "terminus_charging_power_kw":
                     continue
-                cfg = {**DEFAULTS, factor: value}
-                futures.append(
-                    run_one.submit(factor, value, charge_type, common_dbs[_common_params_key(cfg)])
-                )
+                cells.append((factor, value, charge_type))
+    return cells
 
-    rows: List[pd.DataFrame] = [f.result() for f in futures]
+
+def _precompute_common_dbs(pre_common_db: Path) -> Dict[CommonKey, Path]:
+    """Materialise every unique parameterised common DB the sweep will need.
+
+    Run serially: parallel workers would otherwise race on shared work_dir
+    output paths, and the framework's content-hash caching makes the
+    serialisation harmless across re-runs.
+    """
+    common_dbs: Dict[CommonKey, Path] = {}
+    for factor, values in SWEEPS.items():
+        for value in values:
+            cfg = {**DEFAULTS, factor: value}
+            key = _common_params_key(cfg)
+            if key in common_dbs:
+                continue
+            common_dbs[key] = run_common_phase(
+                battery_capacity_kwh=key[0],
+                charging_curve=[[0.0, key[2]], [1.0, key[2]]],
+                temperature_celsius=key[1],
+                cache_subdir=_common_cache_subdir(key),
+                pre_common_db=pre_common_db,
+            )
+    return common_dbs
+
+
+@flow(
+    name="SWU Sensitivity Sweep",
+    task_runner=DaskTaskRunner(  # type: ignore[arg-type]
+        cluster_kwargs={"n_workers": MAX_DASK_WORKERS, "threads_per_worker": 1}
+    ),
+)
+def swu_sensitivity_sweep() -> pd.DataFrame:
+    """Run the full sweep: common phases serial, variant phases parallel on Dask."""
+    SENSITIVITY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Phase 1 — Pre-common (GTFS ingest + station merge + cleanup). Parameter-
+    # independent, so it runs exactly once for the whole sweep.
+    pre_common_db = run_pre_common_phase(cache_subdir="sensitivity/pre_common")
+    logger.info("Pre-common database: %s", pre_common_db)
+
+    # Phase 2 — Precompute every unique parameterised common-phase config.
+    common_dbs = _precompute_common_dbs(pre_common_db)
+    logger.info("Precomputed %d unique parameterised common databases", len(common_dbs))
+
+    # Phase 3 — Fan out variant iterations to Dask workers.
+    futures = [
+        run_one.submit(
+            factor,
+            value,
+            charge_type,
+            common_dbs[_common_params_key({**DEFAULTS, factor: value})],
+        )
+        for factor, value, charge_type in _iter_sweep_cells()
+    ]
+    rows = [f.result() for f in futures]
     table = pd.concat([r for r in rows if not r.empty], ignore_index=True)
 
     table.to_excel(SENSITIVITY_TABLE_PATH, index=False)
@@ -488,12 +587,77 @@ def _factor_applies_to_dep(factor: str) -> bool:
     return factor != "terminus_charging_power_kw"
 
 
+def _charge_types_for_factor(factor: str) -> List[str]:
+    return ["DEP", "TERM"] if _factor_applies_to_dep(factor) else ["TERM"]
+
+
+def _padded_limits(values: List[float], pad_frac: float = 0.05) -> Tuple[float, float]:
+    """Min/max of ``values`` widened by a fraction of the range (or a small floor)."""
+    if not values:
+        return 0.0, 1.0
+    lo, hi = float(min(values)), float(max(values))
+    pad = (hi - lo) * pad_frac if hi > lo else max(abs(hi), 1.0) * 0.05
+    return lo - pad, hi + pad
+
+
+def _final_variant_db_path(factor: str, value: float, charge_type: str) -> Optional[Path]:
+    """Path to the cached final-simulation DB for one iteration, or ``None``.
+
+    Returns ``None`` when the iteration failed before ``Simulation`` completed
+    (so no ``step_*_Simulation.db`` exists in the variant work_dir).
+    """
+    subdir = "depot" if charge_type == "DEP" else "opportunity"
+    work_dir = CACHE_BASE / _variant_cache_subdir(factor, value, charge_type) / subdir
+    if not work_dir.exists():
+        return None
+    candidates = sorted(work_dir.glob("step_*_Simulation.db"))
+    return candidates[-1] if candidates else None
+
+
+def _read_arrival_socs(factor: str, value: float, charge_type: str) -> List[float]:
+    """Per-rotation depot-arrival SoCs from a cached variant DB.
+
+    Returns an empty list when the cache is missing — typically because the
+    iteration failed (e.g. cold-temperature TERM infeasibility) and never
+    wrote a Simulation step. The SoC is read from the last DRIVING event of
+    each rotation whose final trip terminates at a depot.
+    """
+    final_db = _final_variant_db_path(factor, value, charge_type)
+    if final_db is None:
+        return []
+    context = PipelineContext(work_dir=final_db.parent, current_db=final_db)
+    socs: List[float] = []
+    with context.get_session() as session:
+        depot_station_ids = {d.station_id for d in session.query(Depot).all()}
+        rotations = session.query(Rotation).options(joinedload(Rotation.trips)).all()
+        for rot in rotations:
+            trips_sorted = sorted(rot.trips, key=lambda t: t.departure_time)
+            if not trips_sorted:
+                continue
+            if trips_sorted[-1].route.arrival_station_id not in depot_station_ids:
+                continue
+            last_drive = (
+                session.query(Event)
+                .filter(
+                    Event.vehicle_id == rot.vehicle_id,
+                    Event.event_type == EventType.DRIVING,
+                    Event.time_end <= trips_sorted[-1].arrival_time,
+                )
+                .order_by(Event.time_end.desc())
+                .first()
+            )
+            if last_drive is not None:
+                socs.append(float(last_drive.soc_end))
+    return socs
+
+
 def plot_per_factor(table: pd.DataFrame, output_dir: Path) -> None:
     """For each (factor, output) pair, render a print-sized two-panel line plot.
 
     Left panel: DEP. Right panel: TERM. The DEP panel is omitted entirely for
     factors where depot-only is invariant (terminus charging power) — drawing a
-    constant line there would be misleading.
+    constant line there would be misleading. The two panels share x and y
+    limits (computed across both) so they can be visually compared.
     """
     configure_latex_plotting()
     palette = sns.color_palette("Set2")
@@ -505,16 +669,16 @@ def plot_per_factor(table: pd.DataFrame, output_dir: Path) -> None:
             if sub.empty:
                 continue
 
-            include_dep = _factor_applies_to_dep(factor)
-            charge_types_to_plot = ["DEP", "TERM"] if include_dep else ["TERM"]
+            charge_types_to_plot = _charge_types_for_factor(factor)
             n_panels = len(charge_types_to_plot)
+            xlim = _padded_limits(sub["factor_value"].tolist())
+            ylim = _padded_limits(sub[output_col].tolist())
 
             fig, axes_obj = plt.subplots(
                 1,
                 n_panels,
                 figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH),
                 layout="constrained",
-                sharey=True,
             )
             # plt.subplots returns a scalar Axes when n=1; normalise to list.
             axes = list(axes_obj) if n_panels > 1 else [axes_obj]
@@ -529,11 +693,163 @@ def plot_per_factor(table: pd.DataFrame, output_dir: Path) -> None:
                     linewidth=1.0,
                     markersize=3,
                 )
+                ax.set_xlim(*xlim)
+                ax.set_ylim(*ylim)
                 ax.set_title(ctype)
                 ax.set_xlabel(FACTOR_LABEL[factor])
             axes[0].set_ylabel(OUTPUT_LABEL[output_col])
 
             _save_fig(fig, output_dir, f"{output_col}__vs__{factor}")
+
+
+def plot_arrival_soc_hist2d(table: pd.DataFrame, output_dir: Path, bins: int = 10) -> None:
+    """Per-factor 2D histogram of depot-arrival SoCs (one panel per charge_type).
+
+    Complements ``mean_depot_arrival_soc`` in :func:`plot_per_factor` by showing
+    the *distribution* of per-rotation arrival SoCs rather than the mean.
+    The SoCs are pulled from the cached variant simulation DBs.
+
+    Both panels share x/y limits and a single color scale so the DEP and TERM
+    distributions can be compared directly.
+    """
+    configure_latex_plotting()
+
+    for factor in SWEEPS:
+        sub = table[(table["factor"] == factor) & (table["status"] == "ok")]
+        if sub.empty:
+            continue
+
+        charge_types_to_plot = _charge_types_for_factor(factor)
+
+        # Collect (factor_value, soc) pairs per charge_type, one (x, y) tuple
+        # per rotation.
+        points: Dict[str, Tuple[List[float], List[float]]] = {}
+        for ctype in charge_types_to_plot:
+            xs: List[float] = []
+            ys: List[float] = []
+            for _, row in sub[sub["charge_type"] == ctype].iterrows():
+                fv = float(row["factor_value"])
+                socs = _read_arrival_socs(factor, fv, ctype)
+                xs.extend([fv] * len(socs))
+                ys.extend(socs)
+            points[ctype] = (xs, ys)
+
+        all_x = [v for xs, _ in points.values() for v in xs]
+        all_y = [v for _, ys in points.values() for v in ys]
+        if not all_x or not all_y:
+            continue
+        xlim = _padded_limits(all_x)
+        ylim = _padded_limits(all_y)
+
+        # Pre-compute histograms with the shared range so we can pick a global
+        # color-scale max across both panels.
+        hist_by_ctype: Dict[str, np.ndarray] = {}
+        for ctype in charge_types_to_plot:
+            xs, ys = points[ctype]
+            if not xs:
+                hist_by_ctype[ctype] = np.zeros((bins, bins))
+                continue
+            counts, _, _ = np.histogram2d(xs, ys, bins=bins, range=[list(xlim), list(ylim)])
+            hist_by_ctype[ctype] = counts
+
+        vmax = max((h.max() for h in hist_by_ctype.values()), default=0)
+        if vmax <= 0:
+            continue
+
+        n_panels = len(charge_types_to_plot)
+        fig, axes_obj = plt.subplots(
+            1,
+            n_panels,
+            figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH),
+            layout="constrained",
+        )
+        axes = list(axes_obj) if n_panels > 1 else [axes_obj]
+
+        # Hand-rolled imshow rather than ax.hist2d so DEP and TERM share the
+        # same color normalisation. ``counts.T`` because hist2d's first axis is
+        # x but imshow's first axis is rows (y).
+        from matplotlib.colors import LogNorm  # local: only needed here
+
+        norm = LogNorm(vmin=1.0, vmax=float(vmax))
+        cmap = plt.get_cmap("Greys")
+        mappable = None
+        for ax, ctype in zip(axes, charge_types_to_plot):
+            counts = hist_by_ctype[ctype]
+            display = np.where(counts > 0, counts, np.nan)
+            mappable = ax.imshow(
+                display.T,
+                extent=(xlim[0], xlim[1], ylim[0], ylim[1]),
+                origin="lower",
+                aspect="auto",
+                cmap=cmap,
+                norm=norm,
+            )
+            ax.set_xlim(*xlim)
+            ax.set_ylim(*ylim)
+            ax.set_title(ctype)
+            ax.set_xlabel(FACTOR_LABEL[factor])
+        axes[0].set_ylabel("Depot arrival SoC")
+        if mappable is not None:
+            fig.colorbar(mappable, ax=axes, label="Rotations / bin")
+
+        _save_fig(fig, output_dir, f"depot_arrival_soc_hist__vs__{factor}")
+
+
+def plot_vs_energy_consumption(table: pd.DataFrame, output_dir: Path) -> None:
+    """Line plot of every metric except mean energy itself against mean energy.
+
+    Treats ``mean_energy_consumption_kwh_per_km`` as if it were a swept factor
+    so the per-factor view extends to the dominant emergent output. Only the
+    temperature sweep is used — the other three factors don't influence
+    consumption, so pooling them would stack many rows at the default
+    temperature's single energy value. Layout matches :func:`plot_per_factor`:
+    two panels (DEP, TERM) sharing x and y limits.
+    """
+    configure_latex_plotting()
+    palette = sns.color_palette("Set2")
+    color_by_ctype = {"DEP": palette[0], "TERM": palette[1]}
+    energy_col = "mean_energy_consumption_kwh_per_km"
+
+    ok = table[(table["status"] == "ok") & (table["factor"] == "temperature_celsius")]
+    if ok.empty:
+        return
+
+    for output_col in METRIC_COLUMNS:
+        if output_col == energy_col:
+            continue
+        charge_types_to_plot = [c for c in ["DEP", "TERM"] if c in ok["charge_type"].unique()]
+        if not charge_types_to_plot:
+            continue
+
+        xlim = _padded_limits(ok[energy_col].tolist())
+        ylim = _padded_limits(ok[output_col].tolist())
+
+        n_panels = len(charge_types_to_plot)
+        fig, axes_obj = plt.subplots(
+            1,
+            n_panels,
+            figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH),
+            layout="constrained",
+        )
+        axes = list(axes_obj) if n_panels > 1 else [axes_obj]
+
+        for ax, ctype in zip(axes, charge_types_to_plot):
+            cell = ok[ok["charge_type"] == ctype].sort_values(energy_col)
+            ax.plot(
+                cell[energy_col].values,
+                cell[output_col].values,
+                marker="o",
+                color=color_by_ctype[ctype],
+                linewidth=1.0,
+                markersize=3,
+            )
+            ax.set_xlim(*xlim)
+            ax.set_ylim(*ylim)
+            ax.set_title(ctype)
+            ax.set_xlabel(OUTPUT_LABEL[energy_col])
+        axes[0].set_ylabel(OUTPUT_LABEL[output_col])
+
+        _save_fig(fig, output_dir, f"{output_col}__vs__mean_energy_consumption")
 
 
 def plot_factor_grid(table: pd.DataFrame, output_dir: Path) -> None:
@@ -596,6 +912,8 @@ def plot_all(table_path: Path = SENSITIVITY_TABLE_PATH) -> None:
         )
     table = pd.read_excel(table_path)
     plot_per_factor(table, SENSITIVITY_PLOTS_DIR)
+    plot_vs_energy_consumption(table, SENSITIVITY_PLOTS_DIR)
+    plot_arrival_soc_hist2d(table, SENSITIVITY_PLOTS_DIR)
     plot_factor_grid(table, SENSITIVITY_PLOTS_DIR)
     logger.info("Plots written to %s", SENSITIVITY_PLOTS_DIR)
 
