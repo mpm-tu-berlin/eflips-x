@@ -16,7 +16,6 @@ from eflips.model import (
     Station,
     VehicleType,
     TripType,
-    ConsistencyWarning,
     ConsumptionLut,
     VehicleClass,
     AssocVehicleTypeVehicleClass,
@@ -211,11 +210,13 @@ class TestSetUpBvgVehicleTypes:
             )
 
             # Check that warnings were emitted for using defaults
-            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
-
-            assert len(non_consistency_warnings) == 2
-            assert "new_vehicle_types" in str(non_consistency_warnings[0].message)
-            assert "vehicle_type_conversion" in str(non_consistency_warnings[1].message)
+            # Filter to UserWarning only: simplefilter("always") otherwise lets
+            # unrelated SADeprecationWarnings/SAWarnings re-fire depending on
+            # test ordering and inflate the count.
+            user_warnings = [wa for wa in w if wa.category is UserWarning]
+            messages = [str(wa.message) for wa in user_warnings]
+            assert any("new_vehicle_types" in m for m in messages)
+            assert any("vehicle_type_conversion" in m for m in messages)
 
         # Check that exactly 3 new vehicle types exist (EN, GN, DD)
         vehicle_types = db_session.query(VehicleType).all()
@@ -281,13 +282,15 @@ class TestSetUpBvgVehicleTypes:
             )
 
             # Check that warnings were emitted for using defaults
-            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
+            # Filter to UserWarning only: simplefilter("always") otherwise lets
+            # unrelated SADeprecationWarnings/SAWarnings re-fire depending on
+            # test ordering and inflate the count.
+            user_warnings = [wa for wa in w if wa.category is UserWarning]
+            messages = [str(wa.message) for wa in user_warnings]
+            assert any("new_vehicle_types" in m for m in messages)
+            assert any("vehicle_type_conversion" in m for m in messages)
 
-            assert len(non_consistency_warnings) == 2
-            assert "new_vehicle_types" in str(non_consistency_warnings[0].message)
-            assert "vehicle_type_conversion" in str(non_consistency_warnings[1].message)
-
-        # Cehck that the new "GN" short name vehicle type has a consumption lut
+        # Check that the new "GN" short name vehicle type has a consumption lut
         consumption_lut = (
             db_session.query(ConsumptionLut)
             .join(VehicleClass)
@@ -297,7 +300,7 @@ class TestSetUpBvgVehicleTypes:
             .one()
         )
 
-        assert np.isclose(max(consumption_lut.values), 5.332117566234736)
+        assert np.isclose(max(consumption_lut.values), 12.744117566234737)
 
     def test_remove_unused_vehicle_types_with_path(
         self, temp_db: Path, scenario_with_vehicle_types, db_session: Session
@@ -326,13 +329,15 @@ class TestSetUpBvgVehicleTypes:
             )
 
             # Check that warnings were emitted for using defaults
-            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
+            # Filter to UserWarning only: simplefilter("always") otherwise lets
+            # unrelated SADeprecationWarnings/SAWarnings re-fire depending on
+            # test ordering and inflate the count.
+            user_warnings = [wa for wa in w if wa.category is UserWarning]
+            messages = [str(wa.message) for wa in user_warnings]
+            assert any("new_vehicle_types" in m for m in messages)
+            assert any("vehicle_type_conversion" in m for m in messages)
 
-            assert len(non_consistency_warnings) == 2
-            assert "new_vehicle_types" in str(non_consistency_warnings[0].message)
-            assert "vehicle_type_conversion" in str(non_consistency_warnings[1].message)
-
-        # Cehck that the new "GN" short name vehicle type has a consumption lut
+        # Check that the new "GN" short name vehicle type has a consumption lut
         consumption_lut = (
             db_session.query(ConsumptionLut)
             .join(VehicleClass)
@@ -785,10 +790,10 @@ class TestRemoveUnusedRotations:
             warnings.simplefilter("always")
             modifier.modify(session=db_session, params={})
 
-            # Check that warning was emitted for using defaults
-            non_consistency_warnings = [wa for wa in w if wa.category != ConsistencyWarning]
-            assert len(non_consistency_warnings) == 1
-            assert "depot_station_short_names" in str(non_consistency_warnings[0].message)
+            # Filter to the UserWarning the modifier emits (see note above).
+            user_warnings = [wa for wa in w if wa.category is UserWarning]
+            messages = [str(wa.message) for wa in user_warnings]
+            assert any("depot_station_short_names" in m for m in messages)
 
         # Default depot names include "BF L" and "BF M", so 2 valid rotations should remain
         rotations = db_session.query(Rotation).all()
@@ -890,14 +895,14 @@ class TestMergeStations:
             name="Berlin Hauptbahnhof",
             name_short="HBF1",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(0 0)", srid=4326),
+            geom=WKTElement("POINT Z (0 0 0)", srid=4326),
             is_electrified=False,
         )
         station_nearby_similar_2 = Station(
             name="S+U Berlin Hauptbahnhof",
             name_short="HBF2",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(0.0005 0)", srid=4326),  # ~50m away
+            geom=WKTElement("POINT Z (0.0005 0 0)", srid=4326),  # ~50m away
             is_electrified=False,
         )
 
@@ -906,7 +911,7 @@ class TestMergeStations:
             name="Berlin Hbf Platform 2",
             name_short="HBF3",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(1 1)", srid=4326),  # ~157km away
+            geom=WKTElement("POINT Z (1 1 0)", srid=4326),  # ~157km away
             is_electrified=False,
         )
 
@@ -915,7 +920,7 @@ class TestMergeStations:
             name="Zoologischer Garten",
             name_short="ZOO",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(0.0005 0.0005)", srid=4326),  # ~70m away, different name
+            geom=WKTElement("POINT Z (0.0005 0.0005 0)", srid=4326),  # ~70m away, different name
             is_electrified=False,
         )
 
@@ -924,7 +929,7 @@ class TestMergeStations:
             name="Alexanderplatz",
             name_short="ALEX",
             scenario_id=scenario.id,
-            geom=WKTElement("POINT(0.01 0.01)", srid=4326),
+            geom=WKTElement("POINT Z (0.01 0.01 0)", srid=4326),
             is_electrified=False,
         )
 

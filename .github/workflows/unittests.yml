@@ -50,6 +50,7 @@ jobs:
           OPENROUTESERVICE_API_KEY: ${{ secrets.OPENROUTESERVICE_API_KEY }}
           OPENROUTESERVICE_BASE_URL: "https://api.openrouteservice.org/"
           SPATIALITE_LIBRARY_PATH: "/usr/lib/x86_64-linux-gnu/mod_spatialite"
+          ELEVATION_DUMMY_MODE: "True"
           # The DATABASE_URL is set conditionally above
 
       - name: Upload durations
