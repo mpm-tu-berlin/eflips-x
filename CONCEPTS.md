@@ -671,7 +671,7 @@ def two_phase_pipeline():
 - Dynamic configuration based on intermediate results
 - Conditional step inclusion
 
-**Example**: `eflips/x/flows/swu_gtfs_flow.py`
+**Example**: `eflips/x/flows/gtfs_flow.py` (run_common_phase → run_depot_variant / run_opportunity_variant)
 
 #### Pattern 3: Parallel Analysis
 
@@ -873,7 +873,7 @@ def custom_pipeline():
 - Keeps custom code close to usage
 - Faster development
 
-**Example**: `eflips/x/flows/swu_gtfs_flow.py` (ConfigureVehicleTypes modifier)
+**Example**: `eflips/x/steps/modifiers/gtfs_utilities.py` (`ConfigureVehicleTypes` modifier, used by `eflips/x/flows/gtfs_flow.py`)
 
 ### 6.2 Creating a New Generator
 

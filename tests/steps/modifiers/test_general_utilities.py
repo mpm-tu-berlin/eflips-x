@@ -19,7 +19,12 @@ from eflips.model import (
 )
 from sqlalchemy.orm import Session
 
-from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData, AddTemperatures
+from eflips.x.steps.modifiers.general_utilities import (
+    AddTemperatures,
+    CalculateConsumptionScaling,
+    RemoveConsumptionLuts,
+    RemoveUnusedData,
+)
 
 
 class TestRemoveUnusedData:
@@ -508,3 +513,136 @@ class TestAddTemperatures:
         assert isinstance(docs, dict)
         assert len(docs) == 1
         assert "AddTemperatures.temperature_celsius" in docs
+
+
+class TestRemoveConsumptionLuts:
+    """Tests for RemoveConsumptionLuts modifier."""
+
+    def _make_scenario_with_luts(self, db_session: Session):
+        from eflips.model import ConsumptionLut, VehicleClass
+
+        scenario = Scenario(name="Test", name_short="T")
+        db_session.add(scenario)
+        db_session.flush()
+
+        vt = VehicleType(
+            name="Bus",
+            name_short="B",
+            scenario_id=scenario.id,
+            battery_capacity=400.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            consumption=1.5,
+        )
+        db_session.add(vt)
+        db_session.flush()
+
+        vc = VehicleClass(name="Test Class", name_short="TC", scenario_id=scenario.id)
+        db_session.add(vc)
+        vt.vehicle_classes.append(vc)
+        db_session.flush()
+
+        lut = ConsumptionLut(
+            name="Test LUT",
+            scenario_id=scenario.id,
+            vehicle_class_id=vc.id,
+            columns=["incline", "temp", "loading", "speed"],
+            data_points=[[0.0, 20.0, 0.5, 50.0]],
+            values=[1.5],
+        )
+        db_session.add(lut)
+        db_session.commit()
+        return scenario
+
+    def test_luts_deleted(self, temp_db: Path, db_session: Session):
+        from eflips.model import ConsumptionLut
+
+        self._make_scenario_with_luts(db_session)
+        assert db_session.query(ConsumptionLut).count() == 1
+        RemoveConsumptionLuts().modify(db_session, {})
+        db_session.commit()
+        assert db_session.query(ConsumptionLut).count() == 0
+
+    def test_vehicle_classes_deleted(self, temp_db: Path, db_session: Session):
+        from eflips.model import VehicleClass
+
+        self._make_scenario_with_luts(db_session)
+        assert db_session.query(VehicleClass).count() == 1
+        RemoveConsumptionLuts().modify(db_session, {})
+        db_session.commit()
+        assert db_session.query(VehicleClass).count() == 0
+
+    def test_minimal_consumption_applied(self, temp_db: Path, db_session: Session):
+        self._make_scenario_with_luts(db_session)
+        RemoveConsumptionLuts().modify(
+            db_session, {"RemoveConsumptionLuts.minimal_consumption": 0.01}
+        )
+        db_session.commit()
+        for vt in db_session.query(VehicleType).all():
+            assert vt.consumption == pytest.approx(0.01)
+
+    def test_raises_on_nonpositive_minimal_consumption(self, temp_db: Path, db_session: Session):
+        self._make_scenario_with_luts(db_session)
+        with pytest.raises(ValueError, match="minimal_consumption must be positive"):
+            RemoveConsumptionLuts().modify(
+                db_session, {"RemoveConsumptionLuts.minimal_consumption": 0.0}
+            )
+
+    def test_document_params(self):
+        docs = RemoveConsumptionLuts().document_params()
+        assert isinstance(docs, dict)
+        assert "RemoveConsumptionLuts.minimal_consumption" in docs
+
+
+class TestCalculateConsumptionScaling:
+    """Tests for CalculateConsumptionScaling modifier — validation paths only."""
+
+    def test_raises_when_quarterly_consumption_wrong_length(
+        self, temp_db: Path, db_session: Session
+    ):
+        scenario = Scenario(name="Test", name_short="T")
+        db_session.add(scenario)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="real_quarterly_consumption must have exactly 4"):
+            CalculateConsumptionScaling().modify(
+                db_session,
+                {"CalculateConsumptionScaling.real_quarterly_consumption": [1.0, 2.0, 3.0]},
+            )
+
+    def test_raises_when_multiple_scenarios(self, temp_db: Path, db_session: Session):
+        db_session.add(Scenario(name="S1", name_short="S1"))
+        db_session.add(Scenario(name="S2", name_short="S2"))
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="Expected exactly one scenario, found 2"):
+            CalculateConsumptionScaling().modify(db_session, {})
+
+    def test_skips_gracefully_when_no_luts(self, temp_db: Path, db_session: Session):
+        scenario = Scenario(name="Test", name_short="T")
+        db_session.add(scenario)
+        db_session.flush()
+
+        vt = VehicleType(
+            name="Bus",
+            name_short="B",
+            scenario_id=scenario.id,
+            battery_capacity=400.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            consumption=1.5,
+        )
+        db_session.add(vt)
+        db_session.commit()
+
+        # Should not raise — just log a warning and return
+        CalculateConsumptionScaling().modify(db_session, {})
+
+    def test_document_params(self):
+        docs = CalculateConsumptionScaling().document_params()
+        assert isinstance(docs, dict)
+        assert "CalculateConsumptionScaling.real_quarterly_consumption" in docs

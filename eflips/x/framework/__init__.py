@@ -147,6 +147,45 @@ class PipelineStep(ABC):
         failed_db = db_path.with_suffix(f".{now}.failed")
         shutil.move(db_path, failed_db)
 
+    @staticmethod
+    def _validate_log_level_param(params: Dict[str, Any]) -> None:
+        """Validate the ``log_level`` entry in *params*, if present.
+
+        Raises ``ValueError`` for unknown string log levels (e.g. ``"INVALID"``)
+        so that callers that bypass :meth:`set_log_level` (such as ``generate``
+        invoked directly from tests) still surface configuration mistakes.
+        """
+        level_str = params.get("log_level")
+        if level_str is None or isinstance(level_str, int):
+            return
+        if isinstance(level_str, str):
+            level = getattr(logging, level_str.upper(), None)
+            if not isinstance(level, int):
+                raise ValueError(
+                    f"Invalid log level: {level_str!r}. Must be one of "
+                    "DEBUG, INFO, WARNING, ERROR, CRITICAL."
+                )
+            return
+        raise ValueError(
+            f"Invalid log level type: {type(level_str).__name__}. Must be a string or int."
+        )
+
+    @staticmethod
+    def _unlink_stale_output_db(output_db: Path) -> None:
+        """Unlink an output DB file that exists before a step writes its result.
+
+        Emits a warning because the file's existence usually points to a cache
+        invalidation problem. Subclasses call this from ``execute_impl`` before
+        recreating the database.
+        """
+        if output_db.exists():
+            warnings.warn(
+                f"Re-creating existing database at {output_db}. This may indicate a problem "
+                "with cache invalidation. If you did some actions that require re-running this "
+                "step, you may ignore this warning."
+            )
+            output_db.unlink()
+
     def set_log_level(self, context: PipelineContext) -> None:
         """
         Set the log level for this step based on the context.params dictionary. If it contains a log level specific
@@ -165,6 +204,7 @@ class PipelineStep(ABC):
                     f"Invalid log level type for {self.__class__.__name__}.log_level: {type(level_str)}. "
                     f"Defaulting to {self.DEFAULT_LOG_LEVEL}."
                 )
+                level = self.DEFAULT_LOG_LEVEL
         elif "log_level" in context.params:
             level_str = context.params["log_level"]
             if isinstance(level_str, int):
@@ -176,6 +216,7 @@ class PipelineStep(ABC):
                     f"Invalid log level type for log_level: {type(level_str)}. "
                     f"Defaulting to {self.DEFAULT_LOG_LEVEL}."
                 )
+                level = self.DEFAULT_LOG_LEVEL
         else:
             level = self.DEFAULT_LOG_LEVEL
         logging.basicConfig(level=level)
@@ -319,16 +360,10 @@ class Generator(PipelineStep):
 
     def execute_impl(self, context: PipelineContext, output_db: Path) -> None:
         """Execute generator: create new database."""
+        self._unlink_stale_output_db(output_db)
+
         db_url = f"sqlite:////{output_db.absolute().as_posix()}"
         db_engine = eflips.model.create_engine(db_url)
-
-        # Check if the database file already exists. If yes, warn and remove it.
-        if output_db.exists():
-            warnings.warn(
-                f"Re-creating existing database at {output_db}. This may indicate a problem with cache "
-                "invalidation. If you did some actions that require re-running this step, you may ignore this warning."
-            )
-            output_db.unlink()
 
         Base.metadata.create_all(db_engine)
         session = Session(db_engine)
@@ -408,14 +443,7 @@ class Modifier(PipelineStep):
         if not context.current_db:
             raise ValueError(f"Modifier {self.__class__.__name__} requires an input database")
 
-        # Set up the new database and open a session
-        # Check if the database file already exists. If yes, warn and remove it.
-        if output_db.exists():
-            warnings.warn(
-                f"Re-creating existing database at {output_db}. This may indicate a problem with cache "
-                "invalidation. If you did some actions that require re-running this step, you may ignore this warning."
-            )
-            output_db.unlink()
+        self._unlink_stale_output_db(output_db)
 
         # Copy input to output to preserve intermediate states
         shutil.copy2(context.current_db, output_db)

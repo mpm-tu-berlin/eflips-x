@@ -18,17 +18,14 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import gettempdir
-from typing import List, Any, Dict, Type, Optional
+from typing import List, Any, Dict, Type
 
-import dash_cytoscape as cyto  # type: ignore[import-untyped]
 import eflips.model
-import folium  # type: ignore[import-untyped]
-import matplotlib
-import plotly  # type: ignore[import-untyped]
 from eflips.model import ChargeType, Vehicle, Depot, Area, Rotation, Event
 from prefect import flow
 
 from eflips.x.flows import run_steps
+from eflips.x.flows.analysis_flow import save_visualization
 from eflips.x.framework import PipelineStep, PipelineContext, Analyzer
 from eflips.x.steps.analyzers import (
     RotationInfoAnalyzer,
@@ -50,41 +47,6 @@ from eflips.x.steps.modifiers.bvg_tools import (
 from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData, AddTemperatures
 from eflips.x.steps.modifiers.scheduling import VehicleScheduling, DepotAssignment
 from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
-
-
-def save_visualization(vis: Any, output_file: Path, analyzer: Optional[Analyzer] = None) -> None:
-    """
-    Save a visualization to a file based on its type.
-
-    Args:
-        vis: The visualization object (Plotly Figure, Folium Map, or Cytoscape)
-        output_file: Path where the visualization should be saved
-        analyzer: Optional analyzer instance (needed for Cytoscape exports)
-    """
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    if isinstance(vis, plotly.graph_objs._figure.Figure):
-        vis.write_html(output_file)
-    elif isinstance(vis, folium.Map):
-        vis.save(str(output_file))
-    elif isinstance(vis, cyto.Cytoscape):
-        if analyzer is None:
-            raise ValueError("Analyzer instance required for Cytoscape export")
-        assert hasattr(
-            analyzer, "export_cytoscape_html"
-        ), "Analyzer must have export_cytoscape_html method for Cytoscape export"
-        analyzer.export_cytoscape_html(cytoscape=vis, filename=str(output_file))
-    elif isinstance(vis, matplotlib.animation.FuncAnimation):
-        writer = matplotlib.animation.FFMpegWriter(
-            fps=30,
-            codec="libx264",
-            extra_args=["-preset", "fast", "-tune", "animation", "-crf", "18"],
-        )
-        vis.save(output_file, writer=writer)
-    else:
-        raise TypeError(f"Unknown visualization type: {type(vis)}")
-
-    print(f"Wrote analysis output to: {output_file}")
 
 
 def execute_and_save_simple_analyzer(

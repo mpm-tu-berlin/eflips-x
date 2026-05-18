@@ -1,20 +1,15 @@
 """Tests for output analyzers."""
 
-import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from zipfile import ZipFile
 
-import eflips.model
 import matplotlib.animation as animation
 import pandas as pd
 import plotly.graph_objs as go
 import pytest
 from eflips.model import (
     Area,
-    Base,
-    ChargeType,
     Depot,
     Event,
     Rotation,
@@ -32,121 +27,31 @@ from eflips.x.steps.analyzers.output_analyzers import (
     SpecificEnergyConsumptionAnalyzer,
     VehicleSocAnalyzer,
 )
-from eflips.x.steps.modifiers.scheduling import DepotAssignment, VehicleScheduling
-from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
-from tests.util import multi_depot_scenario
 
 
-@pytest.fixture(scope="module")
-def _simulated_db():
-    """
-    Module-scoped fixture: create a single simulated database shared by all output analyzer tests.
-
-    Returns (db_path, scenario_id) tuple.
-    """
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = Path(f.name)
-
-    db_url = f"sqlite:///{db_path.absolute().as_posix()}"
-    engine = eflips.model.create_engine(db_url)
-    Base.metadata.create_all(engine)
-    session = Session(engine)
-
-    scenario = multi_depot_scenario(
-        session,
-        num_depots=2,
-        lines_per_depot=4,
-        trips_per_line=30,
-    )
-
-    # Step 1: Vehicle Scheduling
-    vehicle_scheduler = VehicleScheduling()
-    vehicle_scheduler.modify(
-        session=session,
-        params={
-            "VehicleScheduling.charge_type": ChargeType.DEPOT,
-            "VehicleScheduling.battery_margin": 0.1,
-        },
-    )
-
-    # Step 2: Depot Assignment
-    all_depots = session.query(Depot).filter_by(scenario_id=scenario.id).all()
-    all_vehicle_types = session.query(VehicleType).filter_by(scenario_id=scenario.id).all()
-    depot_config = [
-        {
-            "depot_station": depot.station_id,
-            "capacity": 100,
-            "vehicle_type": [vt.id for vt in all_vehicle_types],
-            "name": depot.name,
-        }
-        for depot in all_depots
-    ]
-
-    if os.environ.get("DEPOT_ROTATION_MATCHING_ORS_CACHE") is None:
-        path_to_cache_zip = (
-            Path(__file__).resolve().parent / ".." / "modifiers" / "depot_rotation_match_cache.zip"
-        )
-        temp_dir = tempfile.gettempdir()
-        with ZipFile(path_to_cache_zip, "r") as zip_ref:
-            zip_ref.extractall(temp_dir)
-        os.environ["DEPOT_ROTATION_MATCHING_ORS_CACHE"] = os.path.join(
-            temp_dir, "DEPOT_ROTATION_MATCHING_ORS_CACHE"
-        )
-
-    depot_assigner = DepotAssignment()
-    depot_assigner.modify(
-        session=session,
-        params={
-            "DepotAssignment.depot_config": depot_config,
-            "DepotAssignment.depot_usage": 0.9,
-            "DepotAssignment.step_size": 0.2,
-            "DepotAssignment.max_iterations": 1,
-        },
-    )
-
-    # Step 3: Depot Generation
-    DepotGenerator().modify(session=session, params={})
-
-    # Step 4: Simulation
-    Simulation().modify(session=session, params={})
-
-    session.commit()
-    scenario_id = scenario.id
-    session.close()
-    engine.dispose()
-
-    yield db_path, scenario_id
-
-    if db_path.exists():
-        db_path.unlink()
+# ---------------------------------------------------------------------------
+# Module-level fixture aliases — delegate to the shared simulated_db defined
+# in tests/steps/analyzers/conftest.py so that test_bvg_tools.py can reuse
+# the same expensive pipeline result without duplicating setup code.
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def simulated_scenario(_simulated_db) -> Scenario:
-    """Per-test fixture that opens a session to the shared simulated database."""
-    # This is a dummy — the actual session comes from db_session below
-    # We just need this to exist so test signatures don't change
+def simulated_scenario(simulated_db) -> None:
+    """Compatibility shim: tests that accept simulated_scenario get None (unused)."""
     return None
 
 
 @pytest.fixture
-def db_session(_simulated_db):
-    """Per-test session into the shared simulated database."""
-    db_path, scenario_id = _simulated_db
-    db_url = f"sqlite:///{db_path.absolute().as_posix()}"
-    engine = eflips.model.create_engine(db_url)
-    session = Session(engine)
-    yield session
-    session.rollback()
-    session.close()
-    engine.dispose()
+def db_session(simulated_session):
+    """Override conftest db_session: each test gets a rollback session into the shared simulated DB."""
+    return simulated_session
 
 
 @pytest.fixture
-def temp_db(_simulated_db) -> Path:
-    """Return the shared database path (overrides conftest temp_db)."""
-    db_path, _ = _simulated_db
-    return db_path
+def temp_db(simulated_db_path) -> Path:
+    """Override conftest temp_db: points to the shared simulated DB file."""
+    return simulated_db_path
 
 
 class TestDepartureArrivalSocAnalyzer:

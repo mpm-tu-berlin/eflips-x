@@ -18,18 +18,32 @@ from eflips.x.steps.analyzers.input_analyzers import (
     RotationInfoAnalyzer,
     SingleRotationInfoAnalyzer,
 )
-from tests.util import multi_depot_scenario
+
+
+# ---------------------------------------------------------------------------
+# Module-level fixture overrides — use the module-scoped small_multi_depot_db
+# from tests/steps/conftest.py so the expensive scenario is built only once.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def temp_db(small_multi_depot_db: Path) -> Path:
+    """Override conftest temp_db: point to the shared small multi-depot DB."""
+    return small_multi_depot_db
+
+
+@pytest.fixture
+def db_session(small_scenario_session: Session) -> Session:
+    """Override conftest db_session: read-only session into the shared small scenario DB."""
+    return small_scenario_session
 
 
 @pytest.fixture
 def test_scenario(db_session: Session) -> Scenario:
-    """Create a test scenario with multi-depot network."""
-    return multi_depot_scenario(
-        db_session,
-        num_depots=2,
-        lines_per_depot=4,
-        trips_per_line=10,
-    )
+    """Return the pre-built scenario (no multi_depot_scenario() call needed)."""
+    scenario = db_session.query(Scenario).one_or_none()
+    assert scenario is not None, "Expected a pre-built Scenario in the shared test database."
+    return scenario
 
 
 class TestRotationInfoAnalyzer:

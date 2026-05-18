@@ -17,7 +17,7 @@ database state chaining.
 The framework defines three abstract base classes that all pipeline steps inherit from:
 
 **Generators** (`Generator`): Create new databases from input files. Do NOT depend on previous database state for cache
-invalidation. Use cases: ingesting BVG XML schedules, GTFS data.
+invalidation. Use cases: ingesting BVG XML schedules, GTFS data, copying an existing database (`CopyCreator`).
 
 **Modifiers** (`Modifier`): Transform existing databases by copying and modifying them. Depend on previous database
 state for cache invalidation. Use cases: vehicle scheduling, depot assignment, simulation.
@@ -71,16 +71,24 @@ Steps execute sequentially, each producing a new database file:
 eflips/x/
 ├── framework/          # Core framework (PipelineStep, Generator, Modifier, Analyzer)
 ├── steps/
-│   ├── generators/    # Create databases from input files (BVGXMLIngester, GTFSIngester)
+│   ├── generators/    # Create databases from input files
+│   │   └── __init__.py            # BVGXMLIngester, GTFSIngester, CopyCreator
 │   ├── modifiers/     # Transform databases
 │   │   ├── bvg_tools.py           # BVG-specific utilities
 │   │   ├── general_utilities.py   # RemoveUnusedData, AddTemperatures
-│   │   ├── scheduling.py          # VehicleScheduling, DepotAssignment
+│   │   ├── gtfs_utilities.py      # ConfigureVehicleTypes (parameterized)
+│   │   ├── scheduling.py          # VehicleScheduling, DepotAssignment, StationElectrification
 │   │   └── simulation.py          # DepotGenerator, Simulation
 │   └── analyzers/     # Analyze and visualize results
+│       ├── bvg_tools.py           # BVG-specific plots and TCO comparison
 │       ├── input_analyzers.py     # Pre-simulation analysis
+│       ├── json_export.py         # ScenarioJsonExporter
 │       └── output_analyzers.py    # Post-simulation analysis
 ├── flows/             # Example pipeline flows
+│   ├── analysis_flow.py           # Parallel visualization generation
+│   ├── bvg.py                     # BVG XML-driven flow
+│   ├── example.py                 # Minimal BVG example
+│   └── gtfs_flow.py               # Multi-agency GTFS flow driven by depot_locations.xlsx
 └── util/              # Utility functions
 ```
 

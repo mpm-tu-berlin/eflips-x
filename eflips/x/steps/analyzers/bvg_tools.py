@@ -1016,13 +1016,13 @@ def visualize_electrified_termini_map(
 
     for scenario_name, session in scenario_sessions.items():
         depot_station_ids = {d.station_id for d in session.query(Depot).all()}
-        query = session.query(Station).filter(
+        terminus_query = session.query(Station).filter(
             Station.is_electrified == True,  # noqa: E712
             Station.charge_type == ChargeType.OPPORTUNITY,
         )
         if depot_station_ids:
-            query = query.filter(~Station.id.in_(depot_station_ids))
-        terminus_stations = query.all()
+            terminus_query = terminus_query.filter(~Station.id.in_(depot_station_ids))
+        terminus_stations = terminus_query.all()
         stations_dict: Dict[str, Tuple[float, float]] = {}
         for s in terminus_stations:
             if s.geom is not None:
@@ -1056,6 +1056,8 @@ def visualize_electrified_termini_map(
         figsize=(PLOT_WIDTH_INCH, PLOT_WIDTH_INCH * 0.75),
         layout="constrained",
     )
+    # ax is a cartopy GeoAxes (because of the projection subplot_kw), but
+    # mypy only sees it as a base Axes which lacks set_extent / add_image.
     ax.set_extent(extent, crs=ccrs.PlateCarree())  # type: ignore[attr-defined]
     ax.add_image(tiles, zoom_level)  # type: ignore[call-arg]
     ax.set_axis_off()
