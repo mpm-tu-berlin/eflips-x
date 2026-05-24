@@ -49,7 +49,11 @@ from eflips.x.steps.analyzers.output_analyzers import SpecificEnergyConsumptionA
 from eflips.x.steps.generators import GTFSIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import MergeStations
 from eflips.x.steps.modifiers.consumption_luts import ConsumptionLut
-from eflips.x.steps.modifiers.general_utilities import AddTemperatures, RemoveUnusedData
+from eflips.x.steps.modifiers.general_utilities import (
+    AddTemperatures,
+    RemoveConsumptionLuts,
+    RemoveUnusedData,
+)
 from eflips.x.steps.modifiers.gtfs_utilities import ConfigureVehicleTypes
 from eflips.x.steps.modifiers.scheduling import (
     VehicleScheduling,
@@ -63,6 +67,63 @@ from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+# ---------------------------------------------------------------------------
+# SWU-specific modifier: drop tram lines mislabelled as buses in the GTFS feed
+# ---------------------------------------------------------------------------
+
+
+class RemoveTramLines(Modifier):
+    """Delete trips on the SWU tram lines (``name_short`` ``"1"`` and ``"2"``).
+
+    The SWU GTFS feed marks lines 1 and 2 as ``route_type=3`` (bus), but they are
+    tram lines and have no place in a bus-electrification study. We delete their
+    trips (and the stop_times under each) here and rely on ``RemoveUnusedData``
+    to garbage-collect the now-empty routes, rotations, and orphan lines.
+    """
+
+    TRAM_LINE_SHORT_NAMES: List[str] = ["1", "2"]
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {}
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        tram_lines = (
+            session.query(Line).filter(Line.name_short.in_(self.TRAM_LINE_SHORT_NAMES)).all()
+        )
+        if not tram_lines:
+            self.logger.info(
+                "RemoveTramLines: no lines with name_short in %s; nothing to do",
+                self.TRAM_LINE_SHORT_NAMES,
+            )
+            return
+
+        route_ids = [r.id for line in tram_lines for r in line.routes]
+        if not route_ids:
+            self.logger.info("RemoveTramLines: tram lines have no routes; nothing to do")
+            return
+
+        trips = session.query(Trip).filter(Trip.route_id.in_(route_ids)).all()
+        n_trips = len(trips)
+        for trip in trips:
+            for st in list(trip.stop_times):
+                session.delete(st)
+            session.delete(trip)
+        session.flush()
+
+        self.logger.info(
+            "RemoveTramLines: removed %d trips across %d routes on tram lines %s "
+            "(RemoveUnusedData will sweep up the empty routes, rotations, and lines)",
+            n_trips,
+            len(route_ids),
+            [l.name_short for l in tram_lines],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +285,7 @@ def run_pre_common_phase(*, cache_subdir: str = "pre_common") -> Path:
     steps: List[PipelineStep] = [
         GTFSIngester(input_files=[GTFS_FILE]),
         MergeStations(),
+        RemoveTramLines(),
         RemoveUnusedData(),
     ]
     context = PipelineContext(work_dir=work_dir, params=params)
@@ -279,6 +341,7 @@ def run_common_phase(
         steps: List[PipelineStep] = [
             GTFSIngester(input_files=[GTFS_FILE]),
             MergeStations(),
+            RemoveTramLines(),
             RemoveUnusedData(),
             ConfigureVehicleTypes(),
             AddTemperatures(),
@@ -400,6 +463,8 @@ def run_opportunity_variant(
         "Simulation.calculate_timeseries": True,
         "DepotGenerator.charging_power_kw": depot_charging_power_kw,
     }
+    if output_dir is not None:
+        params["IntegratedScheduling.log_file"] = output_dir / "integrated_scheduling_breaks.csv"
 
     context = PipelineContext(work_dir=work_dir, params=params)
     CopyCreator(input_files=[common_db]).execute(context=context)
@@ -465,28 +530,36 @@ def run_opportunity_variant(
             fig = SWUSpecificEnergyConsumptionAnalyzer.visualize(sec_result)
             _save_fig(fig, output_dir, "specific_energy_consumption")
 
-        # Representative service-day SoC plot: vehicle with the most terminus charging on the
-        # busiest day. We pick the day from the simulated events rather than hard-coding it,
-        # since the GTFS ingest auto-selects a week from the feed validity period.
+        # Representative service-day SoC plot, on the busiest day (picked from simulated
+        # events because the GTFS ingest auto-selects a week from the feed validity period).
+        # We render two variants side by side because the two selection metrics surface
+        # qualitatively different vehicles: "total_abs_delta" favors high-turnover schedules
+        # (many shallow opportunity-charging cycles); "min_soc" surfaces the vehicle whose
+        # schedule actually stresses the battery the most.
         with context.get_session() as session:
             day_start, day_end = _pick_representative_day(session)
 
-        soc_ctx = PipelineContext(
-            work_dir=context.work_dir,
-            params={
-                **context.params,
-                "RepresentativeVehicleSocAnalyzer.day_start": day_start,
-                "RepresentativeVehicleSocAnalyzer.day_end": day_end,
-            },
-            current_db=context.current_db,
-        )
-        soc_result = RepresentativeVehicleSocAnalyzer().execute(context=soc_ctx)
-        if soc_result is not None:
-            soc_df, event_spans, soc_day_start, soc_day_end = soc_result
-            fig = RepresentativeVehicleSocAnalyzer.visualize(
-                soc_df, event_spans, soc_day_start, soc_day_end
+        for metric, basename in (
+            ("total_abs_delta", "representative_vehicle_soc_total_delta"),
+            ("min_soc", "representative_vehicle_soc_min_soc"),
+        ):
+            soc_ctx = PipelineContext(
+                work_dir=context.work_dir,
+                params={
+                    **context.params,
+                    "RepresentativeVehicleSocAnalyzer.day_start": day_start,
+                    "RepresentativeVehicleSocAnalyzer.day_end": day_end,
+                    "RepresentativeVehicleSocAnalyzer.selection_metric": metric,
+                },
+                current_db=context.current_db,
             )
-            _save_fig(fig, output_dir, "representative_vehicle_soc")
+            soc_result = RepresentativeVehicleSocAnalyzer().execute(context=soc_ctx)
+            if soc_result is not None:
+                soc_df, event_spans, soc_day_start, soc_day_end = soc_result
+                fig = RepresentativeVehicleSocAnalyzer.visualize(
+                    soc_df, event_spans, soc_day_start, soc_day_end
+                )
+                _save_fig(fig, output_dir, basename)
 
         if enable_plots:
             plots_dir = output_dir / "visualizations"
@@ -502,6 +575,64 @@ def run_opportunity_variant(
     return context.current_db
 
 
+@flow(name="SWU Diesel Variant", flow_run_name="SWU - diesel")
+def run_diesel_variant(
+    common_db: Path,
+    *,
+    depot_charging_power_kw: float = DEFAULT_DEPOT_CHARGING_POWER_KW,
+    cache_subdir: str = "diesel",
+    output_subdir: Optional[str] = "diesel",
+) -> Path:
+    """Run the DIESEL reference variant — unlimited-range scheduling baseline.
+
+    Branches from ``common_db`` and runs ``RemoveConsumptionLuts`` *before*
+    ``VehicleScheduling`` so that consumption is effectively zero throughout
+    scheduling. With ~0 kWh/km the battery range is unbounded relative to any
+    real rotation, which gives the lower-bound fleet size against which the DEP
+    and TERM electric scenarios can be compared.
+
+    Pass ``output_subdir=None`` to suppress per-run output writes.
+    """
+    work_dir = CACHE_BASE / cache_subdir
+    work_dir.mkdir(parents=True, exist_ok=True)
+    output_dir: Optional[Path] = None
+    if output_subdir is not None:
+        output_dir = OUTPUT_BASE / output_subdir
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    params: Dict[str, Any] = {
+        "log_level": "INFO",
+        "RemoveConsumptionLuts.minimal_consumption": 0.001,
+        "VehicleScheduling.charge_type": ChargeType.DEPOT,
+        "VehicleScheduling.minimum_break_time": timedelta(minutes=0),
+        "VehicleScheduling.maximum_schedule_duration": timedelta(hours=24),
+        "DepotAssignment.depot_config": DEPOT_CONFIG,
+        "Simulation.repetition_period": timedelta(weeks=1),
+        "Simulation.smart_charging": SmartChargingStrategy.EVEN,
+        "Simulation.ignore_unstable_simulation": True,
+        "Simulation.calculate_timeseries": True,
+        "DepotGenerator.charging_power_kw": depot_charging_power_kw,
+    }
+
+    context = PipelineContext(work_dir=work_dir, params=params)
+    CopyCreator(input_files=[common_db]).execute(context=context)
+
+    run_steps(
+        steps=[
+            RemoveConsumptionLuts(),
+            VehicleScheduling(),
+            DepotAssignment(),
+            HandleOnlyETrips(),
+            DepotGenerator(),
+            Simulation(),
+        ],
+        context=context,
+    )
+
+    assert context.current_db is not None
+    return context.current_db
+
+
 # ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
@@ -509,29 +640,32 @@ def run_opportunity_variant(
 
 @flow(name="SWU GTFS Flow")
 def swu_flow(enable_plots: bool = False) -> None:
-    """Run DEPOT and OPPORTUNITY charging variants for SWU Verkehr GmbH (Ulm)."""
+    """Run DEPOT, OPPORTUNITY, and DIESEL-reference variants for SWU Verkehr GmbH (Ulm)."""
     logger.info(f"Processing agency: {AGENCY_LABEL}")
 
     common_db = run_common_phase()
     depot_db = run_depot_variant(common_db=common_db, enable_plots=enable_plots)
     opportunity_db = run_opportunity_variant(common_db=common_db, enable_plots=enable_plots)
+    diesel_db = run_diesel_variant(common_db=common_db)
 
-    # Cross-scenario comparison: fleet size and charging infrastructure. DEP is the baseline
-    # so the TERM row reports vehicles saved by enabling terminus charging.
+    # Cross-scenario comparison: fleet size and charging infrastructure. DIESEL is the baseline
+    # so the DEP and TERM rows report additional vehicles needed vs. an unlimited-range fleet.
     comparison_dir = OUTPUT_BASE / "comparison"
     scenario_config = ScenarioDisplayConfig(
-        order=["DEP", "TERM"],
+        order=["DEP", "TERM", "DIESEL"],
         display_names={
             "DEP": "Depot Charging Only",
             "TERM": "Terminus Charging",
+            "DIESEL": "Diesel Reference",
         },
-        baseline="DEP",
+        baseline="DIESEL",
     )
     comparison_analyzer = ScenarioComparisonAnalyzer()
     comparison_rows: List[pd.DataFrame] = []
     for scenario_name, db_path, scenario_work_dir in [
         ("DEP", depot_db, CACHE_BASE / "depot"),
         ("TERM", opportunity_db, CACHE_BASE / "opportunity"),
+        ("DIESEL", diesel_db, CACHE_BASE / "diesel"),
     ]:
         ctx = PipelineContext(
             work_dir=scenario_work_dir,
@@ -553,7 +687,7 @@ def swu_flow(enable_plots: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 
-DEFAULT_TRIP_PROFILE_ROUTE_ID = 6
+DEFAULT_TRIP_PROFILE_ROUTE_ID = 53
 
 
 class TripProfileAnalyzer(Analyzer):
@@ -562,7 +696,7 @@ class TripProfileAnalyzer(Analyzer):
     for a single DRIVING event from the simulation database.
     """
 
-    def __init__(self, code_version: str = "v1.0.5", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v1.0.14", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -575,7 +709,9 @@ class TripProfileAnalyzer(Analyzer):
             f"{cls.__name__}.route_id": (
                 "Route ID to filter by when event_id is not set. The first matching "
                 f"DRIVING Event is picked. Default: {DEFAULT_TRIP_PROFILE_ROUTE_ID} "
-                "(manually chosen for the SWU feed)."
+                "(line 11 → ZOB: ~22.8 km, ~138 m altitude range, 30 stops "
+                "— picked for a long route with substantial altitude variation, "
+                "in the SWU feed after tram lines 1 and 2 are removed)."
             ),
         }
 
@@ -743,32 +879,41 @@ class TripProfileAnalyzer(Analyzer):
         axes[0].set_ylabel("Altitude [m]")
 
         alt_vals = df["altitude_m"].dropna()
+        label_pivot_m = 0.0
         if len(alt_vals) > 0:
             alt_min, alt_max = float(alt_vals.min()), float(alt_vals.max())
             alt_range = max(alt_max - alt_min, 10.0)
-            # Reserve equal padding above and below for the alternating labels
-            axes[0].set_ylim(alt_min - 0.35 * alt_range, alt_max + 0.35 * alt_range)
+            # Pivot = midpoint of the route's altitude range. Stops below it get
+            # labels above the curve, stops above it get labels below — both
+            # groups converge into the (mostly empty) middle horizontal band, so
+            # only a thin margin beyond the data range is needed.
+            label_pivot_m = (alt_min + alt_max) / 2.0
+            axes[0].set_ylim(alt_min - 0.05 * alt_range, alt_max + 0.05 * alt_range)
 
-        for idx, (_, row) in enumerate(df.iterrows()):
+        for _, row in df.iterrows():
             if np.isnan(row["altitude_m"]):
                 continue
             label = row["stop_name"].replace(" ", "\n")
-            above = idx < 9
+            above = row["altitude_m"] < label_pivot_m
             axes[0].annotate(
                 label,
                 xy=(row["distance_km"], row["altitude_m"]),
                 textcoords="offset points",
                 xytext=(2, 5) if above else (2, -5),
-                fontsize=4.5,
-                rotation=60 if above else -60,
+                fontsize=3.5,
+                rotation=80 if above else -80,
                 ha="left",
                 va="bottom" if above else "top",
                 multialignment="left",
             )
 
         # --- Panel 1: Mean speed per segment ---
-        seg_x = df["distance_km"].iloc[1:].values
+        # A row at index i represents the stop the vehicle *arrived* at; the
+        # segment it terminates spans from the previous stop's distance to its
+        # own. Centre each bar on the segment midpoint, not its end, so the
+        # bar visually sits over the stretch of road it describes.
         seg_w = np.asarray(df["delta_km"].iloc[1:].values, dtype=float)
+        seg_x = np.asarray(df["distance_km"].iloc[1:].values, dtype=float) - seg_w / 2.0
         axes[1].bar(
             seg_x,
             df["speed_kmh"].iloc[1:].values,
