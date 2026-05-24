@@ -1134,9 +1134,10 @@ def _select_representative_vehicle(
     day_end: dt,
     required_event_type: EventType,
     max_soc_threshold: "float | None" = None,
+    selection_metric: str = "total_abs_delta",
 ) -> int:
     """
-    Select a representative vehicle by event type, SoC filtering, and highest delta_soc.
+    Select a representative vehicle by event type, SoC filtering, and a ranking metric.
 
     Args:
         session: SQLAlchemy session
@@ -1144,6 +1145,10 @@ def _select_representative_vehicle(
         day_end: Window end (timezone-aware)
         required_event_type: EventType that candidate vehicles must have
         max_soc_threshold: If set, exclude candidates whose soc_end reaches this value or above
+        selection_metric: ``"total_abs_delta"`` (default) picks the vehicle with the highest
+            sum of ``|soc_end − soc_start|`` across events in the window — favors high
+            energy turnover. ``"min_soc"`` picks the vehicle whose ``soc_end`` reaches the
+            lowest value in the window — favors the deepest drawdown.
 
     Returns:
         vehicle_id of the selected vehicle
@@ -1186,9 +1191,14 @@ def _select_representative_vehicle(
             f"{max_soc_threshold} found in the given window."
         )
 
-    # Pick the vehicle with the highest total |delta_soc|
+    if selection_metric not in ("total_abs_delta", "min_soc"):
+        raise ValueError(
+            f"Unknown selection_metric={selection_metric!r}; "
+            f"expected 'total_abs_delta' or 'min_soc'."
+        )
+
     best_vehicle_id = None
-    best_delta_soc = -1.0
+    best_score = -1.0 if selection_metric == "total_abs_delta" else 2.0
     for vid in candidate_vehicle_ids:
         events = (
             session.query(Event)
@@ -1199,10 +1209,16 @@ def _select_representative_vehicle(
             )
             .all()
         )
-        total_delta = sum(abs(e.soc_end - e.soc_start) for e in events)
-        if total_delta > best_delta_soc:
-            best_delta_soc = total_delta
-            best_vehicle_id = vid
+        if selection_metric == "total_abs_delta":
+            score = sum(abs(e.soc_end - e.soc_start) for e in events)
+            if score > best_score:
+                best_score = score
+                best_vehicle_id = vid
+        else:  # min_soc
+            score = min(e.soc_end for e in events)
+            if score < best_score:
+                best_score = score
+                best_vehicle_id = vid
 
     assert best_vehicle_id is not None
     return best_vehicle_id
@@ -1215,6 +1231,7 @@ def _build_vehicle_soc(
     tz: Any,
     required_event_type: EventType,
     max_soc_threshold: "float | None" = None,
+    selection_metric: str = "total_abs_delta",
 ) -> Tuple[pd.DataFrame, List[Tuple[str, dt, dt]]]:
     """
     Select a representative vehicle and build its SoC timeseries + event spans.
@@ -1229,6 +1246,7 @@ def _build_vehicle_soc(
         tz: pytz timezone for display
         required_event_type: EventType that candidate vehicles must have
         max_soc_threshold: If set, exclude candidates whose soc_end reaches this value or above
+        selection_metric: See :func:`_select_representative_vehicle`.
 
     Returns:
         (soc_df, event_spans) — DataFrame with 'time'/'soc' columns, list of shading spans
@@ -1238,7 +1256,7 @@ def _build_vehicle_soc(
     from eflips.eval.output.prepare import vehicle_soc as eval_vehicle_soc
 
     vehicle_id = _select_representative_vehicle(
-        session, day_start, day_end, required_event_type, max_soc_threshold
+        session, day_start, day_end, required_event_type, max_soc_threshold, selection_metric
     )
 
     # Reuse eflips.eval for SoC timeseries construction
@@ -1299,6 +1317,12 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
             f"{cls.__name__}.max_soc_threshold": (
                 "Depot mode only: exclude vehicles whose soc_end reaches this value. Default: 0.99."
             ),
+            f"{cls.__name__}.selection_metric": (
+                '"total_abs_delta" (default) — vehicle with the highest summed '
+                "|soc_end-soc_start| across events in the window (high energy turnover). "
+                '"min_soc" — vehicle whose soc_end reaches the lowest value in the window '
+                "(deepest drawdown)."
+            ),
         }
 
     def analyze(
@@ -1315,6 +1339,9 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
         day_start = params.get(f"{self.__class__.__name__}.day_start", dt(2025, 6, 18, 3, 0))
         day_end = params.get(f"{self.__class__.__name__}.day_end", dt(2025, 6, 19, 3, 0))
         mode = params.get(f"{self.__class__.__name__}.mode", "terminus")
+        selection_metric = params.get(
+            f"{self.__class__.__name__}.selection_metric", "total_abs_delta"
+        )
 
         tz = pytz.timezone("Europe/Berlin")
         if day_start.tzinfo is None:
@@ -1332,7 +1359,13 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
             max_soc_threshold = None
 
         soc_df, event_spans = _build_vehicle_soc(
-            session, day_start, day_end, tz, required_event_type, max_soc_threshold
+            session,
+            day_start,
+            day_end,
+            tz,
+            required_event_type,
+            max_soc_threshold,
+            selection_metric,
         )
         return soc_df, event_spans, day_start, day_end
 
