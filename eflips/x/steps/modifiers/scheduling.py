@@ -60,7 +60,22 @@ class IntegratedScheduling(Modifier):
     a feasible schedule is found. It adds longer breaks to trips that need them until the schedule is feasible.
     """
 
-    def __init__(self, code_version: str = "v2.0.0", **kwargs: Any):
+    #: CSV columns written by the break-extension log (when IntegratedScheduling.log_file is set).
+    _LOG_FIELDNAMES: List[str] = [
+        "iteration",
+        "rotation_id",
+        "trip_id",
+        "arrival_station_id",
+        "arrival_station_name",
+        "trip_arrival_time",
+        "kind",
+        "score",
+        "critical_point_deficit",
+        "critical_point_trip_index",
+        "dynamic_break_duration_minutes",
+    ]
+
+    def __init__(self, code_version: str = "v2.1.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -76,6 +91,7 @@ class IntegratedScheduling(Modifier):
             - IntegratedScheduling.max_iterations: Maximum number of iterations to attempt
             - IntegratedScheduling.break_safety_margin_soc: SoC threshold for near-critical detection
             - IntegratedScheduling.candidates_per_critical_point: Base number of break candidates per critical point
+            - IntegratedScheduling.log_file: Optional CSV path for per-decision break-extension log
         """
         return {
             f"{cls.__name__}.max_iterations": """
@@ -102,6 +118,18 @@ class IntegratedScheduling(Modifier):
             Default: 3
             Type: int
             Example: 5
+            """.strip(),
+            f"{cls.__name__}.log_file": """
+            Optional path to a CSV file. When set, one row is written per
+            break-extension decision (iteration, rotation, trip, arrival station,
+            kind, score/deficit, dynamic duration). The file is truncated at the
+            start of execution; an empty file means the schedule converged without
+            extending any breaks. Note: changing this path invalidates the
+            pipeline cache for this step and everything downstream.
+
+            Default: None (no log written)
+            Type: pathlib.Path or str
+            Example: Path("/tmp/swu_breaks.csv")
             """.strip(),
         }
 
@@ -153,6 +181,14 @@ class IntegratedScheduling(Modifier):
                 "If you are in DEPOT mode, just ise VehicleScheduling alone."
             )
 
+        # Truncate the per-decision log up front so a missing file (after a
+        # converged run) is distinguishable from an empty file (run executed,
+        # no break extensions needed). A cache hit skips this whole method and
+        # therefore leaves any existing log alone.
+        log_file = self._resolve_log_file(params)
+        if log_file is not None:
+            self._initialize_log_file(log_file)
+
         iteration = 0
         ids_of_trips_to_add_longer_breaks: Set[int] = set()
         while True:
@@ -203,10 +239,11 @@ class IntegratedScheduling(Modifier):
                     )
                     self.logger.debug(f"Full infeasible rotation IDs: {infeasible_ids}")
                     # Identify which trips should have longer breaks and compute dynamic duration
-                    new_trips_to_add_longer_breaks = self.find_trips_to_add_longer_breaks(
+                    new_decisions = self.find_trips_to_add_longer_breaks(
                         insufficient_charging_analyzer_result, session, params
                     )
-                    ids_of_trips_to_add_longer_breaks.update(new_trips_to_add_longer_breaks)
+                    new_trip_ids = {d["trip_id"] for d in new_decisions}
+                    ids_of_trips_to_add_longer_breaks.update(new_trip_ids)
 
                     # Compute dynamic break duration from the worst SoC deficit
                     dynamic_duration = self._compute_dynamic_break_duration(
@@ -216,9 +253,12 @@ class IntegratedScheduling(Modifier):
                         dynamic_duration
                     )
 
+                    if log_file is not None:
+                        self._append_log_rows(log_file, iteration, new_decisions, dynamic_duration)
+
                     self.logger.info(
                         f"Retrying scheduling with longer breaks on "
-                        f"{len(new_trips_to_add_longer_breaks)} new trips "
+                        f"{len(new_trip_ids)} new trips "
                         f"(duration={dynamic_duration}). "
                         f"Cumulative trips with extended breaks: {len(ids_of_trips_to_add_longer_breaks)}."
                     )
@@ -231,7 +271,7 @@ class IntegratedScheduling(Modifier):
         analyzer_result: Dict[str, Any],
         session: sqlalchemy.orm.session.Session,
         params: Dict[str, Any],
-    ) -> Set[int]:
+    ) -> List[Dict[str, Any]]:
         """
         Identify trips that should have longer breaks added, using SoC trajectory analysis.
 
@@ -255,8 +295,12 @@ class IntegratedScheduling(Modifier):
 
         Returns:
         --------
-        Set[int]
-            Set of trip IDs that should have longer breaks added
+        List[Dict[str, Any]]
+            One dict per break-extension decision. Keys:
+              rotation_id, trip_id, arrival_station_id, arrival_station_name,
+              trip_arrival_time, kind ("scored" | "fallback"),
+              score, critical_point_deficit, critical_point_trip_index
+              (score/deficit/trip_index are None for fallback decisions).
         """
         rotation_ids: List[int] = analyzer_result["rotation_ids"]
         soc_data: Dict[int, Any] = analyzer_result["soc_data"]
@@ -267,7 +311,7 @@ class IntegratedScheduling(Modifier):
         # Precompute global dwell time per station (used by fallback heuristic)
         global_dwell = self._compute_global_dwell_time(session)
 
-        trip_ids_to_add_longer_breaks: Set[int] = set()
+        decisions: List[Dict[str, Any]] = []
 
         for rotation_id in rotation_ids:
             rotation = (
@@ -297,6 +341,7 @@ class IntegratedScheduling(Modifier):
 
             # Phase 2 & 3: Score candidates and select trips
             max_deficit = max((cp["deficit"] for cp in critical_points), default=0.1)
+            trips_by_id = {trip.id: trip for trip in trips}
             for cp in critical_points:
                 scored = self._score_break_candidates(cp, trips, soc_df, max_deficit)
                 # Select top K candidates, scaled by deficit severity
@@ -307,7 +352,17 @@ class IntegratedScheduling(Modifier):
                     k = base_k + 1
                 selected = sorted(scored, key=lambda c: c["score"], reverse=True)[:k]
                 for candidate in selected:
-                    trip_ids_to_add_longer_breaks.add(candidate["trip_id"])
+                    candidate_trip = trips_by_id[candidate["trip_id"]]
+                    decisions.append(
+                        self._build_decision_record(
+                            rotation_id=rotation_id,
+                            trip=candidate_trip,
+                            kind="scored",
+                            score=candidate["score"],
+                            critical_point_deficit=cp["deficit"],
+                            critical_point_trip_index=cp["trip_index"],
+                        )
+                    )
                     self.logger.info(
                         f"Adding longer break to trip {candidate['trip_id']} "
                         f"(score={candidate['score']:.3f}) in rotation {rotation_id} "
@@ -315,11 +370,107 @@ class IntegratedScheduling(Modifier):
                     )
 
             # Safety net: also add the global dwell-time fallback station for this rotation
-            fallback_trip_id = self._global_dwell_time_fallback(rotation, trips, global_dwell)
-            if fallback_trip_id is not None:
-                trip_ids_to_add_longer_breaks.add(fallback_trip_id)
+            fallback_trip = self._global_dwell_time_fallback(rotation, trips, global_dwell)
+            if fallback_trip is not None:
+                decisions.append(
+                    self._build_decision_record(
+                        rotation_id=rotation_id,
+                        trip=fallback_trip,
+                        kind="fallback",
+                        score=None,
+                        critical_point_deficit=None,
+                        critical_point_trip_index=None,
+                    )
+                )
 
-        return trip_ids_to_add_longer_breaks
+        return decisions
+
+    @staticmethod
+    def _build_decision_record(
+        *,
+        rotation_id: int,
+        trip: Trip,
+        kind: str,
+        score: Optional[float],
+        critical_point_deficit: Optional[float],
+        critical_point_trip_index: Optional[int],
+    ) -> Dict[str, Any]:
+        arrival_station = trip.route.arrival_station
+        return {
+            "rotation_id": rotation_id,
+            "trip_id": trip.id,
+            "arrival_station_id": trip.route.arrival_station_id,
+            "arrival_station_name": arrival_station.name if arrival_station else None,
+            "trip_arrival_time": trip.arrival_time,
+            "kind": kind,
+            "score": score,
+            "critical_point_deficit": critical_point_deficit,
+            "critical_point_trip_index": critical_point_trip_index,
+        }
+
+    def _resolve_log_file(self, params: Dict[str, Any]) -> Optional[Path]:
+        raw = params.get(f"{self.__class__.__name__}.log_file")
+        if raw is None:
+            return None
+        if isinstance(raw, Path):
+            return raw
+        if isinstance(raw, str):
+            return Path(raw)
+        raise TypeError(
+            f"IntegratedScheduling.log_file must be a pathlib.Path or str, "
+            f"got {type(raw).__name__}"
+        )
+
+    def _initialize_log_file(self, log_file: Path) -> None:
+        import csv
+
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("w", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=self._LOG_FIELDNAMES)
+            writer.writeheader()
+        self.logger.info(f"IntegratedScheduling break-extension log: {log_file}")
+
+    def _append_log_rows(
+        self,
+        log_file: Path,
+        iteration: int,
+        decisions: List[Dict[str, Any]],
+        dynamic_duration: timedelta,
+    ) -> None:
+        import csv
+
+        duration_minutes = dynamic_duration.total_seconds() / 60.0
+        with log_file.open("a", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=self._LOG_FIELDNAMES)
+            for decision in decisions:
+                arrival_time = decision["trip_arrival_time"]
+                writer.writerow(
+                    {
+                        "iteration": iteration,
+                        "rotation_id": decision["rotation_id"],
+                        "trip_id": decision["trip_id"],
+                        "arrival_station_id": decision["arrival_station_id"],
+                        "arrival_station_name": decision["arrival_station_name"],
+                        "trip_arrival_time": (
+                            arrival_time.isoformat() if arrival_time is not None else ""
+                        ),
+                        "kind": decision["kind"],
+                        "score": (
+                            f"{decision['score']:.4f}" if decision["score"] is not None else ""
+                        ),
+                        "critical_point_deficit": (
+                            f"{decision['critical_point_deficit']:.4f}"
+                            if decision["critical_point_deficit"] is not None
+                            else ""
+                        ),
+                        "critical_point_trip_index": (
+                            decision["critical_point_trip_index"]
+                            if decision["critical_point_trip_index"] is not None
+                            else ""
+                        ),
+                        "dynamic_break_duration_minutes": f"{duration_minutes:.2f}",
+                    }
+                )
 
     def _find_soc_critical_points(
         self,
@@ -525,7 +676,7 @@ class IntegratedScheduling(Modifier):
         rotation: Rotation,
         trips: List[Trip],
         global_dwell: List[Tuple[int, timedelta]],
-    ) -> Optional[int]:
+    ) -> Optional[Trip]:
         """
         Fallback heuristic: from precomputed global dwell times, find the highest-dwell
         station that this rotation visits and return the first trip arriving there.
@@ -550,7 +701,7 @@ class IntegratedScheduling(Modifier):
                             f"Fallback: adding break after trip {trip.id} "
                             f"at station {station_id} (global dwell-time leader)"
                         )
-                        return trip.id
+                        return trip
         return None
 
     def _compute_dynamic_break_duration(
