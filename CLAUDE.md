@@ -367,3 +367,7 @@ Do not use tight_layout, instead use layout="constrained" in plt.subplots().
 The visualize() method is optional for things that create tables. Here, we can just assume the user will view (or export) the tables themselves.
 
 In the bare visualize() method, we try to create undecorated, standard matplotlib (or plotly…) figures. We try to do it in a way that is coductive to a subclass pre- and/or postprocessing our visualize method in order to apply a custom visual style. 
+
+## Accessing databases
+
+Database files should be accessed form the command line using `spatialite` instead of `sqlite3`.
