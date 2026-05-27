@@ -1439,7 +1439,21 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
             ax.set_xlim(date2num(xlim_start), date2num(xlim_end))  # type: ignore[no-untyped-call]
 
         if "Terminus Charging" in drawn_labels:
-            ax.legend(loc="lower right", ncols=2)
+            # Pick the right-hand corner (upper vs lower) the SoC trace doesn't run
+            # through. Samples the right ~half of the *displayed* window — for
+            # "total_abs_delta" the trace sits high (lower-right is free); for
+            # "min_soc" it sits low (upper-right is free). The dataframe can extend
+            # beyond xlim, so clip to the visible window first.
+            if xlim_start is not None and xlim_end is not None:
+                window_mid = xlim_start + (xlim_end - xlim_start) / 2
+                in_right = (sorted_data["time"] >= window_mid) & (sorted_data["time"] <= xlim_end)
+                right_socs = sorted_data.loc[in_right, "soc"]
+            else:
+                right_socs = sorted_data["soc"].iloc[len(sorted_data) // 2 :]
+            legend_loc = (
+                "upper right" if len(right_socs) > 0 and right_socs.mean() < 0.5 else "lower right"
+            )
+            ax.legend(loc=legend_loc, ncols=2)
         else:
             ax.legend(
                 bbox_to_anchor=(0, 1.02, 1, 0.2),
