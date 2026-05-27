@@ -591,6 +591,18 @@ def _charge_types_for_factor(factor: str) -> List[str]:
     return ["DEP", "TERM"] if _factor_applies_to_dep(factor) else ["TERM"]
 
 
+# Metrics that are only meaningful under terminus charging — DEP is structurally
+# zero and would render as a misleading flat panel.
+_TERM_ONLY_METRICS = {"electrified_termini"}
+
+
+def _charge_types_for_plot(factor: str, metric: str) -> List[str]:
+    types = _charge_types_for_factor(factor)
+    if metric in _TERM_ONLY_METRICS:
+        types = [c for c in types if c == "TERM"]
+    return types
+
+
 def _padded_limits(values: List[float], pad_frac: float = 0.05) -> Tuple[float, float]:
     """Min/max of ``values`` widened by a fraction of the range (or a small floor)."""
     if not values:
@@ -669,10 +681,13 @@ def plot_per_factor(table: pd.DataFrame, output_dir: Path) -> None:
             if sub.empty:
                 continue
 
-            charge_types_to_plot = _charge_types_for_factor(factor)
+            charge_types_to_plot = _charge_types_for_plot(factor, output_col)
+            if not charge_types_to_plot:
+                continue
             n_panels = len(charge_types_to_plot)
-            xlim = _padded_limits(sub["factor_value"].tolist())
-            ylim = _padded_limits(sub[output_col].tolist())
+            sub_for_lims = sub[sub["charge_type"].isin(charge_types_to_plot)]
+            xlim = _padded_limits(sub_for_lims["factor_value"].tolist())
+            ylim = _padded_limits(sub_for_lims[output_col].tolist())
 
             fig, axes_obj = plt.subplots(
                 1,
@@ -817,12 +832,14 @@ def plot_vs_energy_consumption(table: pd.DataFrame, output_dir: Path) -> None:
     for output_col in METRIC_COLUMNS:
         if output_col == energy_col:
             continue
-        charge_types_to_plot = [c for c in ["DEP", "TERM"] if c in ok["charge_type"].unique()]
+        allowed = _charge_types_for_plot("temperature_celsius", output_col)
+        charge_types_to_plot = [c for c in allowed if c in ok["charge_type"].unique()]
         if not charge_types_to_plot:
             continue
 
-        xlim = _padded_limits(ok[energy_col].tolist())
-        ylim = _padded_limits(ok[output_col].tolist())
+        ok_for_lims = ok[ok["charge_type"].isin(charge_types_to_plot)]
+        xlim = _padded_limits(ok_for_lims[energy_col].tolist())
+        ylim = _padded_limits(ok_for_lims[output_col].tolist())
 
         n_panels = len(charge_types_to_plot)
         fig, axes_obj = plt.subplots(
