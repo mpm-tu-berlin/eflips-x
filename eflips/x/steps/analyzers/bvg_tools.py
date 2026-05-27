@@ -9,12 +9,12 @@ from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 import cartopy.crs as ccrs  # type: ignore[import-untyped]
-from cartopy.io.img_tiles import GoogleTiles  # type: ignore[import-untyped]
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns  # type: ignore[import-untyped]
+from cartopy.io.img_tiles import GoogleTiles  # type: ignore[import-untyped]
 from eflips.model import (
     Area,
     Depot,

@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pandas as pd
 
-
 CONSUMPTION_LUT_DIR = Path(__file__).resolve().parents[4] / "data" / "input" / "consumption_luts"
 
 

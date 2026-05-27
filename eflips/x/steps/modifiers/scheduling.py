@@ -7,7 +7,6 @@ such as creating optimal rotation plans for different vehicle types.
 
 import logging
 import os
-import typing
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
