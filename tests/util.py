@@ -23,7 +23,7 @@ from eflips.model import (
     Plan,
 )
 from eflips.x.framework import Generator
-from geoalchemy2.shape import from_shape
+from geoalchemy2.shape import from_shape, to_shape
 from shapely import Point
 from shapely.geometry import LineString
 from sqlalchemy import func
@@ -89,7 +89,7 @@ def route(start_lat: float, start_lon: float, end_lat: float, end_lon: float) ->
         coords = cached.get("geometry")
         if coords:
             # Convert list of [lon, lat] to LineString
-            linestring = LineString([(lon, lat) for lon, lat in coords])
+            linestring = LineString([(lon, lat, 0) for lon, lat in coords])
             geom = from_shape(linestring, srid=4326)
             return distance, geom
         return distance, None
@@ -152,7 +152,7 @@ def route(start_lat: float, start_lon: float, end_lat: float, end_lon: float) ->
 
         # Convert to LineString geometry
         if coords:
-            linestring = LineString([(lon, lat) for lon, lat in coords])
+            linestring = LineString([(lon, lat, 0) for lon, lat in coords])
             geom = from_shape(linestring, srid=4326)
             return distance, geom
         return distance, None
@@ -286,13 +286,15 @@ def _create_station_at_projection(
     Returns:
         Created Station object
     """
-    # Project location from base
-    geom_result = db_session.query(func.ST_Project(base_geom, distance, angle)).scalar()
+    # ST_Project does not handle POINTZ inputs, so build a fresh 2D point in Python.
+    base_pt = to_shape(base_geom)
+    base_geom_2d = from_shape(Point(base_pt.x, base_pt.y), srid=4326)
+    geom_result = db_session.query(func.ST_Project(base_geom_2d, distance, angle)).scalar()
 
     # Extract coordinates and snap to road
     point = db_session.query(func.ST_Y(geom_result), func.ST_X(geom_result)).one()
     street_name, (lat, lon) = snap_to_road(point[0], point[1])
-    geom = from_shape(Point(lon, lat), srid=4326)
+    geom = from_shape(Point(lon, lat, 0), srid=4326)
 
     # Append street name to station name if available
     full_name = name if street_name is None else f"{name} ({street_name})"
@@ -354,26 +356,30 @@ def _create_route_with_stations(
     Returns:
         Created Route object
     """
-    # Extract station coordinates
-    dep_point = db_session.query(
-        func.ST_Y(departure_station.geom), func.ST_X(departure_station.geom)
-    ).one()
-    arr_point = db_session.query(
-        func.ST_Y(arrival_station.geom), func.ST_X(arrival_station.geom)
-    ).one()
+    # Extract station coordinates in Python (ST_X/ST_Y on POINTZ via SQLAlchemy may
+    # not return values reliably for stored 3D geometries).
+    dep_pt = to_shape(departure_station.geom)
+    arr_pt = to_shape(arrival_station.geom)
+    dep_point = (dep_pt.y, dep_pt.x)
+    arr_point = (arr_pt.y, arr_pt.x)
 
-    # Try to get routed geometry
-    routed_distance, route_geom = route(dep_point[0], dep_point[1], arr_point[0], arr_point[1])
+    # Try to get routed geometry. The ORS-reported distance is discarded — see the
+    # ST_Length branch below for why we derive distance from the polyline instead.
+    _routed_distance, route_geom = route(dep_point[0], dep_point[1], arr_point[0], arr_point[1])
 
     # Calculate distance based on geometry
     if route_geom is not None:
-        # Use ST_Length on the route geometry (returns meters for geography)
-        distance = db_session.query(func.ST_Length(route_geom, True)).scalar()
+        # The Route table has a CHECK constraint that distance must match ST_Length(geom)
+        # within 50m. ORS-reported road distance can drift further from ST_Length over the
+        # polyline (different sampling/projection), so derive distance from the geometry.
+        line_2d = LineString([(lon, lat) for lon, lat, *_ in to_shape(route_geom).coords])
+        line_2d_geom = from_shape(line_2d, srid=4326)
+        distance = db_session.query(func.ST_Length(line_2d_geom, True)).scalar()
     else:
-        # Fall back to straight-line distance if routing failed
-        distance = db_session.query(
-            func.ST_Distance(departure_station.geom, arrival_station.geom, True)
-        ).scalar()
+        # Fall back to straight-line distance. Use 2D to avoid POINTZ issues with ST_Distance.
+        dep_geom_2d = from_shape(Point(dep_pt.x, dep_pt.y), srid=4326)
+        arr_geom_2d = from_shape(Point(arr_pt.x, arr_pt.y), srid=4326)
+        distance = db_session.query(func.ST_Distance(dep_geom_2d, arr_geom_2d, True)).scalar()
         route_geom = None
 
     # Create route
@@ -1070,7 +1076,7 @@ def generate_network_map(db_session: Session, scenario_id: int, output_file: str
             route_shape = to_shape(route.geom)
             if hasattr(route_shape, "coords"):
                 # LineString geometry
-                locations = [[lat, lon] for lon, lat in route_shape.coords]
+                locations = [[c[1], c[0]] for c in route_shape.coords]
                 folium.PolyLine(
                     locations=locations,
                     popup=popup_text,
@@ -1280,7 +1286,7 @@ if __name__ == "__main__":
             route_shape = to_shape(route.geom)
             if hasattr(route_shape, "coords"):
                 # LineString geometry
-                locations = [[lat, lon] for lon, lat in route_shape.coords]
+                locations = [[c[1], c[0]] for c in route_shape.coords]
                 folium.PolyLine(
                     locations=locations,
                     popup=popup_text,

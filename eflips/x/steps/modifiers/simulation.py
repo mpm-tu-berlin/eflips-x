@@ -20,6 +20,7 @@ from eflips.depot.api import (  # type: ignore[import-untyped]
     DepotConfigurationWish,
     simulate_scenario,
     SmartChargingStrategy,
+    shrink_to_peak_usage,
 )
 from eflips.model import (
     Scenario,
@@ -304,12 +305,20 @@ Default: 6
             self.logger.info(
                 f"Generating depots using {len(depot_wishes)} depot configuration wishes."
             )
-            generate_optimal_depot_layout(
-                depot_config_wishes=depot_wishes,
-                scenario=scenario,
-                database_url=None,  # Use the current session
-                delete_existing_depot=True,
-            )
+            # eflips-depot's create_depots_from_wish issues queries while
+            # holding partially-constructed Process/Area objects in the
+            # session. The implicit autoflush before those queries triggers
+            # an identity-map collision (hardcoded PKs vs. autoincrement),
+            # which crashes non-deterministically on Python 3.12 inside
+            # SQLAlchemy's _register_persistent. SQLAlchemy's own warning at
+            # the call site recommends no_autoflush here.
+            with session.no_autoflush:
+                generate_optimal_depot_layout(
+                    depot_config_wishes=depot_wishes,
+                    scenario=scenario,
+                    database_url=None,  # Use the current session
+                    delete_existing_depot=True,
+                )
 
         else:
             # depot_wishes is not set, use automatic generation
@@ -343,7 +352,7 @@ Default: 6
 
 class Simulation(Modifier):
 
-    def __init__(self, code_version: str = "v1.0.1", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.0.2", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -362,19 +371,29 @@ will be applied (SmartChargingStrategy.NONE).
 Default: SmartChargingStrategy.NONE
             """.strip(),
             f"{cls.__name__}.calculate_timeseries": """
-If True, the simulation will calculate detailed timeseries for all events, which can be used for in-depth analysis and 
+If True, the simulation will calculate detailed timeseries for all events, which can be used for in-depth analysis and
 visualization. This may significantly increase runtime and database size.
 Default: False
             """.strip(),
             f"{cls.__name__}.ignore_unstable_simulation": """
 If True, the simulation will not raise an exception if it becomes unstable.
-            
+
 Default: False
             """.strip(),
             f"{cls.__name__}.ignore_delayed_trips": """
 If True, the simulation will ignore delayed trips instead of raising an exception.
 
 Default: False
+            """.strip(),
+            f"{cls.__name__}.shrink_to_peak_usage": """
+If True, after the simulation has written events to the database the layout is downsized to the smallest
+size that still fits the observed usage: each depot Area's bay count is reduced to its peak simultaneous
+occupancy, and each electrified terminus Station's charger count is reduced to its peak simultaneous
+charging-vehicle count. Idle capacity above the peak is removed so the resulting scenario reflects what
+the simulation actually used. Pass False to keep the originally sized layout (useful when comparing
+fleet sizes or designing for headroom). See eflips.depot.api.simulate_scenario for details.
+
+Default: True
             """.strip(),
             "terminus_deadtime_s": """
             Global parameter: the total time overhead in seconds (attach + detach) for
@@ -407,6 +426,9 @@ Default: False
             f"{self.__class__.__name__}.ignore_unstable_simulation", False
         )
         ignore_delayed_trips = params.get(f"{self.__class__.__name__}.ignore_delayed_trips", False)
+        do_shrink_to_peak_usage = params.get(
+            f"{self.__class__.__name__}.shrink_to_peak_usage", True
+        )
         terminus_deadtime_s: float = params.get("terminus_deadtime_s", 60.0)
         terminus_deadtime = timedelta(seconds=terminus_deadtime_s)
 
@@ -429,6 +451,7 @@ Default: False
             smart_charging_strategy=smart_charging,
             ignore_unstable_simulation=ignore_unstable_simulation,
             ignore_delayed_trips=ignore_delayed_trips,
+            shrink_to_peak_usage=False,  # Not needed - we do it manually after subsequent consumption sim
         )
 
         ##### Step 3: Consumption simulation
@@ -440,6 +463,10 @@ Default: False
             terminus_deadtime=terminus_deadtime,
             calculate_timeseries=calculate_timeseries,
         )
+
+        ##### Step 4: Shrink to peak usage
+        if do_shrink_to_peak_usage:
+            shrink_to_peak_usage(scenario)
 
 
 class SmartCharging(Modifier):

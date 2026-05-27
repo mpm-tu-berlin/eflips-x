@@ -32,7 +32,8 @@ from eflips.x.framework import PipelineContext, PipelineStep
 from eflips.x.steps.analyzers.json_export import ScenarioJsonExporter
 from eflips.x.steps.generators import GTFSIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import MergeStations
-from eflips.x.steps.modifiers.general_utilities import RemoveUnusedData
+from eflips.x.steps.modifiers.consumption_luts import ConsumptionLut
+from eflips.x.steps.modifiers.general_utilities import AddTemperatures, RemoveUnusedData
 from eflips.x.steps.modifiers.gtfs_utilities import ConfigureVehicleTypes
 from eflips.x.steps.modifiers.scheduling import (
     VehicleScheduling,
@@ -76,8 +77,14 @@ class AgencyConfig:
     agency_names: List[str]
     depots: List[DepotConfig]
     battery_capacity: float = 360.0
-    consumption: float = 1.5
     charging_curve: List[List[float]] = field(default_factory=lambda: [[0.0, 450.0], [1.0, 450.0]])
+    # 12m solo bus empty mass (matching the EN value used in eflips/x/flows/bvg.py).
+    empty_mass_kg: float = 9950.0
+
+    @property
+    def allowed_mass(self) -> float:
+        """empty_mass + 70 passengers * 68 kg, per the bvg_tools.py convention."""
+        return self.empty_mass_kg + 70 * 68
 
     @property
     def agency_name(self) -> str:
@@ -187,7 +194,7 @@ def build_depot_config(depots: List[DepotConfig]) -> List[Dict[str, Any]]:
         {
             "depot_station": depot.coords,
             "name": depot.name,
-            "vehicle_type": ["default_bus"],
+            "vehicle_type": ["DEFAULT"],  # Matches ConfigureVehicleTypes.name_short
             "capacity": depot.capacity,
         }
         for depot in depots
@@ -220,9 +227,14 @@ def run_common_phase(
         "GTFSIngester.bus_only": True,
         "GTFSIngester.duration": "WEEK",
         "GTFSIngester.agency_ids": agency.agency_ids,
+        "ConfigureVehicleTypes.vehicle_type_names": ["default"],
         "ConfigureVehicleTypes.battery_capacity": agency.battery_capacity,
-        "ConfigureVehicleTypes.consumption": agency.consumption,
+        "ConfigureVehicleTypes.consumption": ConsumptionLut.NOR_BUS_12M,
         "ConfigureVehicleTypes.charging_curve": agency.charging_curve,
+        "ConfigureVehicleTypes.empty_mass": agency.empty_mass_kg,
+        "ConfigureVehicleTypes.allowed_mass": agency.allowed_mass,
+        "ConfigureVehicleTypes.name_short": "DEFAULT",
+        "AddTemperatures.temperature_celsius": 10.0,
     }
 
     steps: List[PipelineStep] = [
@@ -230,6 +242,7 @@ def run_common_phase(
         MergeStations(),
         RemoveUnusedData(),
         ConfigureVehicleTypes(),
+        AddTemperatures(),
     ]
 
     context = PipelineContext(work_dir=work_dir, params=params)

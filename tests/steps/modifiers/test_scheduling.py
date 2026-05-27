@@ -1604,10 +1604,11 @@ class TestIntegratedScheduling:
         docs = modifier.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 3
+        assert len(docs) == 4
         assert "IntegratedScheduling.max_iterations" in docs
         assert "IntegratedScheduling.break_safety_margin_soc" in docs
         assert "IntegratedScheduling.candidates_per_critical_point" in docs
+        assert "IntegratedScheduling.log_file" in docs
         assert "Maximum number of iterations" in docs["IntegratedScheduling.max_iterations"]
 
 
