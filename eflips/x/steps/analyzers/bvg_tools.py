@@ -328,11 +328,10 @@ Default: "Europe/Berlin"
 
         Returns a DataFrame with a datetime index (minute resolution) and one column
         per vehicle type, containing the count of vehicles in service at that minute.
+        Index is tz-aware in the configured timezone (default Europe/Berlin).
         """
-        import pytz
-
         timezone_str = params.get(f"{self.__class__.__name__}.timezone", "Europe/Berlin")
-        tz = pytz.timezone(timezone_str)
+        tz = ZoneInfo(timezone_str)
 
         # Query all PASSENGER trips with their vehicle type
         trips = (
@@ -392,15 +391,21 @@ Default: "Europe/Berlin"
         """
         Create stacked area chart of vehicles in revenue service over time.
 
+        The x-axis is rendered as a transit week (Mon 03:00 → next Mon 03:00). The
+        first three hours of the calendar week are wrapped around to the end so the
+        chart shows clean data at both edges.
+
         Args:
             prepared_data: DataFrame from analyze() with datetime index and vehicle type columns
-            xlim_start: Left x-axis limit (default: REVENUE_SERVICE_PLOT_START)
-            xlim_end: Right x-axis limit (default: REVENUE_SERVICE_PLOT_END)
+            xlim_start: Calendar week start (default: REVENUE_SERVICE_PLOT_START, Mon 00:00)
+            xlim_end: Calendar week end (default: REVENUE_SERVICE_PLOT_END, next Mon 00:00)
 
         Returns:
             matplotlib Figure
         """
-        from matplotlib.dates import DateFormatter, DayLocator, date2num
+        from datetime import timedelta
+        from matplotlib.dates import DateFormatter, HourLocator, date2num
+        from matplotlib.ticker import NullFormatter
 
         configure_latex_plotting()
 
@@ -409,28 +414,55 @@ Default: "Europe/Berlin"
         if xlim_end is None:
             xlim_end = REVENUE_SERVICE_PLOT_END
 
+        tz = xlim_start.tzinfo if xlim_start.tzinfo is not None else ZoneInfo("Europe/Berlin")
+
+        # Transit-day offset: shift the displayed week from 00:00→00:00 to 03:00→03:00
+        transit_offset = timedelta(hours=3)
+        transit_start = xlim_start + transit_offset
+        transit_end = xlim_end + transit_offset
+
+        # Wrap the calendar week's first 3 hours (Mon 00:00 → Mon 03:00) onto the
+        # tail (next Mon 00:00 → next Mon 03:00) so the transit week is complete.
+        plot_data = prepared_data
+        if not prepared_data.empty:
+            idx_start = pd.Timestamp(xlim_start)
+            idx_split = pd.Timestamp(transit_start)
+            wrap_mask = (prepared_data.index >= idx_start) & (prepared_data.index < idx_split)
+            wrapped = prepared_data.loc[wrap_mask].copy()
+            if not wrapped.empty:
+                wrapped.index = wrapped.index + pd.DateOffset(days=7)
+                plot_data = pd.concat([prepared_data, wrapped])
+                plot_data = plot_data[~plot_data.index.duplicated(keep="first")].sort_index()
+
         fig, ax = plt.subplots(
             1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained"
         )
 
         # Order columns by VEHICLE_TYPE_ORDER
-        columns = [vt for vt in VEHICLE_TYPE_ORDER if vt in prepared_data.columns]
+        columns = [vt for vt in VEHICLE_TYPE_ORDER if vt in plot_data.columns]
         palette = sns.color_palette("Set2", n_colors=len(columns))
 
-        stack_data = [prepared_data[col].values for col in columns]
+        stack_data = [plot_data[col].values for col in columns]
         ax.stackplot(
-            prepared_data.index,
+            plot_data.index,
             *stack_data,  # type: ignore[arg-type]
             labels=columns,
             colors=palette,
         )
 
         ax.set_ylabel(r"Vehicles in Revenue Service")
-        ax.xaxis.set_major_locator(DayLocator())  # type: ignore[no-untyped-call]
-        ax.xaxis.set_major_formatter(DateFormatter("%a"))  # type: ignore[no-untyped-call]
-        plt.xticks(rotation=45, ha="right")
 
-        ax.set_xlim(date2num(xlim_start), date2num(xlim_end))  # type: ignore[no-untyped-call]
+        # Major ticks at 03:00 each day (8 transit-day boundaries across the week),
+        # tick marks visible but unlabeled.
+        ax.xaxis.set_major_locator(HourLocator(byhour=[3], tz=tz))  # type: ignore[no-untyped-call]
+        ax.xaxis.set_major_formatter(NullFormatter())
+        # Minor ticks at 15:00 each day (middle of the 03:00→03:00 transit day),
+        # carry the day-name label but render no tick mark.
+        ax.xaxis.set_minor_locator(HourLocator(byhour=[15], tz=tz))  # type: ignore[no-untyped-call]
+        ax.xaxis.set_minor_formatter(DateFormatter("%a", tz=tz))  # type: ignore[no-untyped-call]
+        ax.tick_params(axis="x", which="minor", length=0)
+
+        ax.set_xlim(date2num(transit_start), date2num(transit_end))  # type: ignore[no-untyped-call]
 
         ax.legend(
             bbox_to_anchor=(0, 1.02, 1, 0.2),
