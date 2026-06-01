@@ -84,7 +84,7 @@ LOG_LEVEL = "INFO"
 # Derived configuration
 if REDUCED_DATA:
     NUM_DAYS: int | None = 1
-    NUM_DEPOTS: int | None = 2
+    NUM_DEPOTS: int | None = None
     SIMULATION_DAYS = 1
 else:
     NUM_DAYS = None  # All days
@@ -600,7 +600,7 @@ def run_ou_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame, pd.DataFrame]:
 
     # Get depot configuration (need a session)
     with context.get_session() as session:
-        if REDUCED_DATA:
+        if NUM_DEPOTS is not None:
             depots = reduce_depots_for_bvg()
         else:
             depots = depots_for_bvg(session)
@@ -664,10 +664,11 @@ def run_dep_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
 
     # Get depot configuration
     with context.get_session() as session:
-        if REDUCED_DATA:
-            depots = reduce_depots_for_bvg()
-        else:
+
+        if NUM_DEPOTS is None:
             depots = depots_for_bvg(session)
+        else:
+            depots = reduce_depots_for_bvg()
         params["DepotAssignment.depot_config"] = depots
 
     # DEP uses large batteries (same as common pipeline defaults), no need to update
@@ -733,10 +734,10 @@ def run_term_scenario(common_db: Path) -> Tuple[Path, pd.DataFrame]:
 
     # Get depot configuration
     with context.get_session() as session:
-        if REDUCED_DATA:
-            depots = reduce_depots_for_bvg()
-        else:
+        if NUM_DEPOTS is None:
             depots = depots_for_bvg(session)
+        else:
+            depots = reduce_depots_for_bvg()
         params["DepotAssignment.depot_config"] = depots
 
     # Set up battery capacities and empty masses (small batteries for TERM)
