@@ -9,12 +9,12 @@ from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 import cartopy.crs as ccrs  # type: ignore[import-untyped]
-from cartopy.io.img_tiles import GoogleTiles  # type: ignore[import-untyped]
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns  # type: ignore[import-untyped]
+from cartopy.io.img_tiles import GoogleTiles  # type: ignore[import-untyped]
 from eflips.model import (
     Area,
     Depot,
@@ -328,11 +328,10 @@ Default: "Europe/Berlin"
 
         Returns a DataFrame with a datetime index (minute resolution) and one column
         per vehicle type, containing the count of vehicles in service at that minute.
+        Index is tz-aware in the configured timezone (default Europe/Berlin).
         """
-        import pytz
-
         timezone_str = params.get(f"{self.__class__.__name__}.timezone", "Europe/Berlin")
-        tz = pytz.timezone(timezone_str)
+        tz = ZoneInfo(timezone_str)
 
         # Query all PASSENGER trips with their vehicle type
         trips = (
@@ -392,15 +391,21 @@ Default: "Europe/Berlin"
         """
         Create stacked area chart of vehicles in revenue service over time.
 
+        The x-axis is rendered as a transit week (Mon 03:00 → next Mon 03:00). The
+        first three hours of the calendar week are wrapped around to the end so the
+        chart shows clean data at both edges.
+
         Args:
             prepared_data: DataFrame from analyze() with datetime index and vehicle type columns
-            xlim_start: Left x-axis limit (default: REVENUE_SERVICE_PLOT_START)
-            xlim_end: Right x-axis limit (default: REVENUE_SERVICE_PLOT_END)
+            xlim_start: Calendar week start (default: REVENUE_SERVICE_PLOT_START, Mon 00:00)
+            xlim_end: Calendar week end (default: REVENUE_SERVICE_PLOT_END, next Mon 00:00)
 
         Returns:
             matplotlib Figure
         """
-        from matplotlib.dates import DateFormatter, DayLocator, date2num
+        from datetime import timedelta
+        from matplotlib.dates import DateFormatter, HourLocator, date2num
+        from matplotlib.ticker import NullFormatter
 
         configure_latex_plotting()
 
@@ -409,28 +414,55 @@ Default: "Europe/Berlin"
         if xlim_end is None:
             xlim_end = REVENUE_SERVICE_PLOT_END
 
+        tz = xlim_start.tzinfo if xlim_start.tzinfo is not None else ZoneInfo("Europe/Berlin")
+
+        # Transit-day offset: shift the displayed week from 00:00→00:00 to 03:00→03:00
+        transit_offset = timedelta(hours=3)
+        transit_start = xlim_start + transit_offset
+        transit_end = xlim_end + transit_offset
+
+        # Wrap the calendar week's first 3 hours (Mon 00:00 → Mon 03:00) onto the
+        # tail (next Mon 00:00 → next Mon 03:00) so the transit week is complete.
+        plot_data = prepared_data
+        if not prepared_data.empty:
+            idx_start = pd.Timestamp(xlim_start)
+            idx_split = pd.Timestamp(transit_start)
+            wrap_mask = (prepared_data.index >= idx_start) & (prepared_data.index < idx_split)
+            wrapped = prepared_data.loc[wrap_mask].copy()
+            if not wrapped.empty:
+                wrapped.index = wrapped.index + pd.DateOffset(days=7)
+                plot_data = pd.concat([prepared_data, wrapped])
+                plot_data = plot_data[~plot_data.index.duplicated(keep="first")].sort_index()
+
         fig, ax = plt.subplots(
             1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained"
         )
 
         # Order columns by VEHICLE_TYPE_ORDER
-        columns = [vt for vt in VEHICLE_TYPE_ORDER if vt in prepared_data.columns]
+        columns = [vt for vt in VEHICLE_TYPE_ORDER if vt in plot_data.columns]
         palette = sns.color_palette("Set2", n_colors=len(columns))
 
-        stack_data = [prepared_data[col].values for col in columns]
+        stack_data = [plot_data[col].values for col in columns]
         ax.stackplot(
-            prepared_data.index,
+            plot_data.index,
             *stack_data,  # type: ignore[arg-type]
             labels=columns,
             colors=palette,
         )
 
         ax.set_ylabel(r"Vehicles in Revenue Service")
-        ax.xaxis.set_major_locator(DayLocator())  # type: ignore[no-untyped-call]
-        ax.xaxis.set_major_formatter(DateFormatter("%a"))  # type: ignore[no-untyped-call]
-        plt.xticks(rotation=45, ha="right")
 
-        ax.set_xlim(date2num(xlim_start), date2num(xlim_end))  # type: ignore[no-untyped-call]
+        # Major ticks at 03:00 each day (8 transit-day boundaries across the week),
+        # tick marks visible but unlabeled.
+        ax.xaxis.set_major_locator(HourLocator(byhour=[3], tz=tz))  # type: ignore[no-untyped-call]
+        ax.xaxis.set_major_formatter(NullFormatter())
+        # Minor ticks at 15:00 each day (middle of the 03:00→03:00 transit day),
+        # carry the day-name label but render no tick mark.
+        ax.xaxis.set_minor_locator(HourLocator(byhour=[15], tz=tz))  # type: ignore[no-untyped-call]
+        ax.xaxis.set_minor_formatter(DateFormatter("%a", tz=tz))  # type: ignore[no-untyped-call]
+        ax.tick_params(axis="x", which="minor", length=0)
+
+        ax.set_xlim(date2num(transit_start), date2num(transit_end))  # type: ignore[no-untyped-call]
 
         ax.legend(
             bbox_to_anchor=(0, 1.02, 1, 0.2),
@@ -1134,9 +1166,10 @@ def _select_representative_vehicle(
     day_end: dt,
     required_event_type: EventType,
     max_soc_threshold: "float | None" = None,
+    selection_metric: str = "total_abs_delta",
 ) -> int:
     """
-    Select a representative vehicle by event type, SoC filtering, and highest delta_soc.
+    Select a representative vehicle by event type, SoC filtering, and a ranking metric.
 
     Args:
         session: SQLAlchemy session
@@ -1144,6 +1177,10 @@ def _select_representative_vehicle(
         day_end: Window end (timezone-aware)
         required_event_type: EventType that candidate vehicles must have
         max_soc_threshold: If set, exclude candidates whose soc_end reaches this value or above
+        selection_metric: ``"total_abs_delta"`` (default) picks the vehicle with the highest
+            sum of ``|soc_end − soc_start|`` across events in the window — favors high
+            energy turnover. ``"min_soc"`` picks the vehicle whose ``soc_end`` reaches the
+            lowest value in the window — favors the deepest drawdown.
 
     Returns:
         vehicle_id of the selected vehicle
@@ -1186,9 +1223,14 @@ def _select_representative_vehicle(
             f"{max_soc_threshold} found in the given window."
         )
 
-    # Pick the vehicle with the highest total |delta_soc|
+    if selection_metric not in ("total_abs_delta", "min_soc"):
+        raise ValueError(
+            f"Unknown selection_metric={selection_metric!r}; "
+            f"expected 'total_abs_delta' or 'min_soc'."
+        )
+
     best_vehicle_id = None
-    best_delta_soc = -1.0
+    best_score = -1.0 if selection_metric == "total_abs_delta" else 2.0
     for vid in candidate_vehicle_ids:
         events = (
             session.query(Event)
@@ -1199,10 +1241,16 @@ def _select_representative_vehicle(
             )
             .all()
         )
-        total_delta = sum(abs(e.soc_end - e.soc_start) for e in events)
-        if total_delta > best_delta_soc:
-            best_delta_soc = total_delta
-            best_vehicle_id = vid
+        if selection_metric == "total_abs_delta":
+            score = sum(abs(e.soc_end - e.soc_start) for e in events)
+            if score > best_score:
+                best_score = score
+                best_vehicle_id = vid
+        else:  # min_soc
+            score = min(e.soc_end for e in events)
+            if score < best_score:
+                best_score = score
+                best_vehicle_id = vid
 
     assert best_vehicle_id is not None
     return best_vehicle_id
@@ -1215,6 +1263,7 @@ def _build_vehicle_soc(
     tz: Any,
     required_event_type: EventType,
     max_soc_threshold: "float | None" = None,
+    selection_metric: str = "total_abs_delta",
 ) -> Tuple[pd.DataFrame, List[Tuple[str, dt, dt]]]:
     """
     Select a representative vehicle and build its SoC timeseries + event spans.
@@ -1229,6 +1278,7 @@ def _build_vehicle_soc(
         tz: pytz timezone for display
         required_event_type: EventType that candidate vehicles must have
         max_soc_threshold: If set, exclude candidates whose soc_end reaches this value or above
+        selection_metric: See :func:`_select_representative_vehicle`.
 
     Returns:
         (soc_df, event_spans) — DataFrame with 'time'/'soc' columns, list of shading spans
@@ -1238,7 +1288,7 @@ def _build_vehicle_soc(
     from eflips.eval.output.prepare import vehicle_soc as eval_vehicle_soc
 
     vehicle_id = _select_representative_vehicle(
-        session, day_start, day_end, required_event_type, max_soc_threshold
+        session, day_start, day_end, required_event_type, max_soc_threshold, selection_metric
     )
 
     # Reuse eflips.eval for SoC timeseries construction
@@ -1299,6 +1349,12 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
             f"{cls.__name__}.max_soc_threshold": (
                 "Depot mode only: exclude vehicles whose soc_end reaches this value. Default: 0.99."
             ),
+            f"{cls.__name__}.selection_metric": (
+                '"total_abs_delta" (default) — vehicle with the highest summed '
+                "|soc_end-soc_start| across events in the window (high energy turnover). "
+                '"min_soc" — vehicle whose soc_end reaches the lowest value in the window '
+                "(deepest drawdown)."
+            ),
         }
 
     def analyze(
@@ -1315,6 +1371,9 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
         day_start = params.get(f"{self.__class__.__name__}.day_start", dt(2025, 6, 18, 3, 0))
         day_end = params.get(f"{self.__class__.__name__}.day_end", dt(2025, 6, 19, 3, 0))
         mode = params.get(f"{self.__class__.__name__}.mode", "terminus")
+        selection_metric = params.get(
+            f"{self.__class__.__name__}.selection_metric", "total_abs_delta"
+        )
 
         tz = pytz.timezone("Europe/Berlin")
         if day_start.tzinfo is None:
@@ -1332,7 +1391,13 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
             max_soc_threshold = None
 
         soc_df, event_spans = _build_vehicle_soc(
-            session, day_start, day_end, tz, required_event_type, max_soc_threshold
+            session,
+            day_start,
+            day_end,
+            tz,
+            required_event_type,
+            max_soc_threshold,
+            selection_metric,
         )
         return soc_df, event_spans, day_start, day_end
 
@@ -1406,7 +1471,21 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
             ax.set_xlim(date2num(xlim_start), date2num(xlim_end))  # type: ignore[no-untyped-call]
 
         if "Terminus Charging" in drawn_labels:
-            ax.legend(loc="lower right", ncols=2)
+            # Pick the right-hand corner (upper vs lower) the SoC trace doesn't run
+            # through. Samples the right ~half of the *displayed* window — for
+            # "total_abs_delta" the trace sits high (lower-right is free); for
+            # "min_soc" it sits low (upper-right is free). The dataframe can extend
+            # beyond xlim, so clip to the visible window first.
+            if xlim_start is not None and xlim_end is not None:
+                window_mid = xlim_start + (xlim_end - xlim_start) / 2
+                in_right = (sorted_data["time"] >= window_mid) & (sorted_data["time"] <= xlim_end)
+                right_socs = sorted_data.loc[in_right, "soc"]
+            else:
+                right_socs = sorted_data["soc"].iloc[len(sorted_data) // 2 :]
+            legend_loc = (
+                "upper right" if len(right_socs) > 0 and right_socs.mean() < 0.5 else "lower right"
+            )
+            ax.legend(loc=legend_loc, ncols=2)
         else:
             ax.legend(
                 bbox_to_anchor=(0, 1.02, 1, 0.2),
