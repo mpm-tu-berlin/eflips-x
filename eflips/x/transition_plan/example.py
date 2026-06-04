@@ -13,33 +13,49 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from pathlib import Path
 
-from eflips.x.transition_plan.multi_stage_simulation import simulate_multi_stage_electrification
+from eflips.x.transition_plan.multi_stage_simulation import (
+    plot_multi_stage_vehicle_type_statistics,
+    simulate_multi_stage_electrification,
+)
 from eflips.x.transition_plan.transition_plan import (
     run_transition_planner,
     run_tco_calculation,
-    generate_transition_plan_plots,
 )
 from eflips.x.flows import run_steps
 
 from eflips.x.transition_plan.transition_plan import PlaygroundAnalyzer
 
-
 if __name__ == "__main__":
 
     data_dir = Path(__file__).parent.parent.parent.parent.parent / "eflips-data"
-    db_name = "Simulation_ou_mini.db"
+    db_name = "Simulation_ou_mini_orig.db"
     input_db = data_dir / db_name
 
-    FORCE_RERUN = True
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if FORCE_RERUN:
-        work_dir = Path(__file__).parent.parent.parent / "transition_plan" / f"{run_id + db_name}"
-    else:
-        work_dir = Path(__file__).parent.parent.parent / "transition_plan" / db_name
+    work_dir = (
+        Path(__file__).parent.parent.parent.parent
+        / "data"
+        / "output"
+        / "transition_plan"
+        / db_name
+    )
     os.makedirs(work_dir, exist_ok=True)
 
-    tco_params_path = (
-        Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "berlin_literature.py"
+    print(f"Working directory: {work_dir}")
+    print(f"Input database: {input_db}")
+
+    from eflips.x.flows import generate_all_plots
+
+    # Single scenario that holds both electric and diesel VehicleTypes. Diesel
+    # VTs are created on the fly by CreateHybridFleet from the electric ones.
+    SCENARIO_ID = 1
+
+    tco_params_path = Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "tco.json"
+    fleet_info_path = Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "fleet.json"
+
+    lca_params_path = Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "lca.json"
+    lca_overrides_path = (
+        Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "lca_overrides.json"
     )
 
     transition_plan_config_path = (
@@ -49,27 +65,35 @@ if __name__ == "__main__":
         / "transition_plan_config.py"
     )
 
-    print(f"Working directory: {work_dir}")
-    print(f"Input database: {input_db}")
-
-    from eflips.x.flows import generate_all_plots
-
     spec = importlib.util.spec_from_file_location(
         "transition_plan_config", transition_plan_config_path
     )
     config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(config)
 
+    multi_stage_output_dir = work_dir / "plots" / "multi_stage"
+
     context_params: Dict[str, Any] = {
         "log_level": "INFO",
+        "scenario_id": SCENARIO_ID,
         "TCOParameterConfigurator.tco_params_path": tco_params_path,
-        "TCOParameterConfigurator.scenario_name": "berlin_literature",
+        "TCOParameterConfigurator.fleet_info_path": fleet_info_path,
+        # TransitionPlanner params are preserved for when the planner step is
+        # wired back into run_transition_planner.
+        "TransitionPlanner.constraint_params": config.constraints,
         "TransitionPlanner.name": config.name,
         "TransitionPlanner.sets": config.sets,
         "TransitionPlanner.variables": config.variables,
         "TransitionPlanner.constraints": config.constraints_long_term,
         "TransitionPlanner.expressions": config.expressions_long_term,
         "TransitionPlanner.objective_components": config.objective_components,
+        "TransitionPlanner.plot_save_path": str(
+            multi_stage_output_dir / "transition_planner_results.png"
+        ),
+        "LCACalculator.lca_json_path": lca_params_path,
+        "LCACalculator.overrides_json_path": lca_overrides_path,
+        "LCACalculator.plot_by_type_save_path": str(multi_stage_output_dir / "lca_by_type.png"),
+        "LCACalculator.plot_by_scope_save_path": str(multi_stage_output_dir / "lca_by_scope.png"),
     }
 
     transition_planner_params = {
@@ -90,14 +114,15 @@ if __name__ == "__main__":
 
     current_db_path, results = run_transition_planner(context)
 
-    if results is not None:
-        generate_transition_plan_plots(results, output_dir)
-
-    simulate_multi_stage_electrification(
+    per_stage_vt_stats = simulate_multi_stage_electrification(
         unelectrified_blocks=results["unelectrified_blocks"],
         workdir=work_dir,
         input_db=current_db_path,
-        force_rerun=FORCE_RERUN,
+    )
+    #
+    plot_multi_stage_vehicle_type_statistics(
+        per_stage_results=per_stage_vt_stats,
+        output_dir=multi_stage_output_dir,
     )
 
     print(f"Transition planner results saved to: {current_db_path}")
