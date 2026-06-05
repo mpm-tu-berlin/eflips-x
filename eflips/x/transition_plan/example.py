@@ -21,7 +21,9 @@ from eflips.x.transition_plan.transition_plan import (
     run_transition_planner,
     run_tco_calculation,
 )
+from eflips.x.flows import run_steps
 
+from eflips.x.transition_plan.transition_plan import PlaygroundAnalyzer
 
 if __name__ == "__main__":
     import argparse
@@ -64,6 +66,12 @@ if __name__ == "__main__":
         / "TCO"
         / "sensitivity_analysis"
         / args.tco_params
+        if args.tco_params is not None
+        else Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "tco.json"
+    )
+
+    tco_params_path = (
+        Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "sensitivity_analysis" / args.tco_params
         if args.tco_params is not None
         else Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "tco.json"
     )
