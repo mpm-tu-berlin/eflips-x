@@ -5,7 +5,7 @@
     "inflation_rate": 0.02,
 
     "staff_cost": 25.0,
-    "fuel_cost": {"diesel": 1.70, "electricity": 0.167},
+    "fuel_cost": {"diesel": 1.80, "electricity": 0.167},
     "vehicle_maint_cost": {"diesel": 0.5, "electricity": 0.35},
     "infra_maint_cost": 1000.0,
     "cost_escalation_rate": {

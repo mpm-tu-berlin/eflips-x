@@ -3,9 +3,10 @@ from eflips.transition.parameter_registry import ConstraintsParams
 constraints = ConstraintsParams(
     project_duration=20,
     annual_budget=0.8e7,
-    maximum_annual_new_station=5,
+    maximum_annual_new_station=10,
     maximum_annual_new_depot=10,
     current_year=2026,
+    scaling_factor_to_year=321.88,
     diesel_salvage_decay_rate=0.135,
     diesel_salvage_cutoff_age=12,
 )
@@ -21,7 +22,7 @@ variables = [
 ]
 
 constraints_long_term = [
-    "YearlyReplacedUpperBound",
+    # "YearlyReplacedUpperBound",
     "InitialElectricVehicleConstraint",
     "InitialElectrifiedStationConstraint",
     "NoStationUninstallationConstraint",
@@ -48,7 +49,7 @@ constraints_long_term = [
     "DieselReplacementCap",
     "DieselEarlyRetirementEquality",
     "DieselNaturalRetirementCap",
-    "NoDieselBusProcurement",  # activate to forbid any new diesel bus purchases
+    # "NoDieselBusProcurement",  # activate to forbid any new diesel bus purchases
 ]
 
 expressions_long_term = [

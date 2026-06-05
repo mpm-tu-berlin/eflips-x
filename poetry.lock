@@ -1578,7 +1578,7 @@ pyomo = ">=6.10.0,<7.0.0"
 type = "git"
 url = "ssh://git@github.com/mpm-tu-berlin/eflips-transition.git"
 reference = "HEAD"
-resolved_reference = "ca74bf23cc63faa774250092b86b06f38cb799ed"
+resolved_reference = "4730ca04821ed23ee75dbcad9bdf695ea259dd40"
 
 [[package]]
 name = "et-xmlfile"
