@@ -21,23 +21,31 @@ from eflips.x.transition_plan.transition_plan import (
     run_transition_planner,
     run_tco_calculation,
 )
-from eflips.x.flows import run_steps
 
-from eflips.x.transition_plan.transition_plan import PlaygroundAnalyzer
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run transition planner pipeline.")
+    parser.add_argument(
+        "--tco_params",
+        type=str,
+        default=None,
+        help="Path to TCO parameters JSON file.",
+    )
+    args = parser.parse_args()
 
     data_dir = Path(__file__).parent.parent.parent.parent.parent / "eflips-data"
-    db_name = "Simulation_ou_mini_orig.db"
+    db_name = "Simulation_ou.db"
     input_db = data_dir / db_name
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    work_subdir = Path(args.tco_params).stem if args.tco_params is not None else db_name
     work_dir = (
         Path(__file__).parent.parent.parent.parent
         / "data"
         / "output"
         / "transition_plan"
-        / db_name
+        / work_subdir
     )
     os.makedirs(work_dir, exist_ok=True)
 
@@ -50,7 +58,16 @@ if __name__ == "__main__":
     # VTs are created on the fly by CreateHybridFleet from the electric ones.
     SCENARIO_ID = 1
 
-    tco_params_path = Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "tco.json"
+    tco_params_path = (
+        Path(__file__).parent.parent.parent.parent
+        / "data"
+        / "TCO"
+        / "sensitivity_analysis"
+        / args.tco_params
+        if args.tco_params is not None
+        else Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "tco.json"
+    )
+
     fleet_info_path = Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "fleet.json"
 
     lca_params_path = Path(__file__).parent.parent.parent.parent / "data" / "TCO" / "lca.json"
@@ -90,6 +107,7 @@ if __name__ == "__main__":
         "TransitionPlanner.plot_save_path": str(
             multi_stage_output_dir / "transition_planner_results.png"
         ),
+        "TransitionPlanner.csv_save_dir": work_dir / "csv",
         "LCACalculator.lca_json_path": lca_params_path,
         "LCACalculator.overrides_json_path": lca_overrides_path,
         "LCACalculator.plot_by_type_save_path": str(multi_stage_output_dir / "lca_by_type.png"),
@@ -113,17 +131,24 @@ if __name__ == "__main__":
     #
 
     current_db_path, results = run_transition_planner(context)
+    pd.DataFrame(
+        [
+            {"year": year, "rotation_id": rotation_id}
+            for year, rotation_ids in results["unelectrified_blocks"].items()
+            for rotation_id in rotation_ids
+        ]
+    ).to_csv(output_dir / "unelectrified_blocks.csv", index=False)
 
-    per_stage_vt_stats = simulate_multi_stage_electrification(
-        unelectrified_blocks=results["unelectrified_blocks"],
-        workdir=work_dir,
-        input_db=current_db_path,
-    )
+    # per_stage_vt_stats = simulate_multi_stage_electrification(
+    #     unelectrified_blocks=results["unelectrified_blocks"],
+    #     workdir=work_dir,
+    #     input_db=current_db_path,
+    # )
     #
-    plot_multi_stage_vehicle_type_statistics(
-        per_stage_results=per_stage_vt_stats,
-        output_dir=multi_stage_output_dir,
-    )
+    # plot_multi_stage_vehicle_type_statistics(
+    #     per_stage_results=per_stage_vt_stats,
+    #     output_dir=multi_stage_output_dir,
+    # )
 
     print(f"Transition planner results saved to: {current_db_path}")
 

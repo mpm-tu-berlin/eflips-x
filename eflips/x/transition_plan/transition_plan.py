@@ -194,6 +194,14 @@ class TransitionPlanner(Analyzer):
 
         Default: None
                     """.strip(),
+            f"{cls.__name__}.csv_save_dir": """
+        Directory path into which get_results() saves all CSV output files
+        (vehicle_assignment_detailed.csv, yearly_cost_breakdown.csv, etc.).
+        The directory is created if it does not exist. If None, no CSVs are
+        written.
+
+        Default: None
+                    """.strip(),
         }
 
     def analyze(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> Dict:
@@ -317,7 +325,10 @@ class TransitionPlanner(Analyzer):
         )
         model.solve()
 
-        results = model.get_results(save_results=True)
+        csv_save_dir = params.get(f"{cn}.csv_save_dir")
+        results = model.get_results(
+            save_dir=Path(csv_save_dir) if csv_save_dir is not None else None
+        )
 
         plot_save_path = params.get(f"{cn}.plot_save_path")
         if plot_save_path is not None:
