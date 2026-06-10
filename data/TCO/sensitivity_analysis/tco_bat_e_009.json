@@ -88,13 +88,13 @@
       "type": "depot",
       "procurement_cost": 90000.0,
       "useful_life": 20,
-      "cost_escalation": -0.1
+      "cost_escalation": -0.05
     },
     {
       "type": "opportunity",
       "procurement_cost": 230000.0,
       "useful_life": 20,
-      "cost_escalation": -0.1
+      "cost_escalation": -0.05
     }
   ],
   "charging_infrastructure": [
