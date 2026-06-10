@@ -320,28 +320,28 @@ def depots_for_bvg(
         {
             "depot_station": (13.4964867, 52.4654085),
             "name": "Betriebshof Köpenicker Landstraße",
-            "capacity": 220,
+            "capacity": 300,
             "vehicle_type": vehicle_type_ids,
         }
     )
 
-    # "Betriebshof Rummelsburger Landstraße" will have a capacity of 60
-    vehicle_types = ["GN"]
-    vehicle_type_query = (
-        session.query(VehicleType)
-        .filter(VehicleType.name_short.in_(vehicle_types))
-        .filter(VehicleType.scenario == scenario)
-        .all()
-    )
-    vehicle_type_ids = [x.id for x in vehicle_type_query]
-    depot_list.append(
-        {
-            "depot_station": (13.5053889, 52.4714167),
-            "name": "Betriebshof Rummelsburger Landstraße",
-            "capacity": 80,
-            "vehicle_type": vehicle_type_ids,
-        }
-    )
+    # # "Betriebshof Rummelsburger Landstraße" will have a capacity of 60
+    # vehicle_types = ["GN"]
+    # vehicle_type_query = (
+    #     session.query(VehicleType)
+    #     .filter(VehicleType.name_short.in_(vehicle_types))
+    #     .filter(VehicleType.scenario == scenario)
+    #     .all()
+    # )
+    # vehicle_type_ids = [x.id for x in vehicle_type_query]
+    # depot_list.append(
+    #     {
+    #         "depot_station": (13.5053889, 52.4714167),
+    #         "name": "Betriebshof Rummelsburger Landstraße",
+    #         "capacity": 80,
+    #         "vehicle_type": vehicle_type_ids,
+    #     }
+    # )
 
     # "Betriebshof Säntisstraße" will have a capacity of 230
     vehicle_types = ["EN", "GN"]
