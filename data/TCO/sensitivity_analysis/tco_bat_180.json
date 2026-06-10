@@ -66,21 +66,21 @@
   "battery_types": [
     {
       "vehicle_name_short": "EN",
-      "procurement_cost": 150,
+      "procurement_cost": 200,
       "useful_life": 7,
-      "cost_escalation": -0.06
+      "cost_escalation": -0.03
     },
     {
       "vehicle_name_short": "DD",
-      "procurement_cost": 150,
+      "procurement_cost": 180,
       "useful_life": 7,
-      "cost_escalation": -0.06
+      "cost_escalation": -0.03
     },
     {
       "vehicle_name_short": "GN",
-      "procurement_cost": 150,
+      "procurement_cost": 180,
       "useful_life": 7,
-      "cost_escalation": -0.06
+      "cost_escalation": -0.03
     }
   ],
   "charging_point_types": [
