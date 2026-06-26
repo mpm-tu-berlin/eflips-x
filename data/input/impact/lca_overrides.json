@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "year": 2025,
+  "vehicle_type_overrides": [
+    {
+      "name_short": "EN",
+      "motor_rated_power_kw": 200.0,
+      "motor_power_to_weight_ratio_kw_per_kg": 1.5,
+      "vehicle_lifetime_years": 12.0,
+      "average_consumption_kwh_per_km": 1.48,
+      "diesel_consumption_kg_per_km": null
+    },
+    {
+      "name_short": "DD",
+      "motor_rated_power_kw": 300.0,
+      "motor_power_to_weight_ratio_kw_per_kg": 1.5,
+      "vehicle_lifetime_years": 12.0,
+      "average_consumption_kwh_per_km": 2.16,
+      "diesel_consumption_kg_per_km": null
+    },
+    {
+      "name_short": "GN",
+      "motor_rated_power_kw": 250.0,
+      "motor_power_to_weight_ratio_kw_per_kg": 1.5,
+      "vehicle_lifetime_years": 12.0,
+      "average_consumption_kwh_per_km": 2.16,
+      "diesel_consumption_kg_per_km": null
+    }
+  ],
+  "charging_point_type_overrides": [
+    {
+      "type": "depot",
+      "infrastructure_lifetime_years": 20.0
+    },
+    {
+      "type": "opportunity",
+      "infrastructure_lifetime_years": 20.0,
+      "foundation_volume_per_point_m3": 3.96
+    }
+  ]
+}

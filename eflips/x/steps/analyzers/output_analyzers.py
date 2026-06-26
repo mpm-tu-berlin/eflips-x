@@ -1,13 +1,14 @@
 """
-Analyzers for output evaluation using eflips-eval and eflips-tco.
+Analyzers for output evaluation using eflips-eval and eflips-impact.
 
 These analyzers wrap the eflips.eval.output module's prepare/visualize functions
-and the eflips-tco TCO calculator to make them usable within the eflips-x pipeline
-framework.
+and the eflips-impact TCO calculator to make them usable within the eflips-x
+pipeline framework.
 """
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
@@ -18,8 +19,9 @@ import sqlalchemy
 from eflips.eval.output import prepare as eval_output_prepare
 from eflips.eval.output import visualize as eval_output_visualize
 from eflips.eval.output.prepare import depot_layout
+from eflips.impact.tco import calculate_tco, init_tco_params  # type: ignore[import-untyped]
+from eflips.impact.utils import complete_fleet  # type: ignore[import-untyped]
 from eflips.model import (
-    EnergySource,
     Event,
     EventType,
     Route,
@@ -28,18 +30,9 @@ from eflips.model import (
     Vehicle,
     VehicleType,
 )
-from eflips.tco.data_queries import init_tco_parameters  # type: ignore[import-untyped]
-from eflips.tco.tco_calculator import TCOCalculator  # type: ignore[import-untyped]
-from eflips.tco.tco_parameter_config import (  # type: ignore[import-untyped]
-    BatteryTypeTCOParameter,
-    ChargingInfrastructureTCOParameter,
-    ChargingPointTypeTCOParameter,
-    ScenarioTCOParameter,
-    VehicleTypeTCOParameter,
-)
 from sqlalchemy.orm import Session
 
-from eflips.x.framework import Analyzer, ScenarioDisplayConfig
+from eflips.x.framework import Analyzer, Modifier, ScenarioDisplayConfig
 
 logger = logging.getLogger(__name__)
 
@@ -653,19 +646,93 @@ Example: `params["{cls.__name__}.scenario_ids"] = [1, 2]`
         )
 
 
+class TCOConfigurator(Modifier):
+    """
+    Modifier that writes the eflips-impact fleet topology and TCO parameters into
+    the database, so that a downstream :class:`TCOAnalyzer` can compute the TCO.
+
+    Two JSON files drive it, with paths passed via the pipeline parameters
+    ``TCOConfigurator.fleet_json`` and ``TCOConfigurator.tco_json`` (set by the
+    calling flow, e.g. pointing at ``data/impact/fleet.json`` and
+    ``data/impact/tco.json``):
+
+    - the fleet JSON defines the fleet topology: which BatteryType /
+      ChargingPointType rows exist and how they map to vehicle types and charging
+      locations. Applied via :func:`eflips.impact.utils.complete_fleet` with
+      ``delete_existing_data=True``, so any pre-existing topology rows are rebuilt
+      to match the JSON (and re-written by the installed eflips-model, avoiding
+      stale encodings).
+    - the TCO JSON defines the financial parameters (scenario, vehicle types,
+      battery types, charging point types, charging infrastructure). Applied via
+      :func:`eflips.impact.tco.init_tco_params`.
+
+    Because it writes to the database, this is a Modifier: the changes are
+    committed and chained into the next pipeline database.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.fleet_json": (
+                "Path to the eflips-impact fleet topology JSON (battery_types + "
+                "charging_point_types), applied via complete_fleet. Required."
+            ),
+            f"{cls.__name__}.tco_json": (
+                "Path to the eflips-impact TCO parameter JSON (scenario, vehicle_types, "
+                "battery_types, charging_point_types, charging_infrastructure), applied "
+                "via init_tco_params. Required."
+            ),
+        }
+
+    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
+        """
+        Write the fleet topology and TCO parameters into the database.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters including ``TCOConfigurator.fleet_json``
+                and ``TCOConfigurator.tco_json``.
+        """
+        scenario = session.query(Scenario).one()
+
+        fleet_json_param = params.get(f"{self.__class__.__name__}.fleet_json")
+        tco_json_param = params.get(f"{self.__class__.__name__}.tco_json")
+        if not fleet_json_param or not tco_json_param:
+            raise ValueError(
+                f"{self.__class__.__name__} requires the "
+                f"'{self.__class__.__name__}.fleet_json' and "
+                f"'{self.__class__.__name__}.tco_json' parameters (paths to the "
+                "eflips-impact fleet and TCO parameter JSON files)."
+            )
+
+        # Rebuild the fleet topology from fleet.json (delete + recreate) so the
+        # BatteryType / ChargingPointType rows match the JSON and are re-written
+        # by the installed eflips-model.
+        complete_fleet(
+            scenario=scenario,
+            json_path=Path(fleet_json_param),
+            delete_existing_data=True,
+        )
+
+        # Write tco_parameters onto scenario / vehicle types / battery types /
+        # charging point types / stations.
+        init_tco_params(scenario=scenario, json_path=Path(tco_json_param))
+
+
 class TCOAnalyzer(Analyzer):
     """
-    Analyzer for calculating Total Cost of Ownership (TCO) using the eflips-tco package.
+    Analyzer that calculates Total Cost of Ownership (TCO) using eflips-impact.
 
     Computes TCO broken down by cost category (vehicle, battery, infrastructure,
-    energy, maintenance, staff, other) normalized to EUR/km. Uses constant energy
-    consumption mode, where the per-vehicle-type energy consumption factor is an
-    explicit parameter rather than being derived from simulation events.
+    energy, maintenance, staff, other) normalized to EUR/revenue-km, using the
+    constant energy-consumption mode.
 
-    The energy_consumption_factor parameter specifies per-vehicle-type average energy
-    consumption (kWh/km) for cost estimation. This is typically lower than simulated
-    worst-case consumption, reflecting average-day operations rather than the
-    planning-conservative values used in simulation.
+    This analyzer only reads the database: the fleet topology and
+    ``tco_parameters`` it depends on must already be present, written by
+    :class:`TCOConfigurator`. Run ``TCOConfigurator`` before this analyzer.
     """
 
     COST_CATEGORIES = [
@@ -687,7 +754,7 @@ class TCOAnalyzer(Analyzer):
         "OTHER": "Other",
     }
 
-    def __init__(self, code_version: str = "v1.0.2", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v3.0.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -697,56 +764,6 @@ class TCOAnalyzer(Analyzer):
                 "Display name for this scenario in output. "
                 "Falls back to Scenario.name from the database."
             ),
-            f"{cls.__name__}.vehicle_type_tco_params": (
-                "Dict mapping vehicle type name_short to TCO parameters. "
-                'Each value: {"useful_life": int, "procurement_cost": float, '
-                '"cost_escalation": float}. Required.'
-            ),
-            f"{cls.__name__}.battery_type_tco_params": (
-                "Dict mapping vehicle type name_short to battery TCO parameters. "
-                'Each value: {"name": str, "procurement_cost": float (EUR per kWh), '
-                '"useful_life": int, "cost_escalation": float, '
-                '"specific_mass": float (kWh/kg, required for new battery types), '
-                '"chemistry": str (required for new battery types)}. Required.'
-            ),
-            f"{cls.__name__}.charging_point_type_params": (
-                "List of dicts for charging point types. Each: "
-                '{"type": "depot"|"opportunity", "name": str, "procurement_cost": float, '
-                '"useful_life": int, "cost_escalation": float}. Required.'
-            ),
-            f"{cls.__name__}.charging_infrastructure_params": (
-                "List of dicts for charging infrastructure. Each: "
-                '{"type": "depot"|"station", "name": str, "procurement_cost": float, '
-                '"useful_life": int, "cost_escalation": float}. Required.'
-            ),
-            f"{cls.__name__}.energy_consumption_factor": (
-                "Dict mapping vehicle type name_short to average energy consumption "
-                "in kWh/km. This should be lower than the simulated worst-case "
-                "consumption, reflecting average-day operations for cost estimation. "
-                "Required."
-            ),
-            f"{cls.__name__}.project_duration": "Project duration in years. Default: 20",
-            f"{cls.__name__}.interest_rate": "Interest rate. Default: 0.04",
-            f"{cls.__name__}.inflation_rate": "Inflation/discount rate. Default: 0.02",
-            f"{cls.__name__}.staff_cost": "Cost per driver hour in EUR. Default: 25.0",
-            f"{cls.__name__}.fuel_cost": "Electricity cost per kWh in EUR. Default: 0.1794",
-            f"{cls.__name__}.diesel_fuel_cost": "Diesel cost per litre in EUR. Default: 1.50",
-            f"{cls.__name__}.maint_cost": "Electric vehicle maintenance cost per km in EUR. Default: 0.35",
-            f"{cls.__name__}.diesel_maint_cost": "Diesel vehicle maintenance cost per km in EUR. Default: 0.45",
-            f"{cls.__name__}.maint_infr_cost": (
-                "Infrastructure maintenance cost per year per charging slot in EUR. "
-                "Default: 1000"
-            ),
-            f"{cls.__name__}.taxes": ("Tax cost per vehicle per year in EUR. Default: 278"),
-            f"{cls.__name__}.insurance": (
-                "Insurance cost per vehicle per year in EUR. Default: 9693"
-            ),
-            f"{cls.__name__}.pef_general": "General price escalation factor. Default: 0.02",
-            f"{cls.__name__}.pef_wages": "Wage price escalation factor. Default: 0.025",
-            f"{cls.__name__}.pef_fuel": (
-                "Fuel/electricity price escalation factor. Default: 0.038"
-            ),
-            f"{cls.__name__}.pef_insurance": ("Insurance price escalation factor. Default: 0.02"),
         }
 
     def analyze(
@@ -755,17 +772,19 @@ class TCOAnalyzer(Analyzer):
         """
         Calculate TCO for the scenario in the database.
 
-        Initializes TCO parameters in the (temporary) database, then runs the
-        TCO calculator with constant energy consumption mode.
+        Runs the eflips-impact TCO calculator (constant energy-consumption mode)
+        against the already-configured database. The fleet topology and
+        ``tco_parameters`` must have been written by :class:`TCOConfigurator`
+        beforehand.
 
         Args:
             session: SQLAlchemy session connected to the eflips-model database
-            params: Pipeline parameters including TCO configuration
+            params: Pipeline parameters including ``TCOAnalyzer.scenario_name``
 
         Returns:
             Single-row DataFrame with columns: scenario_name + one column per
             cost category (VEHICLE, BATTERY, INFRASTRUCTURE, ENERGY, MAINTENANCE,
-            STAFF, OTHER). Values are in EUR/km.
+            STAFF, OTHER). Values are in EUR/revenue-km.
         """
         scenario = session.query(Scenario).one()
 
@@ -773,153 +792,15 @@ class TCOAnalyzer(Analyzer):
         if not scenario_name:
             scenario_name = scenario.name or "Unknown"
 
-        # Get required parameters
-        vt_tco_params: Dict[str, Dict[str, Any]] = params.get(
-            f"{self.__class__.__name__}.vehicle_type_tco_params", {}
-        )
-        bt_tco_params: Dict[str, Dict[str, Any]] = params.get(
-            f"{self.__class__.__name__}.battery_type_tco_params", {}
-        )
-        cp_type_params: List[Dict[str, Any]] = params.get(
-            f"{self.__class__.__name__}.charging_point_type_params", []
-        )
-        infra_params: List[Dict[str, Any]] = params.get(
-            f"{self.__class__.__name__}.charging_infrastructure_params", []
-        )
-        energy_factors: Dict[str, float] = params.get(
-            f"{self.__class__.__name__}.energy_consumption_factor", {}
-        )
+        # Calculate TCO (per revenue-km, by cost category).
+        tco_result = calculate_tco(scenario=scenario)
+        per_revenue_km = tco_result.tco_by_type_per_revenue_km
 
-        if not all([vt_tco_params, bt_tco_params, cp_type_params, infra_params, energy_factors]):
-            raise ValueError(
-                f"{self.__class__.__name__} requires vehicle_type_tco_params, "
-                "battery_type_tco_params, charging_point_type_params, "
-                "charging_infrastructure_params, and energy_consumption_factor"
-            )
-
-        # Resolve vehicle type name_shorts to determine energy source
-        vehicle_types = (
-            session.query(VehicleType).filter(VehicleType.scenario_id == scenario.id).all()
-        )
-        vt_by_name = {vt.name_short: vt for vt in vehicle_types}
-
-        # Build VehicleTypeTCOParameter list (includes energy consumption per vehicle type)
-        vehicle_type_params: List[VehicleTypeTCOParameter] = []
-        for name_short, tco_info in vt_tco_params.items():
-            vt = vt_by_name.get(name_short)
-            if vt is None:
-                logger.warning(f"Vehicle type '{name_short}' not found in database, skipping")
-                continue
-            energy_factor = energy_factors.get(name_short, 0.0)
-            if vt.energy_source == EnergySource.DIESEL:
-                vt_param = VehicleTypeTCOParameter(
-                    name_short=name_short,
-                    useful_life=tco_info["useful_life"],
-                    procurement_cost=tco_info["procurement_cost"],
-                    cost_escalation=tco_info["cost_escalation"],
-                    average_diesel_consumption=energy_factor,
-                )
-            else:
-                vt_param = VehicleTypeTCOParameter(
-                    name_short=name_short,
-                    useful_life=tco_info["useful_life"],
-                    procurement_cost=tco_info["procurement_cost"],
-                    cost_escalation=tco_info["cost_escalation"],
-                    average_electricity_consumption=energy_factor,
-                )
-            vehicle_type_params.append(vt_param)
-
-        # Build BatteryTypeTCOParameter list
-        battery_type_params: List[BatteryTypeTCOParameter] = []
-        for name_short, bt_info in bt_tco_params.items():
-            battery_type_params.append(
-                BatteryTypeTCOParameter(
-                    vehicle_name_short=name_short,
-                    procurement_cost=bt_info["procurement_cost"],
-                    useful_life=bt_info["useful_life"],
-                    cost_escalation=bt_info["cost_escalation"],
-                    specific_mass=bt_info.get("specific_mass"),
-                    chemistry=bt_info.get("chemistry"),
-                )
-            )
-
-        # Build ChargingPointTypeTCOParameter list
-        charging_point_type_params: List[ChargingPointTypeTCOParameter] = [
-            ChargingPointTypeTCOParameter(
-                type=cp["type"],
-                name=cp.get("name"),
-                procurement_cost=cp["procurement_cost"],
-                useful_life=cp["useful_life"],
-                cost_escalation=cp["cost_escalation"],
-            )
-            for cp in cp_type_params
-        ]
-
-        # Build ChargingInfrastructureTCOParameter list
-        charging_infra_params: List[ChargingInfrastructureTCOParameter] = [
-            ChargingInfrastructureTCOParameter(
-                type=infra["type"],
-                procurement_cost=infra["procurement_cost"],
-                useful_life=infra["useful_life"],
-                cost_escalation=infra["cost_escalation"],
-            )
-            for infra in infra_params
-        ]
-
-        # Build ScenarioTCOParameter with defaults
-        prefix = f"{self.__class__.__name__}"
-        electricity_cost: float = params.get(f"{prefix}.fuel_cost", 0.1794)
-        diesel_cost: float = params.get(f"{prefix}.diesel_fuel_cost", 1.50)
-        electricity_maint: float = params.get(f"{prefix}.maint_cost", 0.35)
-        diesel_maint: float = params.get(f"{prefix}.diesel_maint_cost", 0.45)
-        pef_fuel: float = params.get(f"{prefix}.pef_fuel", 0.038)
-        scenario_params = ScenarioTCOParameter(
-            project_duration=params.get(f"{prefix}.project_duration", 20),
-            interest_rate=params.get(f"{prefix}.interest_rate", 0.04),
-            inflation_rate=params.get(f"{prefix}.inflation_rate", 0.02),
-            staff_cost=params.get(f"{prefix}.staff_cost", 25.0),
-            fuel_cost={"electricity": electricity_cost, "diesel": diesel_cost},
-            vehicle_maint_cost={"electricity": electricity_maint, "diesel": diesel_maint},
-            infra_maint_cost=params.get(f"{prefix}.maint_infr_cost", 1000),
-            cost_escalation_rate={
-                "general": params.get(f"{prefix}.pef_general", 0.02),
-                "staff": params.get(f"{prefix}.pef_wages", 0.025),
-                "electricity": pef_fuel,
-                "diesel": pef_fuel,
-                "insurance": params.get(f"{prefix}.pef_insurance", 0.02),
-            },
-            insurance=params.get(f"{prefix}.insurance", 9693),
-            taxes=params.get(f"{prefix}.taxes", 278),
-        )
-
-        # Initialize TCO parameters in the (temporary) database
-        init_tco_parameters(
-            scenario=scenario,
-            scenario_params=scenario_params,
-            vehicle_type_params=vehicle_type_params,
-            battery_type_params=battery_type_params,
-            charging_point_type_params=charging_point_type_params,
-            charging_infra_params=charging_infra_params,
-        )
-
-        # Calculate TCO
-        tco_calculator = TCOCalculator(
-            scenario=scenario,
-            energy_consumption_mode="constant",
-        )
-        tco_result = tco_calculator.calculate()
-
-        # Get results and merge CHARGING_POINT into INFRASTRUCTURE (backwards compatibility)
-        result: Dict[str, Any] = dict(tco_result.tco_by_type)
-        result["INFRASTRUCTURE"] = result.get("INFRASTRUCTURE", 0.0) + result.get(
-            "CHARGING_POINT", 0.0
-        )
-        result.pop("CHARGING_POINT", None)
+        result: Dict[str, Any] = {cat.name: cost for cat, cost in per_revenue_km.items()}
 
         # Ensure all standard categories are present
-        for cat in self.COST_CATEGORIES:
-            if cat not in result:
-                result[cat] = 0.0
+        for cat_name in self.COST_CATEGORIES:
+            result.setdefault(cat_name, 0.0)
 
         result["scenario_name"] = scenario_name
 

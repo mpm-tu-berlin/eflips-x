@@ -33,6 +33,7 @@ from eflips.x.steps.analyzers import (
     RevenueServiceTimelineAnalyzer,
     SchedulingEfficiencyAnalyzer,
     TCOAnalyzer,
+    TCOConfigurator,
     VehicleTypeDepotPlotAnalyzer,
     merge_energy_consumption_results,
     merge_tco_results,
@@ -98,101 +99,6 @@ if REDUCED_DATA:
     WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvgmini"
 else:
     WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvg"
-
-
-# ============================================================================
-# TCO Configuration
-# ============================================================================
-
-# Per-vehicle-type TCO parameters for BVG fleet
-BVG_TCO_VEHICLE_TYPES: Dict[str, Any] = {
-    "EN": {"useful_life": 14, "procurement_cost": 580_000.0, "cost_escalation": 0.02},
-    "GN": {"useful_life": 14, "procurement_cost": 780_000.0, "cost_escalation": 0.02},
-    "DD": {"useful_life": 14, "procurement_cost": 780_000.0, "cost_escalation": 0.02},
-}
-
-# Per-vehicle-type battery TCO parameters (procurement_cost is EUR per kWh)
-BVG_TCO_BATTERY_TYPES: Dict[str, Any] = {
-    "EN": {
-        "name": "Ebusco 3.0 12 large battery",
-        "procurement_cost": 190,
-        "useful_life": 7,
-        "cost_escalation": -0.03,
-        "specific_mass": 0.1,
-        "chemistry": "NMC",
-    },
-    "GN": {
-        "name": "Solaris Urbino 18 large battery",
-        "procurement_cost": 190,
-        "useful_life": 7,
-        "cost_escalation": -0.03,
-        "specific_mass": 0.1,
-        "chemistry": "NMC",
-    },
-    "DD": {
-        "name": "Alexander Dennis Enviro500EV large battery",
-        "procurement_cost": 190,
-        "useful_life": 7,
-        "cost_escalation": -0.03,
-        "specific_mass": 0.1,
-        "chemistry": "NMC",
-    },
-}
-
-# Average-day energy consumption factors in kWh/km.
-# These are LOWER than the simulated worst-case consumption, because the simulation
-# plans for extreme conditions (e.g. -12C) while TCO should reflect average operations.
-BVG_TCO_ENERGY_CONSUMPTION_FACTORS: Dict[str, float] = {
-    "EN": 1.48,
-    "GN": 2.16,
-    "DD": 2.16,
-}
-
-BVG_TCO_CHARGING_POINT_TYPES: List[Dict[str, Any]] = [
-    {
-        "type": "depot",
-        "name": "Depot Charging Point",
-        "procurement_cost": 119_899.50,
-        "useful_life": 20,
-        "cost_escalation": 0.02,
-    },
-    {
-        "type": "opportunity",
-        "name": "Opportunity Charging Point",
-        "procurement_cost": 299_748.74,
-        "useful_life": 20,
-        "cost_escalation": 0.02,
-    },
-]
-
-BVG_TCO_CHARGING_INFRASTRUCTURE: List[Dict[str, Any]] = [
-    {
-        "type": "depot",
-        "name": "Depot Charging Infrastructure",
-        "procurement_cost": 2_397_989.95,
-        "useful_life": 20,
-        "cost_escalation": 0.02,
-    },
-    {
-        "type": "station",
-        "name": "Opportunity Charging Infrastructure",
-        "procurement_cost": 269_773.87,
-        "useful_life": 20,
-        "cost_escalation": 0.02,
-    },
-]
-
-
-def _bvg_tco_params() -> Dict[str, Any]:
-    """Return BVG-specific TCO parameters for the TCOAnalyzer."""
-    return {
-        "TCOAnalyzer.vehicle_type_tco_params": BVG_TCO_VEHICLE_TYPES,
-        "TCOAnalyzer.battery_type_tco_params": BVG_TCO_BATTERY_TYPES,
-        "TCOAnalyzer.energy_consumption_factor": BVG_TCO_ENERGY_CONSUMPTION_FACTORS,
-        "TCOAnalyzer.charging_point_type_params": BVG_TCO_CHARGING_POINT_TYPES,
-        "TCOAnalyzer.charging_infrastructure_params": BVG_TCO_CHARGING_INFRASTRUCTURE,
-        # Financial defaults from document_params() are used (matching BVG values)
-    }
 
 
 # ============================================================================
@@ -996,9 +902,16 @@ def bvg_three_scenario_flow() -> None:
         fig = visualize_electrified_termini_map(scenario_sessions)
     save_plot_to_files_in_output_dir(fig, "electrified_termini_map")
 
-    # TCO analysis (OU, DEP, TERM — DIESEL excluded as non-electric baseline)
+    # TCO analysis (OU, DEP, TERM — DIESEL excluded as non-electric baseline).
+    # TCOConfigurator writes the fleet topology + tco_parameters from the
+    # eflips-impact JSON files into the database, then TCOAnalyzer calculates.
+    tco_configurator = TCOConfigurator()
     tco_analyzer = TCOAnalyzer()
-    tco_params = _bvg_tco_params()
+    impact_dir = PROJECT_ROOT / "data" / "impact"
+    config_params = {
+        "TCOConfigurator.fleet_json": str(impact_dir / "fleet.json"),
+        "TCOConfigurator.tco_json": str(impact_dir / "tco.json"),
+    }
     tco_rows: List[pd.DataFrame] = []
     for scenario_name, db_path, work_dir in [
         ("OU", ou_db, WORK_DIR_BASE / "ou"),
@@ -1007,9 +920,11 @@ def bvg_three_scenario_flow() -> None:
     ]:
         ctx = PipelineContext(
             work_dir=work_dir,
-            params={**tco_params, "TCOAnalyzer.scenario_name": scenario_name},
+            params={**config_params, "TCOAnalyzer.scenario_name": scenario_name},
             current_db=db_path,
         )
+        # Configure (Modifier, chains ctx.current_db) then calculate (Analyzer).
+        tco_configurator.execute(context=ctx)
         row = cast(pd.DataFrame, tco_analyzer.execute(context=ctx))
         tco_rows.append(row)
 
