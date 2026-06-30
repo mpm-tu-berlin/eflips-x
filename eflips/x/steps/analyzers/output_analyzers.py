@@ -834,7 +834,7 @@ class LCAAnalyzer(Analyzer):
         "USE_PHASE",
     ]
     SCOPE_NAMES = {
-        "PRODUCTION_AND_EOL": "Production & End-of-Life",
+        "PRODUCTION_AND_EOL": "Production and End-of-Life",
         "USE_PHASE": "Use Phase",
     }
 
