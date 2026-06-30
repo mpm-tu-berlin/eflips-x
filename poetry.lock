@@ -1382,14 +1382,14 @@ xsdata = {version = ">=24.1,<25.0", extras = ["cli", "lxml"]}
 
 [[package]]
 name = "eflips-model"
-version = "11.1.0"
+version = "11.2.0"
 description = "A common data model for the eflips family of electric vehicle simulation & optimization tools."
 optional = false
 python-versions = "<4.0,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_model-11.1.0-py3-none-any.whl", hash = "sha256:0ba013e684d04b366dbe9199e8c42c7a49d3e20b485dcfa8d5bb6ad6fc817dae"},
-    {file = "eflips_model-11.1.0.tar.gz", hash = "sha256:4b33c03b79f4f5c88bf329036714fb604daa2c8a14c6c12bc80e02fe8edb76b0"},
+    {file = "eflips_model-11.2.0-py3-none-any.whl", hash = "sha256:8dd4f6b132e86eb4282a8017313c7f5701deb272df581937fd82f1feec95edc3"},
+    {file = "eflips_model-11.2.0.tar.gz", hash = "sha256:75c19cb676cd5bb778b4d886349a37198026302f6a596108519623d5e2789296"},
 ]
 
 [package.dependencies]
@@ -6840,4 +6840,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "de787a005a3888483450990d6f9ec0b9872c736cf8335e8ecad14364dd78487d"
+content-hash = "a4a6c5ae48f00e0b414c2f9639787cf0cdc9d9afabc03e8038dc64c3e698b960"
