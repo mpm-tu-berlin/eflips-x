@@ -19,6 +19,7 @@ import sqlalchemy
 from eflips.eval.output import prepare as eval_output_prepare
 from eflips.eval.output import visualize as eval_output_visualize
 from eflips.eval.output.prepare import depot_layout
+from eflips.impact.lca import calculate_lca  # type: ignore[import-untyped]
 from eflips.impact.tco import calculate_tco, init_tco_params  # type: ignore[import-untyped]
 from eflips.impact.utils import complete_fleet  # type: ignore[import-untyped]
 from eflips.model import (
@@ -646,82 +647,6 @@ Example: `params["{cls.__name__}.scenario_ids"] = [1, 2]`
         )
 
 
-class TCOConfigurator(Modifier):
-    """
-    Modifier that writes the eflips-impact fleet topology and TCO parameters into
-    the database, so that a downstream :class:`TCOAnalyzer` can compute the TCO.
-
-    Two JSON files drive it, with paths passed via the pipeline parameters
-    ``TCOConfigurator.fleet_json`` and ``TCOConfigurator.tco_json`` (set by the
-    calling flow, e.g. pointing at ``data/impact/fleet.json`` and
-    ``data/impact/tco.json``):
-
-    - the fleet JSON defines the fleet topology: which BatteryType /
-      ChargingPointType rows exist and how they map to vehicle types and charging
-      locations. Applied via :func:`eflips.impact.utils.complete_fleet` with
-      ``delete_existing_data=True``, so any pre-existing topology rows are rebuilt
-      to match the JSON (and re-written by the installed eflips-model, avoiding
-      stale encodings).
-    - the TCO JSON defines the financial parameters (scenario, vehicle types,
-      battery types, charging point types, charging infrastructure). Applied via
-      :func:`eflips.impact.tco.init_tco_params`.
-
-    Because it writes to the database, this is a Modifier: the changes are
-    committed and chained into the next pipeline database.
-    """
-
-    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
-        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
-
-    @classmethod
-    def document_params(cls) -> Dict[str, str]:
-        return {
-            f"{cls.__name__}.fleet_json": (
-                "Path to the eflips-impact fleet topology JSON (battery_types + "
-                "charging_point_types), applied via complete_fleet. Required."
-            ),
-            f"{cls.__name__}.tco_json": (
-                "Path to the eflips-impact TCO parameter JSON (scenario, vehicle_types, "
-                "battery_types, charging_point_types, charging_infrastructure), applied "
-                "via init_tco_params. Required."
-            ),
-        }
-
-    def modify(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
-        """
-        Write the fleet topology and TCO parameters into the database.
-
-        Args:
-            session: SQLAlchemy session connected to the eflips-model database.
-            params: Pipeline parameters including ``TCOConfigurator.fleet_json``
-                and ``TCOConfigurator.tco_json``.
-        """
-        scenario = session.query(Scenario).one()
-
-        fleet_json_param = params.get(f"{self.__class__.__name__}.fleet_json")
-        tco_json_param = params.get(f"{self.__class__.__name__}.tco_json")
-        if not fleet_json_param or not tco_json_param:
-            raise ValueError(
-                f"{self.__class__.__name__} requires the "
-                f"'{self.__class__.__name__}.fleet_json' and "
-                f"'{self.__class__.__name__}.tco_json' parameters (paths to the "
-                "eflips-impact fleet and TCO parameter JSON files)."
-            )
-
-        # Rebuild the fleet topology from fleet.json (delete + recreate) so the
-        # BatteryType / ChargingPointType rows match the JSON and are re-written
-        # by the installed eflips-model.
-        complete_fleet(
-            scenario=scenario,
-            json_path=Path(fleet_json_param),
-            delete_existing_data=True,
-        )
-
-        # Write tco_parameters onto scenario / vehicle types / battery types /
-        # charging point types / stations.
-        init_tco_params(scenario=scenario, json_path=Path(tco_json_param))
-
-
 class TCOAnalyzer(Analyzer):
     """
     Analyzer that calculates Total Cost of Ownership (TCO) using eflips-impact.
@@ -862,6 +787,222 @@ def merge_tco_results(results: List[pd.DataFrame]) -> pd.DataFrame:
 
     Args:
         results: List of single-row DataFrames from TCOAnalyzer.analyze()
+
+    Returns:
+        Combined DataFrame with all scenarios
+    """
+    return pd.concat(results, ignore_index=True)
+
+
+class LCAAnalyzer(Analyzer):
+    """
+    Analyzer that calculates a Life Cycle Assessment (LCA) using eflips-impact.
+
+    Computes the global-warming potential (GWP, kg CO₂-eq) normalized to GWP
+    per revenue-km, broken down two ways:
+
+    - by component type (vehicle, battery, infrastructure, energy), and
+    - by lifecycle scope (production & end-of-life, use phase).
+
+    Both breakdowns sum to the same fleet total. Two separate stacked-bar
+    plots are produced via :meth:`visualize_by_type` and
+    :meth:`visualize_by_scope`; the :attr:`VISUALIZERS` map lets a flow save
+    each to its own file.
+
+    This analyzer only reads the database: the fleet topology and
+    ``lca_parameters`` it depends on must already be present, written by
+    :class:`LCAConfigurator`. Run ``LCAConfigurator`` before this analyzer.
+    """
+
+    # ItemType enum member names produced by eflips-impact's LCA calculator.
+    IMPACT_CATEGORIES = [
+        "VEHICLE",
+        "BATTERY",
+        "INFRASTRUCTURE",
+        "ENERGY",
+    ]
+    CATEGORY_NAMES = {
+        "VEHICLE": "Vehicle",
+        "BATTERY": "Battery",
+        "INFRASTRUCTURE": "Infrastructure",
+        "ENERGY": "Energy",
+    }
+
+    # LCAScope enum member names produced by eflips-impact's LCA calculator.
+    SCOPE_CATEGORIES = [
+        "PRODUCTION_AND_EOL",
+        "USE_PHASE",
+    ]
+    SCOPE_NAMES = {
+        "PRODUCTION_AND_EOL": "Production & End-of-Life",
+        "USE_PHASE": "Use Phase",
+    }
+
+    # Maps an output-file suffix to the visualize method that produces it, so a
+    # flow can save each breakdown to its own file (e.g. ``lca_by_type.html``
+    # and ``lca_by_scope.html``).
+    VISUALIZERS = {
+        "by_type": "visualize_by_type",
+        "by_scope": "visualize_by_scope",
+    }
+
+    def __init__(self, code_version: str = "v1.1.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.scenario_name": (
+                "Display name for this scenario in output. "
+                "Falls back to Scenario.name from the database."
+            ),
+        }
+
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
+        """
+        Calculate the LCA for the scenario in the database.
+
+        Runs the eflips-impact LCA calculator against the already-configured
+        database. The fleet topology and ``lca_parameters`` must have been
+        written by :class:`LCAConfigurator` beforehand.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database
+            params: Pipeline parameters including ``LCAAnalyzer.scenario_name``
+
+        Returns:
+            Single-row DataFrame with columns: scenario_name + one column per
+            component type (VEHICLE, BATTERY, INFRASTRUCTURE, ENERGY) + one
+            column per lifecycle scope (PRODUCTION_AND_EOL, USE_PHASE). Values
+            are GWP in kg CO₂-eq per revenue-km.
+        """
+        scenario = session.query(Scenario).one()
+
+        scenario_name: str = params.get(f"{self.__class__.__name__}.scenario_name", "")
+        if not scenario_name:
+            scenario_name = scenario.name or "Unknown"
+
+        # Calculate the LCA (GWP per revenue-km), broken down by component type
+        # and by lifecycle scope.
+        lca_result = calculate_lca(scenario=scenario)
+
+        result: Dict[str, Any] = {
+            item_type.name: impact_vector.gwp
+            for item_type, impact_vector in lca_result.emissions_by_type.items()
+        }
+        result.update(
+            {
+                scope.name: impact_vector.gwp
+                for scope, impact_vector in lca_result.emissions_by_scope.items()
+            }
+        )
+
+        # Ensure all standard categories are present
+        for cat_name in self.IMPACT_CATEGORIES + self.SCOPE_CATEGORIES:
+            result.setdefault(cat_name, 0.0)
+
+        result["scenario_name"] = scenario_name
+
+        return pd.DataFrame([result])
+
+    @staticmethod
+    def _stacked_bar_figure(
+        prepared_data: pd.DataFrame,
+        categories: List[str],
+        labels: Dict[str, str],
+    ) -> go.Figure:
+        """
+        Build a stacked-bar figure of GWP per revenue-km for one breakdown.
+
+        Args:
+            prepared_data: DataFrame with a 'scenario_name' column and one
+                column per category.
+            categories: Category column names to stack (in stacking order).
+            labels: Mapping from category column name to display name.
+
+        Returns:
+            Plotly figure object with one stacked bar per scenario and a total
+            annotation on top of each bar.
+        """
+        present = [c for c in categories if c in prepared_data.columns]
+
+        fig = go.Figure()
+        for cat in present:
+            fig.add_trace(
+                go.Bar(
+                    name=labels.get(cat, cat),
+                    x=prepared_data["scenario_name"],
+                    y=prepared_data[cat],
+                    text=[f"{v:.3f}" for v in prepared_data[cat]],
+                    textposition="inside",
+                )
+            )
+
+        if present:
+            totals = prepared_data[present].sum(axis=1)
+            for scenario, total in zip(prepared_data["scenario_name"], totals):
+                fig.add_annotation(
+                    x=scenario,
+                    y=total,
+                    text=f"<b>{total:.3f}</b>",
+                    showarrow=False,
+                    yshift=10,
+                    font=dict(size=12),
+                )
+
+        fig.update_layout(
+            barmode="stack",
+            yaxis_title="GWP [kg CO₂-eq / revenue-km]",
+            xaxis_title="",
+            showlegend=True,
+            legend_title="",
+        )
+
+        return fig
+
+    @staticmethod
+    def visualize_by_type(prepared_data: pd.DataFrame) -> go.Figure:
+        """
+        Create a stacked bar plot of GWP per revenue-km by component type.
+
+        Args:
+            prepared_data: DataFrame from analyze() or merged results from
+                          merge_lca_results(). Must have a 'scenario_name' column
+                          and the component-type columns.
+
+        Returns:
+            Plotly figure object.
+        """
+        return LCAAnalyzer._stacked_bar_figure(
+            prepared_data, LCAAnalyzer.IMPACT_CATEGORIES, LCAAnalyzer.CATEGORY_NAMES
+        )
+
+    @staticmethod
+    def visualize_by_scope(prepared_data: pd.DataFrame) -> go.Figure:
+        """
+        Create a stacked bar plot of GWP per revenue-km by lifecycle scope.
+
+        Args:
+            prepared_data: DataFrame from analyze() or merged results from
+                          merge_lca_results(). Must have a 'scenario_name' column
+                          and the lifecycle-scope columns.
+
+        Returns:
+            Plotly figure object.
+        """
+        return LCAAnalyzer._stacked_bar_figure(
+            prepared_data, LCAAnalyzer.SCOPE_CATEGORIES, LCAAnalyzer.SCOPE_NAMES
+        )
+
+
+def merge_lca_results(results: List[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Merge multiple single-scenario LCA result DataFrames.
+
+    Args:
+        results: List of single-row DataFrames from LCAAnalyzer.analyze()
 
     Returns:
         Combined DataFrame with all scenarios

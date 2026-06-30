@@ -8,6 +8,7 @@ such as removing unused routes, lines, and stations from a scenario.
 import logging
 import warnings
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,11 @@ from eflips.model import (
     ConsumptionLut,
     VehicleClass,
 )
+
+from eflips.impact.utils import complete_fleet  # type: ignore[import-untyped]
+from eflips.impact.tco import init_tco_params  # type: ignore[import-untyped]
+from eflips.impact.lca import init_lca_params  # type: ignore[import-untyped]
+
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import Modifier
@@ -708,3 +714,202 @@ class RemoveConsumptionLuts(Modifier):
         session.flush()
 
         return None
+
+
+class CompleteFleet(Modifier):
+    """
+    Complete the fleet topology in the database based on a JSON file.
+
+    This modifier reads a fleet topology JSON file and applies it to the database,
+    ensuring that the BatteryType and ChargingPointType rows match the JSON definition.
+    It can optionally delete existing data before applying the new topology.
+
+    The fleet JSON defines the fleet topology: which BatteryType / ChargingPointType
+    rows exist and how they map to vehicle types and charging locations. Applied via
+    :func:`eflips.impact.utils.complete_fleet` with ``delete_existing_data=True``,
+    so any pre-existing topology rows are rebuilt to match the JSON (and re-written by
+    the installed eflips-model, avoiding stale encodings).
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.fleet_json": (
+                "Path to the eflips-impact fleet topology JSON (battery_types + "
+                "charging_point_types), applied via complete_fleet. Required."
+            ),
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Complete the fleet topology in the database based on a JSON file.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters including ``CompleteFleet.fleet_json``.
+
+        Raises:
+            ValueError: If the required parameter is missing or if there is not exactly one scenario.
+        """
+        scenario = session.query(Scenario).one()
+
+        fleet_json_param = params.get(f"{self.__class__.__name__}.fleet_json")
+        if not fleet_json_param:
+            raise ValueError(
+                f"{self.__class__.__name__} requires the "
+                f"'{self.__class__.__name__}.fleet_json' parameter (path to the "
+                "eflips-impact fleet topology JSON file)."
+            )
+
+        # Rebuild the fleet topology from fleet.json (delete + recreate) so the
+        # BatteryType / ChargingPointType rows match the JSON and are re-written
+        # by the installed eflips-model.
+        complete_fleet(
+            scenario=scenario,
+            json_path=Path(fleet_json_param),
+            delete_existing_data=True,
+        )
+
+
+class TCOConfigurator(Modifier):
+    """
+    Modifier that writes the eflips-impact fleet topology and TCO parameters into
+    the database, so that a downstream :class:`TCOAnalyzer` can compute the TCO.
+
+    Two JSON files drive it, with paths passed via the pipeline parameters
+    ``TCOConfigurator.fleet_json`` and ``TCOConfigurator.tco_json`` (set by the
+    calling flow, e.g. pointing at ``data/impact/fleet.json`` and
+    ``data/impact/tco.json``):
+
+    - the fleet JSON defines the fleet topology: which BatteryType /
+      ChargingPointType rows exist and how they map to vehicle types and charging
+      locations. Applied via :func:`eflips.impact.utils.complete_fleet` with
+      ``delete_existing_data=True``, so any pre-existing topology rows are rebuilt
+      to match the JSON (and re-written by the installed eflips-model, avoiding
+      stale encodings).
+    - the TCO JSON defines the financial parameters (scenario, vehicle types,
+      battery types, charging point types, charging infrastructure). Applied via
+      :func:`eflips.impact.tco.init_tco_params`.
+
+    Because it writes to the database, this is a Modifier: the changes are
+    committed and chained into the next pipeline database.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.fleet_json": (
+                "Path to the eflips-impact fleet topology JSON (battery_types + "
+                "charging_point_types), applied via complete_fleet. Required."
+            ),
+            f"{cls.__name__}.tco_json": (
+                "Path to the eflips-impact TCO parameter JSON (scenario, vehicle_types, "
+                "battery_types, charging_point_types, charging_infrastructure), applied "
+                "via init_tco_params. Required."
+            ),
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Write the fleet topology and TCO parameters into the database.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters including ``TCOConfigurator.fleet_json``
+                and ``TCOConfigurator.tco_json``.
+        """
+        scenario = session.query(Scenario).one()
+
+        tco_json_param = params.get(f"{self.__class__.__name__}.tco_json")
+        if not tco_json_param:
+            raise ValueError(
+                f"'{self.__class__.__name__}.tco_json' parameters (paths to the "
+                "eflips-impact fleet and TCO parameter JSON files)."
+            )
+
+        # Write tco_parameters onto scenario / vehicle types / battery types /
+        # charging point types / stations.
+        init_tco_params(scenario=scenario, json_path=Path(tco_json_param))
+
+
+class LCAConfigurator(Modifier):
+    """
+    Modifier that writes the eflips-impact LCA parameters into the database, so
+    that a downstream :class:`LCAAnalyzer` can compute the life-cycle assessment.
+
+    Two JSON files drive it, with paths passed via the pipeline parameters
+    ``LCAConfigurator.lca_json`` and ``LCAConfigurator.lca_overrides_json`` (set by
+    the calling flow, e.g. pointing at ``data/input/impact/lca.json`` and
+    ``data/input/impact/lca_overrides.json``):
+
+    - the LCA JSON is an openLCA emission-factor export defining the impact
+      vectors for the materials and processes used in the assessment.
+    - the LCA overrides JSON defines the per-scenario overrides (per-vehicle-type
+      parameters and charging-point-type infrastructure parameters).
+
+    Both are applied via :func:`eflips.impact.lca.init_lca_params`, which writes
+    ``VehicleTypeLCAParams``, ``BatteryTypeLCAParams`` and
+    ``ChargingPointTypeLCAParams`` onto the corresponding entities.
+
+    This depends on the fleet topology (BatteryType / ChargingPointType rows)
+    already being present, so run :class:`CompleteFleet` before it.
+
+    Because it writes to the database, this is a Modifier: the changes are
+    committed and chained into the next pipeline database.
+    """
+
+    def __init__(self, code_version: str = "v1.0.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.lca_json": (
+                "Path to the eflips-impact LCA openLCA emission-factor JSON, applied "
+                "via init_lca_params. Required."
+            ),
+            f"{cls.__name__}.lca_overrides_json": (
+                "Path to the eflips-impact per-scenario LCA overrides JSON "
+                "(vehicle_type_overrides + charging-point infrastructure params), "
+                "applied via init_lca_params. Required."
+            ),
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Write the LCA parameters into the database.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters including ``LCAConfigurator.lca_json``
+                and ``LCAConfigurator.lca_overrides_json``.
+
+        Raises:
+            ValueError: If either required parameter is missing.
+        """
+        scenario = session.query(Scenario).one()
+
+        lca_json_param = params.get(f"{self.__class__.__name__}.lca_json")
+        lca_overrides_json_param = params.get(f"{self.__class__.__name__}.lca_overrides_json")
+        if not lca_json_param or not lca_overrides_json_param:
+            raise ValueError(
+                f"{self.__class__.__name__} requires the "
+                f"'{self.__class__.__name__}.lca_json' and "
+                f"'{self.__class__.__name__}.lca_overrides_json' parameters (paths "
+                "to the eflips-impact LCA parameter JSON files)."
+            )
+
+        # Write lca_parameters onto scenario / vehicle types / battery types /
+        # charging point types.
+        init_lca_params(
+            scenario=scenario,
+            lca_json_path=Path(lca_json_param),
+            overrides_json_path=Path(lca_overrides_json_param),
+        )
