@@ -62,6 +62,8 @@ from eflips.x.steps.modifiers.bvg_tools import (
 from eflips.x.steps.modifiers.general_utilities import (
     AddTemperatures,
     CalculateConsumptionScaling,
+    CompleteFleet,
+    CreateDieselVehicleTypes,
     LCAConfigurator,
     RemoveConsumptionLuts,
     RemoveUnusedData,
@@ -104,6 +106,21 @@ if REDUCED_DATA:
     WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvgmini"
 else:
     WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvg"
+
+# Directory holding the eflips-impact parameter JSONs (fleet topology, TCO, LCA).
+IMPACT_DATA_DIR = PROJECT_ROOT / "data" / "input" / "impact"
+
+# Scenario ordering / display names / baseline for multi-scenario visualizations.
+SCENARIO_DISPLAY_CONFIG = ScenarioDisplayConfig(
+    order=["OU", "DEP", "TERM", "DIESEL"],
+    display_names={
+        "OU": "Original Blocks",
+        "DEP": "Depot Charging Only",
+        "TERM": "Small Batteries, Termini",
+        "DIESEL": "Diesel Baseline",
+    },
+    baseline="DIESEL",
+)
 
 
 # ============================================================================
@@ -797,10 +814,15 @@ def run_diesel_scenario(finished_ou_db: Path) -> Path:
     context = PipelineContext(work_dir=work_dir, params=params)
     CopyCreator(input_files=[finished_ou_db]).execute(context=context)
 
-    # Run diesel-specific steps
+    # Run diesel-specific steps. CreateDieselVehicleTypes adds a diesel counterpart
+    # for every electric vehicle type; VehicleTypeBlockAssignment (no block_ids set)
+    # then reassigns every rotation to its diesel counterpart for the diesel
+    # reference scenario.
     steps = [
         CleanSimulationResults(),  # Clean up previous simulation results
         RemoveConsumptionLuts(),  # Remove LUTs and set minimal consumption
+        CreateDieselVehicleTypes(),  # Create diesel vehicle types
+        VehicleTypeBlockAssignment(),  # Reassign all rotations to diesel types
         DepotGenerator(),
         Simulation(),
     ]
@@ -940,16 +962,7 @@ def bvg_three_scenario_flow() -> None:
     """
     logger.info("Starting BVG three-scenario flow...")
 
-    scenario_config = ScenarioDisplayConfig(
-        order=["OU", "DEP", "TERM", "DIESEL"],
-        display_names={
-            "OU": "Original Blocks",
-            "DEP": "Depot Charging Only",
-            "TERM": "Small Batteries, Termini",
-            "DIESEL": "Diesel Baseline",
-        },
-        baseline="DIESEL",
-    )
+    scenario_config = SCENARIO_DISPLAY_CONFIG
 
     # Phase 1: Common pipeline (sequential)
     common_db = run_common_pipeline()
@@ -1058,4 +1071,5 @@ def bvg_three_scenario_flow() -> None:
 # ============================================================================
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     bvg_three_scenario_flow()

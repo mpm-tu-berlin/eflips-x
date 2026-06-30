@@ -23,6 +23,7 @@ from eflips.model import (
     VehicleType,
     ConsumptionLut,
     VehicleClass,
+    EnergySource,
 )
 
 from eflips.impact.utils import complete_fleet  # type: ignore[import-untyped]
@@ -913,3 +914,249 @@ class LCAConfigurator(Modifier):
             lca_json_path=Path(lca_json_param),
             overrides_json_path=Path(lca_overrides_json_param),
         )
+
+
+class CreateDieselVehicleTypes(Modifier):
+    """
+    Create a diesel counterpart for every electric vehicle type in the scenario.
+
+    Ported from the bus-type-creation half of
+    :class:`eflips.x.transition_plan.multi_stage_simulation.CreateHybridFleet`: a
+    diesel :class:`~eflips.model.VehicleType` is created for every
+    ``EnergySource.BATTERY_ELECTRIC`` vehicle type, using the
+    ``"Diesel {name}"`` / ``"Diesel {name_short}"`` naming convention. Diesel
+    vehicle types get near-zero consumption and ``energy_source=EnergySource.DIESEL``.
+
+    Unlike ``CreateHybridFleet`` this step does **not** reassign any blocks
+    (rotations); it only creates the vehicle-type records. Block reassignment is
+    left to :class:`VehicleTypeBlockAssignment`, which recovers the diesel
+    counterparts from the database via the same ``name_short`` naming convention --
+    so no mapping has to be passed between the two steps.
+
+    Idempotent: a diesel vehicle type whose ``name_short`` already exists in the
+    scenario is reused, never duplicated.
+    """
+
+    DIESEL_PREFIX = "Diesel "
+    DIESEL_CONSUMPTION = 0.0001  # Near-zero consumption for diesel simulation (kWh/km)
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        """This modifier has no configurable parameters."""
+        return {}
+
+    def _create_diesel_vehicle_type(
+        self, session: Session, electric_type: VehicleType, scenario: Scenario
+    ) -> VehicleType:
+        """Create a diesel version of an electric vehicle type."""
+        diesel_type = VehicleType(
+            scenario=scenario,
+            name=f"{self.DIESEL_PREFIX}{electric_type.name}",
+            name_short=f"{self.DIESEL_PREFIX}{electric_type.name_short}",
+            battery_capacity=electric_type.battery_capacity,
+            charging_curve=electric_type.charging_curve,
+            opportunity_charging_capable=electric_type.opportunity_charging_capable,
+            consumption=self.DIESEL_CONSUMPTION,
+            battery_capacity_reserve=electric_type.battery_capacity_reserve,
+            minimum_charging_power=electric_type.minimum_charging_power,
+            charging_efficiency=electric_type.charging_efficiency,
+            energy_source=EnergySource.DIESEL,
+            empty_mass=electric_type.empty_mass,
+            allowed_mass=electric_type.allowed_mass,
+        )
+        session.add(diesel_type)
+        return diesel_type
+
+    def _electric_vehicle_types(self, session: Session, scenario: Scenario) -> List[VehicleType]:
+        """Return the scenario's electric vehicle types.
+
+        If none are found, vehicle types without an energy source are first
+        promoted to ``BATTERY_ELECTRIC`` (matching ``CreateHybridFleet``), so that
+        databases that never set ``energy_source`` still get diesel counterparts.
+        """
+        electric_types = (
+            session.query(VehicleType)
+            .filter(
+                VehicleType.scenario_id == scenario.id,
+                VehicleType.energy_source == EnergySource.BATTERY_ELECTRIC,
+            )
+            .all()
+        )
+        if electric_types:
+            return electric_types
+
+        self.logger.warning(
+            "No electric vehicle types found in scenario %s; promoting vehicle types "
+            "without an energy source to BATTERY_ELECTRIC.",
+            scenario.id,
+        )
+        for vt in (
+            session.query(VehicleType)
+            .filter(
+                VehicleType.scenario_id == scenario.id,
+                VehicleType.energy_source.is_(None),
+            )
+            .all()
+        ):
+            vt.energy_source = EnergySource.BATTERY_ELECTRIC
+        session.flush()
+        session.expire_all()
+
+        return (
+            session.query(VehicleType)
+            .filter(
+                VehicleType.scenario_id == scenario.id,
+                VehicleType.energy_source == EnergySource.BATTERY_ELECTRIC,
+            )
+            .all()
+        )
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Create a diesel counterpart for every electric vehicle type.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters (unused by this step).
+        """
+        scenario = session.query(Scenario).one()
+        electric_types = self._electric_vehicle_types(session, scenario)
+
+        created = 0
+        for electric_type in electric_types:
+            diesel_short = f"{self.DIESEL_PREFIX}{electric_type.name_short}"
+            existing = (
+                session.query(VehicleType)
+                .filter(
+                    VehicleType.scenario_id == scenario.id,
+                    VehicleType.name_short == diesel_short,
+                )
+                .one_or_none()
+            )
+            if existing is None:
+                self._create_diesel_vehicle_type(session, electric_type, scenario)
+                created += 1
+
+        session.flush()
+        self.logger.info(
+            "CreateDieselVehicleTypes: %d electric vehicle type(s); created %d diesel "
+            "counterpart(s) (others already existed).",
+            len(electric_types),
+            created,
+        )
+
+
+class VehicleTypeBlockAssignment(Modifier):
+    """
+    Reassign a set of blocks (rotations) to their diesel vehicle-type counterparts.
+
+    The diesel vehicle types must already exist in the database (created by
+    :class:`CreateDieselVehicleTypes`). Their correspondence to the electric vehicle
+    types is recovered directly from the database via the ``"Diesel {name_short}"``
+    naming convention -- no mapping is passed between steps.
+
+    For each target rotation, the rotation's current (electric) vehicle type is
+    looked up by ``name_short`` and the rotation is reassigned to the matching
+    ``"Diesel {name_short}"`` vehicle type. Rotations already pointing at a diesel
+    vehicle type are skipped; a rotation whose electric vehicle type has no diesel
+    counterpart raises :class:`ValueError`.
+    """
+
+    DIESEL_PREFIX = CreateDieselVehicleTypes.DIESEL_PREFIX
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary describing the configurable parameter.
+        """
+        return {
+            f"{cls.__name__}.block_ids": """
+            Optional list of Rotation (block) ids to reassign to their diesel
+            vehicle-type counterpart. When omitted or None, ALL rotations in the
+            scenario are reassigned (the diesel-reference scenario). An explicit
+            list reassigns only those rotations; an empty list is a no-op.
+            Default: None (reassign all rotations)
+            Type: Optional[List[int]]
+            """,
+        }
+
+    def _diesel_types_by_source_short(
+        self, session: Session, scenario: Scenario
+    ) -> Dict[str, VehicleType]:
+        """Map each electric VT's ``name_short`` to its diesel counterpart.
+
+        Recovers the mapping created by :class:`CreateDieselVehicleTypes` from the
+        database: every vehicle type whose ``name_short`` starts with the
+        ``"Diesel "`` prefix is keyed by the stripped (electric) ``name_short``.
+        """
+        diesel_types: Dict[str, VehicleType] = {}
+        for vt in session.query(VehicleType).filter(VehicleType.scenario_id == scenario.id).all():
+            if vt.name_short and vt.name_short.startswith(self.DIESEL_PREFIX):
+                source_short = vt.name_short[len(self.DIESEL_PREFIX) :]
+                diesel_types[source_short] = vt
+        return diesel_types
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Reassign the requested rotations to their diesel vehicle types.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters including the optional
+                ``VehicleTypeBlockAssignment.block_ids`` list.
+
+        Raises:
+            ValueError: If no diesel vehicle types are present (run
+                :class:`CreateDieselVehicleTypes` first), or if a target rotation's
+                vehicle type has no diesel counterpart.
+        """
+        scenario = session.query(Scenario).one()
+
+        diesel_types = self._diesel_types_by_source_short(session, scenario)
+        if not diesel_types:
+            raise ValueError(
+                "No diesel vehicle types found. Run CreateDieselVehicleTypes before "
+                "VehicleTypeBlockAssignment."
+            )
+
+        block_ids = params.get(f"{self.__class__.__name__}.block_ids", None)
+        query = session.query(Rotation).filter(Rotation.scenario_id == scenario.id)
+        if block_ids is None:
+            rotations = query.all()
+            self.logger.info("Reassigning all %d rotation(s) to diesel.", len(rotations))
+        else:
+            rotations = query.filter(Rotation.id.in_(block_ids)).all()
+            self.logger.info(
+                "Reassigning %d of %d requested rotation(s) to diesel.",
+                len(rotations),
+                len(block_ids),
+            )
+
+        reassigned = 0
+        for rotation in rotations:
+            current = rotation.vehicle_type
+            if current.name_short and current.name_short.startswith(self.DIESEL_PREFIX):
+                continue  # already diesel
+            if current.name_short not in diesel_types:
+                raise ValueError(
+                    f"No diesel counterpart for vehicle type '{current.name_short}'. "
+                    f"Available: {sorted(diesel_types.keys())}"
+                )
+            rotation.vehicle_type = diesel_types[current.name_short]
+            reassigned += 1
+
+        session.flush()
+        self.logger.info("Reassigned %d rotation(s) to diesel vehicle types.", reassigned)
