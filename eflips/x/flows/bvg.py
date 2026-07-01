@@ -29,12 +29,14 @@ from eflips.x.framework import Modifier
 from eflips.x.framework import PipelineContext, PipelineStep, ScenarioDisplayConfig
 from eflips.x.steps.analyzers import (
     GeographicTripPlotAnalyzer,
+    LCAAnalyzer,
     PowerAndOccupancyAnalyzer,
     RevenueServiceTimelineAnalyzer,
     SchedulingEfficiencyAnalyzer,
     TCOAnalyzer,
     VehicleTypeDepotPlotAnalyzer,
     merge_energy_consumption_results,
+    merge_lca_results,
     merge_tco_results,
 )
 from eflips.x.steps.analyzers.bvg_tools import (
@@ -43,6 +45,7 @@ from eflips.x.steps.analyzers.bvg_tools import (
     ScenarioComparisonAnalyzer,
     merge_scenario_comparisons,
     visualize_depot_and_terminus_power,
+    visualize_lca_comparison,
     visualize_power_comparison,
     visualize_electrified_termini_map,
     visualize_routes_by_depot_cartopy,
@@ -59,8 +62,13 @@ from eflips.x.steps.modifiers.bvg_tools import (
 from eflips.x.steps.modifiers.general_utilities import (
     AddTemperatures,
     CalculateConsumptionScaling,
+    CompleteFleet,
+    CreateDieselVehicleTypes,
+    LCAConfigurator,
     RemoveConsumptionLuts,
     RemoveUnusedData,
+    TCOConfigurator,
+    VehicleTypeBlockAssignment,
 )
 from eflips.x.steps.modifiers.scheduling import (
     DepotAssignment,
@@ -99,100 +107,20 @@ if REDUCED_DATA:
 else:
     WORK_DIR_BASE = PROJECT_ROOT / "data" / "cache" / "bvg"
 
+# Directory holding the eflips-impact parameter JSONs (fleet topology, TCO, LCA).
+IMPACT_DATA_DIR = PROJECT_ROOT / "data" / "input" / "impact"
 
-# ============================================================================
-# TCO Configuration
-# ============================================================================
-
-# Per-vehicle-type TCO parameters for BVG fleet
-BVG_TCO_VEHICLE_TYPES: Dict[str, Any] = {
-    "EN": {"useful_life": 14, "procurement_cost": 580_000.0, "cost_escalation": 0.02},
-    "GN": {"useful_life": 14, "procurement_cost": 780_000.0, "cost_escalation": 0.02},
-    "DD": {"useful_life": 14, "procurement_cost": 780_000.0, "cost_escalation": 0.02},
-}
-
-# Per-vehicle-type battery TCO parameters (procurement_cost is EUR per kWh)
-BVG_TCO_BATTERY_TYPES: Dict[str, Any] = {
-    "EN": {
-        "name": "Ebusco 3.0 12 large battery",
-        "procurement_cost": 190,
-        "useful_life": 7,
-        "cost_escalation": -0.03,
-        "specific_mass": 0.1,
-        "chemistry": "NMC",
+# Scenario ordering / display names / baseline for multi-scenario visualizations.
+SCENARIO_DISPLAY_CONFIG = ScenarioDisplayConfig(
+    order=["OU", "DEP", "TERM", "DIESEL"],
+    display_names={
+        "OU": "Original Blocks",
+        "DEP": "Depot Charging Only",
+        "TERM": "Small Batteries, Termini",
+        "DIESEL": "Diesel Baseline",
     },
-    "GN": {
-        "name": "Solaris Urbino 18 large battery",
-        "procurement_cost": 190,
-        "useful_life": 7,
-        "cost_escalation": -0.03,
-        "specific_mass": 0.1,
-        "chemistry": "NMC",
-    },
-    "DD": {
-        "name": "Alexander Dennis Enviro500EV large battery",
-        "procurement_cost": 190,
-        "useful_life": 7,
-        "cost_escalation": -0.03,
-        "specific_mass": 0.1,
-        "chemistry": "NMC",
-    },
-}
-
-# Average-day energy consumption factors in kWh/km.
-# These are LOWER than the simulated worst-case consumption, because the simulation
-# plans for extreme conditions (e.g. -12C) while TCO should reflect average operations.
-BVG_TCO_ENERGY_CONSUMPTION_FACTORS: Dict[str, float] = {
-    "EN": 1.48,
-    "GN": 2.16,
-    "DD": 2.16,
-}
-
-BVG_TCO_CHARGING_POINT_TYPES: List[Dict[str, Any]] = [
-    {
-        "type": "depot",
-        "name": "Depot Charging Point",
-        "procurement_cost": 119_899.50,
-        "useful_life": 20,
-        "cost_escalation": 0.02,
-    },
-    {
-        "type": "opportunity",
-        "name": "Opportunity Charging Point",
-        "procurement_cost": 299_748.74,
-        "useful_life": 20,
-        "cost_escalation": 0.02,
-    },
-]
-
-BVG_TCO_CHARGING_INFRASTRUCTURE: List[Dict[str, Any]] = [
-    {
-        "type": "depot",
-        "name": "Depot Charging Infrastructure",
-        "procurement_cost": 2_397_989.95,
-        "useful_life": 20,
-        "cost_escalation": 0.02,
-    },
-    {
-        "type": "station",
-        "name": "Opportunity Charging Infrastructure",
-        "procurement_cost": 269_773.87,
-        "useful_life": 20,
-        "cost_escalation": 0.02,
-    },
-]
-
-
-def _bvg_tco_params() -> Dict[str, Any]:
-    """Return BVG-specific TCO parameters for the TCOAnalyzer."""
-    return {
-        "TCOAnalyzer.vehicle_type_tco_params": BVG_TCO_VEHICLE_TYPES,
-        "TCOAnalyzer.battery_type_tco_params": BVG_TCO_BATTERY_TYPES,
-        "TCOAnalyzer.energy_consumption_factor": BVG_TCO_ENERGY_CONSUMPTION_FACTORS,
-        "TCOAnalyzer.charging_point_type_params": BVG_TCO_CHARGING_POINT_TYPES,
-        "TCOAnalyzer.charging_infrastructure_params": BVG_TCO_CHARGING_INFRASTRUCTURE,
-        # Financial defaults from document_params() are used (matching BVG values)
-    }
+    baseline="DIESEL",
+)
 
 
 # ============================================================================
@@ -886,10 +814,15 @@ def run_diesel_scenario(finished_ou_db: Path) -> Path:
     context = PipelineContext(work_dir=work_dir, params=params)
     CopyCreator(input_files=[finished_ou_db]).execute(context=context)
 
-    # Run diesel-specific steps
+    # Run diesel-specific steps. CreateDieselVehicleTypes adds a diesel counterpart
+    # for every electric vehicle type; VehicleTypeBlockAssignment (no block_ids set)
+    # then reassigns every rotation to its diesel counterpart for the diesel
+    # reference scenario.
     steps = [
         CleanSimulationResults(),  # Clean up previous simulation results
         RemoveConsumptionLuts(),  # Remove LUTs and set minimal consumption
+        CreateDieselVehicleTypes(),  # Create diesel vehicle types
+        VehicleTypeBlockAssignment(),  # Reassign all rotations to diesel types
         DepotGenerator(),
         Simulation(),
     ]
@@ -898,6 +831,118 @@ def run_diesel_scenario(finished_ou_db: Path) -> Path:
     logger.info(f"DIESEL scenario complete. Database: {context.current_db}")
     assert context.current_db is not None
     return context.current_db
+
+
+# ============================================================================
+# Impact Analysis (TCO + LCA)
+# ============================================================================
+
+
+@flow(name="Impact Analysis")
+def run_impact_analysis(
+    ou_db: Path,
+    dep_db: Path,
+    term_db: Path,
+    diesel_db: Path,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Run the eflips-impact TCO and LCA analysis for all four scenarios.
+
+    For each scenario (OU, DEP, TERM and the DIESEL baseline) the impact steps
+    run in order, each chaining ``ctx.current_db``:
+
+    1. :class:`CompleteFleet` -- writes the BatteryType / ChargingPointType
+       fleet topology from ``fleet.json`` into the database.
+    2. :class:`TCOConfigurator` -- writes ``tco_parameters`` from ``tco.json``;
+       :class:`TCOAnalyzer` -- computes TCO by cost category (EUR/revenue-km).
+    3. :class:`LCAConfigurator` -- writes ``lca_parameters`` from ``lca.json`` and
+       ``lca_overrides.json``; :class:`LCAAnalyzer` -- computes GWP per
+       revenue-km, by component type and by lifecycle scope.
+
+    The per-scenario rows are merged and saved as tables (``tco_results.xlsx``,
+    ``lca_results.xlsx``) plus comparison plots (``tco_comparison``,
+    ``lca_comparison_by_type``, ``lca_comparison_by_scope``) that compare all
+    four scenarios against the DIESEL baseline.
+
+    Args:
+        ou_db: Simulated database for the OU scenario.
+        dep_db: Simulated database for the DEP scenario.
+        term_db: Simulated database for the TERM scenario.
+        diesel_db: Simulated database for the DIESEL baseline scenario.
+
+    Returns:
+        ``(tco_table, lca_table)`` merged across the four scenarios.
+    """
+    scenario_config = SCENARIO_DISPLAY_CONFIG
+
+    # Shared parameters: paths to the eflips-impact JSON files. Per-scenario
+    # parameters (scenario_name) are added inside the loop.
+    config_params = {
+        "CompleteFleet.fleet_json": str(IMPACT_DATA_DIR / "fleet.json"),
+        "TCOConfigurator.tco_json": str(IMPACT_DATA_DIR / "tco.json"),
+        "LCAConfigurator.lca_json": str(IMPACT_DATA_DIR / "lca.json"),
+        "LCAConfigurator.lca_overrides_json": str(IMPACT_DATA_DIR / "lca_overrides.json"),
+    }
+
+    complete_fleet = CompleteFleet()
+    tco_configurator = TCOConfigurator()
+    tco_analyzer = TCOAnalyzer()
+    lca_configurator = LCAConfigurator()
+    lca_analyzer = LCAAnalyzer()
+
+    tco_rows: List[pd.DataFrame] = []
+    lca_rows: List[pd.DataFrame] = []
+    for scenario_name, db_path, work_dir in [
+        ("OU", ou_db, WORK_DIR_BASE / "ou"),
+        ("DEP", dep_db, WORK_DIR_BASE / "dep"),
+        ("TERM", term_db, WORK_DIR_BASE / "term"),
+        ("DIESEL", diesel_db, WORK_DIR_BASE / "diesel"),
+    ]:
+        ctx = PipelineContext(
+            work_dir=work_dir,
+            params={
+                **config_params,
+                "TCOAnalyzer.scenario_name": scenario_name,
+                "LCAAnalyzer.scenario_name": scenario_name,
+            },
+            current_db=db_path,
+        )
+        # 1. Fleet topology (Modifier, chains ctx.current_db).
+        complete_fleet.execute(context=ctx)
+        # 2. TCO: configure (Modifier) then calculate (Analyzer).
+        tco_configurator.execute(context=ctx)
+        tco_rows.append(cast(pd.DataFrame, tco_analyzer.execute(context=ctx)))
+        # 3. LCA: configure (Modifier) then calculate (Analyzer).
+        lca_configurator.execute(context=ctx)
+        lca_rows.append(cast(pd.DataFrame, lca_analyzer.execute(context=ctx)))
+
+    # TCO comparison table + plot
+    tco_table = merge_tco_results(tco_rows)
+    tco_table.to_excel(output_dir() / "tco_results.xlsx", index=False)
+    logger.info("TCO comparison table saved to tco_results.xlsx")
+    fig = visualize_tco_comparison(tco_table, config=scenario_config)
+    save_plot_to_files_in_output_dir(fig, "tco_comparison")
+
+    # LCA comparison table + plots (by component type and by lifecycle scope)
+    lca_table = merge_lca_results(lca_rows)
+    lca_table.to_excel(output_dir() / "lca_results.xlsx", index=False)
+    logger.info("LCA comparison table saved to lca_results.xlsx")
+    fig = visualize_lca_comparison(
+        lca_table,
+        value_columns=LCAAnalyzer.IMPACT_CATEGORIES,
+        category_name_mapping=LCAAnalyzer.CATEGORY_NAMES,
+        config=scenario_config,
+    )
+    save_plot_to_files_in_output_dir(fig, "lca_comparison_by_type")
+    fig = visualize_lca_comparison(
+        lca_table,
+        value_columns=LCAAnalyzer.SCOPE_CATEGORIES,
+        category_name_mapping=LCAAnalyzer.SCOPE_NAMES,
+        config=scenario_config,
+    )
+    save_plot_to_files_in_output_dir(fig, "lca_comparison_by_scope")
+
+    return tco_table, lca_table
 
 
 # ============================================================================
@@ -917,16 +962,7 @@ def bvg_three_scenario_flow() -> None:
     """
     logger.info("Starting BVG three-scenario flow...")
 
-    scenario_config = ScenarioDisplayConfig(
-        order=["OU", "DEP", "TERM", "DIESEL"],
-        display_names={
-            "OU": "Original Blocks",
-            "DEP": "Depot Charging Only",
-            "TERM": "Small Batteries, Termini",
-            "DIESEL": "Diesel Baseline",
-        },
-        baseline="DIESEL",
-    )
+    scenario_config = SCENARIO_DISPLAY_CONFIG
 
     # Phase 1: Common pipeline (sequential)
     common_db = run_common_pipeline()
@@ -996,28 +1032,9 @@ def bvg_three_scenario_flow() -> None:
         fig = visualize_electrified_termini_map(scenario_sessions)
     save_plot_to_files_in_output_dir(fig, "electrified_termini_map")
 
-    # TCO analysis (OU, DEP, TERM — DIESEL excluded as non-electric baseline)
-    tco_analyzer = TCOAnalyzer()
-    tco_params = _bvg_tco_params()
-    tco_rows: List[pd.DataFrame] = []
-    for scenario_name, db_path, work_dir in [
-        ("OU", ou_db, WORK_DIR_BASE / "ou"),
-        ("DEP", dep_db, WORK_DIR_BASE / "dep"),
-        ("TERM", term_db, WORK_DIR_BASE / "term"),
-    ]:
-        ctx = PipelineContext(
-            work_dir=work_dir,
-            params={**tco_params, "TCOAnalyzer.scenario_name": scenario_name},
-            current_db=db_path,
-        )
-        row = cast(pd.DataFrame, tco_analyzer.execute(context=ctx))
-        tco_rows.append(row)
-
-    tco_table = merge_tco_results(tco_rows)
-    tco_table.to_excel(output_dir() / "tco_results.xlsx", index=False)
-    logger.info("TCO comparison table saved to tco_results.xlsx")
-    fig = visualize_tco_comparison(tco_table, config=scenario_config)
-    save_plot_to_files_in_output_dir(fig, "tco_comparison")
+    # Impact analysis: TCO + LCA for all four scenarios (OU, DEP, TERM and the
+    # DIESEL baseline), compared against DIESEL. See run_impact_analysis.
+    run_impact_analysis(ou_db, dep_db, term_db, diesel_db)
 
     # Energy consumption and battery-electric range by vehicle type
     consumption_analyzer = BVGEnergyConsumptionAnalyzer()
@@ -1054,4 +1071,5 @@ def bvg_three_scenario_flow() -> None:
 # ============================================================================
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     bvg_three_scenario_flow()

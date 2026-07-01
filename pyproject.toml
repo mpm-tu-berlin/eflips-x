@@ -9,6 +9,7 @@ license = {text = "AGPL-3.0-or-later"}
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
+    "eflips-model (>=11.2.0,<12.0.0)",
     "eflips-depot",
     "eflips-ingest",
     "eflips-eval",
@@ -45,10 +46,6 @@ pytest-xdist = "^3.8.0"
 pytest-split = "^0.11.0"
 coverage = "^7.13.5"
 pytest-cov = "^7.0.0"
-
-
-
-
 
 #eflips-eval = {path = "../eflips-eval", develop = true}
 #eflips-model = {path = "../eflips-model", develop = true}
