@@ -399,11 +399,28 @@ class TransitionPlanner(Analyzer):
                 Components of objective function to be optimized in the transition planner model. Must be included in expressions
                 Default: None
                             """.strip(),
+            f"{cls.__name__}.procurement_components": """
+        Expression names making up the procurement / cash-flow view of annual
+        cost (actual capital outlays plus OPEX). Plotted against
+        objective_components (the depreciation / TCO view) in the cost-breakdown
+        figure. Must be included in expressions.
+
+        Default: None
+                    """.strip(),
+            f"{cls.__name__}.shifted_procurement_components": """
+        Subset of procurement_components paid the year before the asset becomes
+        operational (stations, depot chargers). compute_cost_breakdown shifts
+        these one year earlier so the breakdown reconciles with AnnualTotalCost.
+
+        Default: None
+                    """.strip(),
             f"{cls.__name__}.plot_save_path": """
-        Output file path for the internal TransitionPlannerModel.plot_results()
-        figure. Parent directories are created if missing. If None, the model
-        falls back to its own default filename in the current working
-        directory.
+        Base output file path for the result figures. Two figures are written,
+        derived from this path by inserting '_cost_breakdowns' (depreciation vs
+        procurement breakdown) and '_other_results' (fleet / station / depot
+        plots) before the suffix. Parent directories are created if missing. If
+        None, the model falls back to its own default filenames in the current
+        working directory.
 
         Default: None
                     """.strip(),
@@ -457,13 +474,43 @@ class TransitionPlanner(Analyzer):
             save_dir=Path(csv_save_dir) if csv_save_dir is not None else None
         )
 
+        # Two annual-cost views: depreciation / TCO (the objective) and
+        # procurement / cash. Both come from the same per-component breakdown
+        # helper; the procurement view shifts stations and depot chargers to the
+        # year they are paid (one before they become operational).
+        depreciation_breakdown = model.compute_cost_breakdown(
+            params.get(f"{cn}.objective_components", [])
+        )
+        procurement_breakdown = model.compute_cost_breakdown(
+            params.get(f"{cn}.procurement_components", []),
+            shifted_components=tuple(params.get(f"{cn}.shifted_procurement_components", [])),
+        )
+
+        if csv_save_dir is not None:
+            csv_dir = Path(csv_save_dir)
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            depreciation_breakdown.to_csv(csv_dir / "depreciation_cost_breakdown.csv")
+            procurement_breakdown.to_csv(csv_dir / "procurement_cost_breakdown.csv")
+
         plot_save_path = params.get(f"{cn}.plot_save_path")
         if plot_save_path is not None:
             plot_save_path = Path(plot_save_path)
             plot_save_path.parent.mkdir(parents=True, exist_ok=True)
-            model.plot_results(*results, save_path=str(plot_save_path))
+            cost_breakdowns_path = plot_save_path.with_name(
+                f"{plot_save_path.stem}_cost_breakdowns{plot_save_path.suffix}"
+            )
+            other_results_path = plot_save_path.with_name(
+                f"{plot_save_path.stem}_other_results{plot_save_path.suffix}"
+            )
+            model.plot_cost_breakdowns(
+                depreciation_breakdown,
+                procurement_breakdown,
+                save_path=str(cost_breakdowns_path),
+            )
+            model.plot_other_results(*results, save_path=str(other_results_path))
         else:
-            model.plot_results(*results)
+            model.plot_cost_breakdowns(depreciation_breakdown, procurement_breakdown)
+            model.plot_other_results(*results)
 
         electrified_blocks: Dict[int, List[int]] = {}
         unelectrified_blocks: Dict[int, List[int]] = {}
@@ -484,8 +531,29 @@ class TransitionPlanner(Analyzer):
                 )
             unelectrified_blocks[year] = [row[0] for row in unelectrified_query.all()]
 
+        # Cumulative electric depot-charger slots per depot per operational year:
+        # electric_slots[d, i] = Σ_vt DepotChargerCount[d, vt, i+1] * (length/12).
+        # This is the *total* electrified + under-construction footprint occupying
+        # each existing depot in operational year i (mirrors the model's own
+        # DieselBusCapacityConstraint), and is what the diesel depot-config builder
+        # subtracts from DieselFleetParams.initial_depot_capacities.
+        depot_electric_slots_by_year = model.get_depot_electric_slots_by_year()
+        depot_electric_slots_by_year_map: Dict[int, Dict[int, float]] = {
+            int(year): dict(zip(grp["depot_id"], grp["electric_slots"]))
+            for year, grp in depot_electric_slots_by_year.groupby("operational_year")
+        }
+
+        if csv_save_dir is not None:
+            csv_dir = Path(csv_save_dir)
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            depot_electric_slots_by_year.to_csv(
+                csv_dir / "depot_electric_slots_by_year.csv", index=False
+            )
+
         self.result = {
             "unelectrified_blocks": unelectrified_blocks,
+            "depot_electric_slots_by_year": depot_electric_slots_by_year,
+            "depot_electric_slots_by_year_map": depot_electric_slots_by_year_map,
         }
         return self.result
 
