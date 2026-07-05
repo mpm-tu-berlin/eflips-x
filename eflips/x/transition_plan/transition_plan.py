@@ -1,15 +1,10 @@
+import math
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import sqlalchemy.orm.session
-from eflips.depot.api import (
-    delete_depots,
-    generate_depot_layout,
-    simple_consumption_simulation,
-    simulate_scenario,
-)
 from eflips.transition.parameter_registry import DieselFleetParams, ConstraintsParams
 from sqlalchemy import func
 
@@ -33,12 +28,19 @@ from eflips.model import (
     EnergySource,
     Vehicle,
 )
+from eflips.eval.output.prepare import power_and_occupancy
 from eflips.impact.tco import init_tco_params
 from eflips.impact.utils import complete_fleet
-from eflips.impact.tco import calculate_tco
 from eflips.impact.lca import init_lca_params, calculate_lca
 
-from eflips.x.transition_plan.multi_stage_simulation import CreateHybridFleet
+from eflips.x.steps.generators import CopyCreator
+from eflips.x.steps.modifiers.general_utilities import (
+    CreateDieselVehicleTypes,
+    VehicleTypeBlockAssignment,
+    CompleteFleet,
+    TCOConfigurator,
+)
+from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
 
 
 class TCOParameterConfigurator(Modifier):
@@ -152,7 +154,218 @@ class LCACalculator(Analyzer):
         )
 
 
+class DieselFleetAnalyzer(Analyzer):
+    """Read diesel fleet counts + depot slot demand off a simulated diesel DB.
+
+    Read-only counterpart to the diesel simulation: it assumes the database has
+    already been converted to diesel and simulated (via
+    :class:`~eflips.x.steps.modifiers.general_utilities.CreateDieselVehicleTypes`,
+    :class:`~eflips.x.steps.modifiers.general_utilities.VehicleTypeBlockAssignment`,
+    :class:`~eflips.x.steps.modifiers.simulation.DepotGenerator` and
+    :class:`~eflips.x.steps.modifiers.simulation.Simulation`), and simply measures
+    the result. Nothing is mutated or simulated here.
+
+    The only output is a
+    :class:`~eflips.transition.parameter_registry.DieselFleetParams` (returned by
+    :meth:`analyze`):
+
+        - ``bus_count_by_type``: ``{electric_vt_id: diesel_bus_count}``
+        - ``initial_depot_capacities``: ``{depot.station_id: total_slot}``
+        - ``slot_to_bus_ratio``: total depot slots / total bus footprint
+
+    The diesel↔electric vehicle-type correspondence is recovered from the database
+    via the ``"Diesel {name_short}"`` naming convention (both the electric and the
+    diesel :class:`~eflips.model.VehicleType` records survive the conversion, only
+    the electric :class:`~eflips.model.Vehicle` rows are replaced). The
+    ``diesel_to_ebus_ratio`` is *not* populated here -- it is derived from the
+    electric scenario by :class:`~eflips.transition.parameter_registry.ParameterRegistry`.
+    """
+
+    # Reference vehicle length (m) used to normalize a vehicle type's depot
+    # footprint into "standard 12 m slots".
+    STANDARD_SLOT_LENGTH_M = 12.0
+
+    def __init__(self, code_version: str = "1", **kwargs: Any) -> None:
+        super().__init__(code_version=code_version, **kwargs)
+        self.result: Optional[DieselFleetParams] = None
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            **super().document_params(),
+        }
+
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> DieselFleetParams:
+        scenario = session.query(Scenario).one()
+
+        # Both electric and diesel vehicle types survive the diesel conversion;
+        # recover their correspondence via the "Diesel {name_short}" convention
+        # (mirroring ParameterRegistry._fetch_diesel_vehicle_types).
+        all_vts = session.query(VehicleType).filter(VehicleType.scenario_id == scenario.id).all()
+        electric_vts = [vt for vt in all_vts if vt.energy_source == EnergySource.BATTERY_ELECTRIC]
+        diesel_vts = [vt for vt in all_vts if vt.energy_source == EnergySource.DIESEL]
+        # Diesel VTs do not carry a length, so the slot size factor is derived from
+        # the electric counterpart's length.
+        electric_length_by_id: Dict[int, Optional[float]] = {
+            ev.id: ev.length for ev in electric_vts
+        }
+        electric_to_diesel: Dict[int, VehicleType] = {}
+        for ev in electric_vts:
+            if not ev.name_short:
+                continue
+            candidates = [
+                dv for dv in diesel_vts if dv.name_short and ev.name_short in dv.name_short
+            ]
+            if candidates:
+                electric_to_diesel[ev.id] = candidates[0]
+
+        # Count the simulated diesel vehicles per diesel VT, map back to electric VT id.
+        diesel_counts_by_vt_id: Dict[int, int] = dict(
+            session.query(Vehicle.vehicle_type_id, func.count(Vehicle.id))
+            .join(VehicleType, VehicleType.id == Vehicle.vehicle_type_id)
+            .filter(
+                Vehicle.scenario_id == scenario.id,
+                VehicleType.energy_source == EnergySource.DIESEL,
+            )
+            .group_by(Vehicle.vehicle_type_id)
+            .all()
+        )
+        diesel_id_to_electric_id = {dv.id: ev_id for ev_id, dv in electric_to_diesel.items()}
+        bus_count_by_type: Dict[int, int] = {
+            diesel_id_to_electric_id[dv_id]: count
+            for dv_id, count in diesel_counts_by_vt_id.items()
+            if dv_id in diesel_id_to_electric_id
+        }
+
+        slot_amount_all_buses = sum(
+            [
+                count * electric_length_by_id.get(vt_id) / self.STANDARD_SLOT_LENGTH_M
+                for vt_id, count in bus_count_by_type.items()
+            ]
+        )
+
+        # Required depot slots for the simulated fleet, keyed by depot station id.
+        initial_depot_capacities = self._evaluate_initial_depot_capacities(
+            session=session,
+            scenario=scenario,
+            diesel_id_to_electric_id=diesel_id_to_electric_id,
+            electric_length_by_id=electric_length_by_id,
+        )
+
+        total_slot_amount = sum(initial_depot_capacities.values())
+
+        self.result = DieselFleetParams(
+            bus_count_by_type=bus_count_by_type,
+            initial_depot_capacities=initial_depot_capacities,
+            slot_to_bus_ratio=(
+                total_slot_amount / slot_amount_all_buses if slot_amount_all_buses > 0 else 0.0
+            ),
+        )
+        return self.result
+
+    def _evaluate_initial_depot_capacities(
+        self,
+        session: sqlalchemy.orm.session.Session,
+        scenario: Scenario,
+        diesel_id_to_electric_id: Dict[int, int],
+        electric_length_by_id: Dict[int, Optional[float]],
+    ) -> Dict[int, int]:
+        """Estimate the depot slots required by the simulated fleet.
+
+        For every depot the *charging areas* (areas that recorded at least one
+        ``STANDBY_DEPARTURE`` event) are grouped by vehicle type. For each group
+        the peak simultaneous occupancy is read from :func:`power_and_occupancy`
+        (the ``occupancy_total`` column, i.e. every vehicle physically present,
+        not only those actively charging) and weighted by a size factor
+        ``length / STANDARD_SLOT_LENGTH_M``. The length is taken from the electric
+        counterpart of the (diesel) area vehicle type, falling back to a factor of
+        ``1.0`` when no length is available.
+
+        The depot's slot count is the rounded-up (``math.ceil``) sum of these
+        weighted peaks::
+
+            total_slot = ceil( Σ_vt  peak_occupancy_vt * (length_vt / 12) )
+
+        Depots without any charging area are skipped. The result maps directly
+        onto :attr:`DieselFleetParams.initial_depot_capacities`.
+
+        :return: ``{depot.station_id: total_slot}``
+        """
+        initial_depot_capacities: Dict[int, int] = {}
+
+        depots = session.query(Depot).filter(Depot.scenario_id == scenario.id).all()
+        for depot in depots:
+            area_ids = [area.id for area in depot.areas]
+            if not area_ids:
+                continue
+
+            # Charging areas: those with at least one CHARGING_DEPOT event.
+            standby_area_ids = {
+                row[0]
+                for row in session.query(Event.area_id)
+                .filter(
+                    Event.scenario_id == scenario.id,
+                    Event.area_id.in_(area_ids),
+                    Event.event_type == EventType.STANDBY_DEPARTURE,
+                )
+                .distinct()
+                .all()
+            }
+            if not standby_area_ids:
+                continue
+
+            # Group the charging areas by their vehicle type.
+            area_ids_by_vt: Dict[int, List[int]] = {}
+            for area in depot.areas:
+                if area.id in standby_area_ids:
+                    area_ids_by_vt.setdefault(area.vehicle_type_id, []).append(area.id)
+
+            weighted_sum = 0.0
+            for vt_id, vt_area_ids in area_ids_by_vt.items():
+                df = power_and_occupancy(area_id=vt_area_ids, session=session)
+                peak_occupancy = float(df["occupancy_total"].max())
+
+                # Diesel area VTs have no length; map back to the electric VT.
+                electric_id = diesel_id_to_electric_id.get(vt_id, vt_id)
+                length = electric_length_by_id.get(electric_id)
+                size_factor = length / self.STANDARD_SLOT_LENGTH_M if length else 1.0
+                weighted_sum += peak_occupancy * size_factor
+
+            initial_depot_capacities[depot.station_id] = math.ceil(weighted_sum)
+
+        return initial_depot_capacities
+
+
 class TransitionPlanner(Analyzer):
+
+    # Key under which the caller stashes the diesel fleet result -- a
+    # :class:`~eflips.transition.parameter_registry.DieselFleetParams` produced by
+    # the standalone diesel-simulation flow (:func:`run_diesel_simulation`) -- in
+    # ``context.params`` for this step to consume.
+    DIESEL_FLEET_PARAMS_PARAM = "TransitionPlanner.diesel_fleet_params"
+
+    @staticmethod
+    def _diesel_fleet_params_from(params: Dict[str, Any]) -> DieselFleetParams:
+        """Fetch the :class:`DieselFleetParams` from the pipeline parameters.
+
+        The diesel fleet is measured by the standalone diesel-simulation flow
+        (:func:`run_diesel_simulation`), which runs on its own database and returns
+        a :class:`~eflips.transition.parameter_registry.DieselFleetParams`. The
+        caller stashes it under :attr:`DIESEL_FLEET_PARAMS_PARAM`.
+        ``ParameterRegistry`` derives ``diesel_to_ebus_ratio`` from the electric
+        scenario itself, so no electric denominator has to be supplied here.
+        """
+        obj = params.get(TransitionPlanner.DIESEL_FLEET_PARAMS_PARAM)
+        if isinstance(obj, DieselFleetParams):
+            return obj
+        raise ValueError(
+            "TransitionPlanner requires the diesel fleet composition. Set "
+            f"'{TransitionPlanner.DIESEL_FLEET_PARAMS_PARAM}' in the pipeline "
+            "parameters to a DieselFleetParams (e.g. the value returned by "
+            "run_diesel_simulation)."
+        )
 
     def __init__(self, code_version: str = "1", **kwargs: Any) -> None:
         super().__init__(code_version=code_version, **kwargs)
@@ -209,95 +422,9 @@ class TransitionPlanner(Analyzer):
 
         scenario = session.query(Scenario).one()
 
-        # --- Record electric vehicle count per VT before any mutation ---
-        # This is the denominator for diesel_to_ebus_ratio later.
-        electric_count_by_type: Dict[int, int] = dict(
-            session.query(Vehicle.vehicle_type_id, func.count(Vehicle.id))
-            .join(VehicleType, VehicleType.id == Vehicle.vehicle_type_id)
-            .filter(
-                Vehicle.scenario_id == scenario.id,
-                VehicleType.energy_source == EnergySource.BATTERY_ELECTRIC,
-            )
-            .group_by(Vehicle.vehicle_type_id)
-            .all()
-        )
-
-        # --- Diesel simulation inside a savepoint that we roll back ---
-        # Everything mutated below is reverted before we build the ParameterRegistry,
-        # so the transition planner sees the unchanged (electric) scenario state and
-        # the DB file of this Analyzer is not touched at the end.
-        savepoint = session.begin_nested()
-
-        # Clear prior simulation state so the diesel fleet can be re-simulated.
-        session.query(Rotation).filter(Rotation.scenario_id == scenario.id).update(
-            {"vehicle_id": None}
-        )
-        session.query(Event).filter(Event.scenario_id == scenario.id).delete()
-        session.query(Vehicle).filter(Vehicle.scenario_id == scenario.id).delete()
-        # delete_depots is called internally by generate_depot_layout; run here for clarity.
-        delete_depots(scenario, session)
-
-        # Reassign rotations to their diesel counterpart (name_short substring match,
-        # mirroring ParameterRegistry._fetch_diesel_vehicle_types).
-        all_vts = session.query(VehicleType).filter(VehicleType.scenario_id == scenario.id).all()
-        electric_vts = [vt for vt in all_vts if vt.energy_source == EnergySource.BATTERY_ELECTRIC]
-        diesel_vts = [vt for vt in all_vts if vt.energy_source == EnergySource.DIESEL]
-        electric_to_diesel: Dict[int, VehicleType] = {}
-        for ev in electric_vts:
-            if not ev.name_short:
-                continue
-            candidates = [
-                dv for dv in diesel_vts if dv.name_short and ev.name_short in dv.name_short
-            ]
-            if candidates:
-                electric_to_diesel[ev.id] = candidates[0]
-
-        rotations = session.query(Rotation).filter(Rotation.scenario_id == scenario.id).all()
-        for rot in rotations:
-            diesel_vt = electric_to_diesel.get(rot.vehicle_type_id)
-            if diesel_vt is not None:
-                rot.vehicle_type = diesel_vt
-        session.flush()
-
-        # Simulate the diesel fleet to produce Vehicle rows we can count.
-        generate_depot_layout(scenario=scenario, charging_power=300, delete_existing_depot=True)
-        simple_consumption_simulation(scenario=scenario, initialize_vehicles=True)
-        simulate_scenario(scenario, ignore_unstable_simulation=True)
-        simple_consumption_simulation(scenario=scenario, initialize_vehicles=False)
-
-        # Count diesel vehicles per diesel VT, map back to electric VT id.
-        diesel_counts_by_vt_id: Dict[int, int] = dict(
-            session.query(Vehicle.vehicle_type_id, func.count(Vehicle.id))
-            .join(VehicleType, VehicleType.id == Vehicle.vehicle_type_id)
-            .filter(
-                Vehicle.scenario_id == scenario.id,
-                VehicleType.energy_source == EnergySource.DIESEL,
-            )
-            .group_by(Vehicle.vehicle_type_id)
-            .all()
-        )
-        diesel_id_to_electric_id = {dv.id: ev_id for ev_id, dv in electric_to_diesel.items()}
-        bus_count_by_type: Dict[int, int] = {
-            diesel_id_to_electric_id[dv_id]: count
-            for dv_id, count in diesel_counts_by_vt_id.items()
-            if dv_id in diesel_id_to_electric_id
-        }
-        diesel_to_ebus_ratio: Dict[int, float] = {
-            vt_id: bus_count_by_type[vt_id] / electric_count_by_type[vt_id]
-            for vt_id in bus_count_by_type
-            if electric_count_by_type.get(vt_id, 0) > 0
-        }
-
-        # Roll back to the electric state before handing control to the planner.
-        savepoint.rollback()
-        session.expire_all()
-
-        scenario = session.query(Scenario).one()
-
-        diesel_fleet_params = DieselFleetParams(
-            bus_count_by_type=bus_count_by_type,
-            diesel_to_ebus_ratio=diesel_to_ebus_ratio,
-        )
+        # Diesel fleet composition is measured by the standalone diesel-simulation
+        # flow (run on its own database) and handed over through params.
+        diesel_fleet_params = self._diesel_fleet_params_from(params)
 
         constraints = params.get(f"{cn}.constraint_params")
         transition_planner_parameters = ParameterRegistry(
@@ -366,47 +493,136 @@ class TransitionPlanner(Analyzer):
 def run_transition_planner(
     context: PipelineContext,
 ) -> tuple[Path, Optional[Dict[str, Any]]]:
+    """Run the electric transition-planning pipeline.
 
-    # TODO fix all steps in this workflow to align with the single scenario database concept.
-    """Prepare the database for transition planning.
+    Operates on the *electric* database referenced by ``context.current_db`` and
+    runs, in order:
 
-    Runs :class:`CreateHybridFleet` to create a diesel counterpart for every
-    electric vehicle type in the scenario, then :class:`TCOParameterConfigurator`
-    to populate the TCO parameters from a single JSON file covering both electric
-    and diesel vehicle types.
+    1. :class:`~eflips.x.steps.modifiers.general_utilities.CreateDieselVehicleTypes`
+       -- add a diesel :class:`~eflips.model.VehicleType` for every electric one
+       (vehicle-type records only; the electric ``Vehicle`` rows are left intact,
+       which the planner needs to derive ``diesel_to_ebus_ratio``).
+    2. :class:`~eflips.x.steps.modifiers.general_utilities.CompleteFleet` -- rebuild
+       the BatteryType / ChargingPointType topology from ``CompleteFleet.fleet_json``.
+    3. :class:`~eflips.x.steps.modifiers.general_utilities.TCOConfigurator` -- write
+       the TCO parameters from ``TCOConfigurator.tco_json``.
+    4. :class:`TransitionPlanner` -- solve the MILP and return the per-year
+       unelectrified blocks.
 
-    ``TransitionPlanner`` itself is intentionally not wired in here yet; it will
-    be reintroduced once adapted to the new single-scenario ``ParameterRegistry``.
+    The diesel fleet composition is **not** simulated here. It is supplied through
+    the ``TransitionPlanner.diesel_fleet_params`` parameter -- a
+    :class:`~eflips.transition.parameter_registry.DieselFleetParams` (e.g. the value
+    returned by the standalone :func:`run_diesel_simulation` flow). Wiring that
+    diesel flow into this one is a separate, later task; this function stays
+    self-contained and only consumes the parameter.
+
+    Args:
+        context: Pipeline context with ``context.current_db`` pointing at the
+            electric scenario and, in ``context.params``:
+
+            - ``TransitionPlanner.diesel_fleet_params``: diesel fleet result
+              (a ``DieselFleetParams``).
+            - ``CompleteFleet.fleet_json``: fleet topology JSON path.
+            - ``TCOConfigurator.tco_json``: TCO parameter JSON path.
+            - the ``TransitionPlanner.*`` model configuration params
+              (``constraint_params``, ``name``, ``sets``, ``variables``,
+              ``constraints``, ``expressions``, ``objective_components``, ...).
+
+    Returns:
+        A tuple of ``(output_db_path, transition_planner_result)`` where the
+        result is the dict returned by :class:`TransitionPlanner`:
+
+        - ``"unelectrified_blocks"``: ``{year: [rotation_id, ...]}``
+        - ``"depot_electric_slots_by_year"``: tidy DataFrame with columns
+          ``operational_year``, ``ready_year``, ``depot_id``, ``electric_slots``
+          -- the cumulative size-weighted (length/12) depot-charger footprint of
+          the electric fleet (electrified + under construction) occupying each
+          depot in each operational year.
+        - ``"depot_electric_slots_by_year_map"``: the same as a nested dict
+          ``{operational_year: {station_id: electric_slots}}`` for convenient
+          consumption by the diesel depot-config builder.
+    """
+    from eflips.x.flows import run_steps
+
+    transition_planner = TransitionPlanner()
+    run_steps(
+        context=context,
+        steps=[
+            CreateDieselVehicleTypes(),
+            CompleteFleet(),
+            TCOConfigurator(),
+            transition_planner,
+        ],
+    )
+
+    return context.current_db, transition_planner.result
+
+
+def run_diesel_simulation(context: PipelineContext) -> DieselFleetParams:
+    """Run a self-contained diesel simulation and report its fleet counts.
+
+    This flow is independent of :func:`run_transition_planner` and runs on its own
+    context/database. The caller builds the ``context`` and points
+    ``context.current_db`` at the source (electric, already simulated) database;
+    that file is only *copied* into ``context.work_dir`` (by
+    :class:`~eflips.x.steps.generators.CopyCreator`), never modified, so it can be
+    the same database the electric flow uses.
+
+    Steps, in order:
+
+    1. :class:`~eflips.x.steps.generators.CopyCreator` -- seed the diesel database
+       as a copy of ``context.current_db`` inside ``context.work_dir``.
+    2. :class:`~eflips.x.steps.modifiers.general_utilities.CreateDieselVehicleTypes`
+       -- add a diesel :class:`~eflips.model.VehicleType` for every electric one.
+    3. :class:`~eflips.x.steps.modifiers.general_utilities.VehicleTypeBlockAssignment`
+       -- reassign *all* rotations to their diesel counterpart (no ``block_ids``).
+    4. :class:`~eflips.x.steps.modifiers.simulation.DepotGenerator` -- build the
+       depot layout.
+    5. :class:`~eflips.x.steps.modifiers.simulation.Simulation` -- simulate the
+       diesel fleet (produces diesel :class:`~eflips.model.Vehicle` rows).
+    6. :class:`DieselFleetAnalyzer` -- read the resulting diesel bus counts and
+       depot slot demand.
 
     Args:
         context: Pipeline context with:
-            - ``scenario_id``: ID of the scenario to operate on.
-            - ``TCOParameterConfigurator.tco_params_path``: Path to TCO JSON.
 
-        The following ``TransitionPlanner.*`` params are passed through unchanged
-        and reserved for when the planner step is wired back in:
-            - ``TransitionPlanner.constraint_params``: Constraint parameters.
-            - ``TransitionPlanner.name``: Model instance name.
-            - ``TransitionPlanner.sets``: Registered sets.
-            - ``TransitionPlanner.variables``: Registered variables.
-            - ``TransitionPlanner.constraints``: Registered constraints.
-            - ``TransitionPlanner.expressions``: Registered expressions.
-            - ``TransitionPlanner.objective_components``: Objective components.
+            - ``context.current_db``: the source database to branch from (copied,
+              never modified).
+            - ``context.work_dir``: working directory for the diesel database and
+              its step files. Should be distinct from the electric scenario's
+              directory so the two databases never collide.
+            - ``context.params``: optional simulation-step parameters, e.g.
+              ``{"DepotGenerator.charging_power_kw": 90.0,
+              "Simulation.ignore_unstable_simulation": True}``.
 
     Returns:
-        A tuple of ``(output_db_path, None)``. The ``None`` is a placeholder for
-        the transition-planner result that used to be returned here.
+        The :class:`~eflips.transition.parameter_registry.DieselFleetParams` read
+        from the simulated diesel database.
     """
-
-    create_hybrid_fleet = CreateHybridFleet()
-    tco_parameter_config = TCOParameterConfigurator()
-    transition_planner = TransitionPlanner()
-
-    steps: List[PipelineStep] = [create_hybrid_fleet, tco_parameter_config, transition_planner]
     from eflips.x.flows import run_steps
 
-    run_steps(context=context, steps=steps)
-    return context.current_db, transition_planner.result
+    if context.current_db is None:
+        raise ValueError(
+            "run_diesel_simulation requires context.current_db to point at the "
+            "source database to branch the diesel simulation from."
+        )
+
+    # Seed the diesel database as a copy of the source referenced by the context,
+    # then convert and simulate it in place (each modifier chains onto the previous
+    # database file).
+    CopyCreator(input_files=[context.current_db]).execute(context=context)
+    run_steps(
+        context=context,
+        steps=[
+            CreateDieselVehicleTypes(),
+            VehicleTypeBlockAssignment(),
+            DepotGenerator(),
+            Simulation(),
+        ],
+    )
+
+    # Read-only measurement of the simulated diesel fleet.
+    return DieselFleetAnalyzer().execute(context=context)
 
 
 def run_tco_calculation(

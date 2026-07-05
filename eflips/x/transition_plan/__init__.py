@@ -5,8 +5,10 @@ from eflips.x.transition_plan.transition_plan import (
     TCOCalculator,
     TransitionPlanner,
     LCACalculator,
+    DieselFleetAnalyzer,
     run_transition_planner,
     run_tco_calculation,
+    run_diesel_simulation,
 )
 
 __all__ = [
@@ -15,8 +17,10 @@ __all__ = [
     "TCOCalculator",
     "TransitionPlanner",
     "LCACalculator",
+    "DieselFleetAnalyzer",
     # Runner functions
     "run_transition_planner",
     "run_tco_calculation",
+    "run_diesel_simulation",
     # Defaults access
 ]
