@@ -105,6 +105,14 @@
       "cost_escalation": 0.02
     },
     {
+      "type": "depot",
+      "procurement_cost": 100000000.0,
+      "useful_life": 20,
+      "cost_escalation": 0.02,
+      "station_ids": [1102005110]
+    },
+
+    {
       "type": "station",
       "procurement_cost": 500000.0,
       "useful_life": 20,

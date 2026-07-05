@@ -1,0 +1,56 @@
+{
+  "scenario": {
+    "project_duration": 15,
+    "interest_rate": 0.04,
+    "inflation_rate": 0.02,
+    "staff_cost": 25.0,
+    "fuel_cost": {"diesel": 1.5, "electricity": 0.1794},
+    "vehicle_maint_cost": {"diesel": 0.45, "electricity": 0.35},
+    "infra_maint_cost": 1000,
+    "cost_escalation_rate": {
+      "general": 0.02,
+      "staff": 0.025,
+      "diesel": 0.0,
+      "electricity": 0.038,
+      "insurance": 0.02
+    },
+    "insurance": 9693,
+    "taxes": 278
+  },
+  "vehicle_types": [
+
+    {
+      "name_short": "Diesel EN",
+      "name": "Diesel 12m standard",
+      "useful_life": 14,
+      "procurement_cost": 275000.0,
+      "cost_escalation": 0.02,
+      "average_diesel_consumption": 0.449
+    },
+    {
+      "name_short": "Diesel GN",
+      "name": "Diesel 18m articulated",
+      "useful_life": 14,
+      "procurement_cost": 330000.0,
+      "cost_escalation": 0.02,
+      "average_diesel_consumption": 0.589
+    },
+    {
+      "name_short": "Diesel DD",
+      "name": "Diesel double-decker",
+      "useful_life": 14,
+      "procurement_cost": 510000.0,
+      "cost_escalation": 0.02,
+      "average_diesel_consumption": 0.589
+    }
+  ],
+  "battery_types": [
+
+  ],
+  "charging_point_types": [
+
+  ],
+  "charging_infrastructure": [
+
+  ]
+}
