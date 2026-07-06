@@ -109,7 +109,7 @@
       "procurement_cost": 100000000.0,
       "useful_life": 20,
       "cost_escalation": 0.02,
-      "station_ids": [1102005110]
+      "station_ids": [1102005186, 1102005187, 1102005188]
     },
 
     {
