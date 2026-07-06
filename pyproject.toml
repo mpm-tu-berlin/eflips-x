@@ -13,8 +13,9 @@ dependencies = [
     "eflips-depot",
     "eflips-ingest",
     "eflips-eval",
-    "eflips-opt (>=1.0.0)",
+    "eflips-opt @ git+ssh://git@github.com/mpm-tu-berlin/eflips-opt.git@feature/enable-partial-rotation-assignment",
     "eflips-transition @ git+ssh://git@github.com/mpm-tu-berlin/eflips-transition.git",
+#    "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@feature/revenue-km",
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
     # Pin griffe <2: griffe 2.x removed the top-level Docstring symbol that prefect 3.x
     # imports, breaking `from prefect import flow` at import time. Remove once a prefect
@@ -26,7 +27,7 @@ dependencies = [
     "pandas (>=2.0)",
     "openpyxl (>=3.1.0)",
     "eflips-model (>=11.1.0,<12.0.0)",
-    "eflips-impact (>=2.0.0,<3.0.0)",
+#    "eflips-impact (>=2.0.0,<3.0.0)",
 
 ]
 
@@ -52,6 +53,7 @@ pytest-cov = "^7.0.0"
 #eflips-depot = {path = "../eflips-depot", develop = true}
 #eflips-impact = {path = "../eflips-impact", develop = true}
 #eflips-transition = {path = "../eflips-transition", develop = true}
+#eflips-opt = {path = "../eflips-opt", develop = true}
 
 
 
@@ -59,6 +61,7 @@ pytest-cov = "^7.0.0"
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
 
 [tool.coverage.run]
 source = ["eflips/x"]
