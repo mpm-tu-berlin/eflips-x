@@ -29,12 +29,9 @@ from eflips.x.flows import run_steps
 from eflips.x.transition_plan.transition_plan import PlaygroundAnalyzer
 
 if __name__ == "__main__":
-    data_dir = Path(__file__).parent.parent.parent.parent.parent / "eflips-data"
 
-    diesel_db_name = "diesel_mini.db"
-    diesel_input_db = data_dir / diesel_db_name
-    electric_db_name = "electric_mini.db"
-    electric_input_db = data_dir / electric_db_name
+    electric_input_db = Path("/home/shuyao/PycharmProjects/eflips-data/electric_mini.db")
+    diesel_input_db = Path("/home/shuyao/PycharmProjects/eflips-data/electric_mini.db")
 
     work_dir_name = "test"
 
