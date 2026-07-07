@@ -7,9 +7,9 @@ constraints = ConstraintsParams(
     maximum_annual_new_depot=10,
     current_year=2026,
     depot_construction_duration=3,
-    min_charger_batch_size=10,
-    new_depots=[1102005110],
-    scaling_factor_to_year=321.88,
+    min_charger_batch_size=20,
+    new_depots=[1102005186, 1102005187, 1102005188],
+    scaling_factor_to_year=52,
     diesel_salvage_decay_rate=0.135,
     diesel_salvage_cutoff_age=12,
 )
@@ -22,6 +22,7 @@ variables = [
     "DepotOperational",
     "ReplacedDieselBus",
     "RetiredDieselBus",
+    "DepotChargerProcurement",
 ]
 
 constraints_long_term = [
@@ -43,6 +44,8 @@ constraints_long_term = [
     "DepotChargerConstructionLimit",
     "DepotChargerRequiresDepot",
     "DepotChargerNoUninstallation",
+    "DepotChargerProcurementLower",
+    "DepotChargerProcurementUpper",
     "InitialDepotChargerConstraint",
     "DieselReplacedLowerBound",
     "DieselReplacedUpperBound",  # Lower bound and upper bound are for limiting diesel bus number to integers
@@ -138,4 +141,4 @@ shifted_procurement_components = [
     "AnnualDepotChargerProcurement",
 ]
 
-name = "transition_plan_berlin_literature"
+name = "transition_plan_berlin"
