@@ -25,6 +25,8 @@ from eflips.depot.api import (  # type: ignore[import-untyped]
 from eflips.model import (
     Scenario,
     Station,
+    Event,
+    EventType,
 )
 from sqlalchemy.exc import MultipleResultsFound
 
@@ -525,6 +527,12 @@ No default — must be explicitly specified.
             raise NotImplementedError(
                 f"Smart charging strategy '{strategy}' is not yet implemented."
             )
+
+        # Delete the original driving events
+
+        session.query(Event).filter(Event.event_type == EventType.DRIVING).delete(
+            synchronize_session=False
+        )
 
         # Re-run consumption simulation to update energy values
         self.logger.info("Re-running consumption simulation after smart charging.")
