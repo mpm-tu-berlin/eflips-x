@@ -41,6 +41,7 @@ from eflips.x.steps.modifiers.general_utilities import (
     TCOConfigurator,
 )
 from eflips.x.steps.modifiers.simulation import DepotGenerator, Simulation
+from eflips.x.transition_plan.multi_stage_simulation import DeleteDepotEvents
 
 
 class TCOParameterConfigurator(Modifier):
@@ -684,6 +685,7 @@ def run_diesel_simulation(context: PipelineContext) -> DieselFleetParams:
         steps=[
             CreateDieselVehicleTypes(),
             VehicleTypeBlockAssignment(),
+            DeleteDepotEvents(),
             DepotGenerator(),
             Simulation(),
         ],
