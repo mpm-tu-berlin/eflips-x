@@ -9,12 +9,12 @@ license = {text = "AGPL-3.0-or-later"}
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "eflips-model (>=11.1.0,<12.0.0)",
+    "eflips-model (>=11.2.0,<12.0.0)",
     "eflips-depot",
     "eflips-ingest (>=1.7.0,<2.0.0)",
     "eflips-eval",
     "eflips-opt (>=1.0.9,<2.0.0)",
-    "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@feature/revenue-km",
+    "eflips-impact (>=2.0.0,<3.0.0)",
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
     # Pin griffe <2: griffe 2.x removed the top-level Docstring symbol that prefect 3.x
     # imports, breaking `from prefect import flow` at import time. Remove once a prefect
@@ -43,6 +43,8 @@ pytest-xdist = "^3.8.0"
 pytest-split = "^0.11.0"
 coverage = "^7.13.5"
 pytest-cov = "^7.0.0"
+
+#eflips-impact = {path = "../eflips-impact", develop = true}
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

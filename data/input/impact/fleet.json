@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "battery_types": [
+    {
+      "vehicle_name_short": "EN",
+      "specific_mass": 6.0,
+      "chemistry": "lfp"
+    },
+    {
+      "vehicle_name_short": "DD",
+      "specific_mass": 6.0,
+      "chemistry": "lfp"
+    },
+    {
+      "vehicle_name_short": "GN",
+      "specific_mass": 6.0,
+      "chemistry": "lfp"
+    }
+  ],
+  "charging_point_types": [
+    {
+      "type": "depot",
+      "name": "Depot Charging Point",
+      "name_short": "DCS"
+    },
+    {
+      "type": "opportunity",
+      "name": "Opportunity Charging Point",
+      "name_short": "OCS"
+    }
+  ]
+}

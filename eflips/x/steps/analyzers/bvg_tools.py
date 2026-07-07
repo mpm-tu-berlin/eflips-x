@@ -1888,6 +1888,7 @@ def _place_tco_side_labels(
     labels: "List[Tuple[float, float]]",
     n_bars: int,
     min_spacing: float = 0.18,
+    value_format: str = "{:.2f}",
 ) -> None:
     """Place value labels to the side of a bar with leader lines.
 
@@ -1897,6 +1898,7 @@ def _place_tco_side_labels(
         labels: List of (segment_mid_y, value) for thin segments.
         n_bars: Total number of bars (used to pick left/right side).
         min_spacing: Minimum vertical gap between labels in data units.
+        value_format: ``str.format`` template for the label value.
     """
     if not labels:
         return
@@ -1917,7 +1919,7 @@ def _place_tco_side_labels(
 
     for (natural_y, value), text_y in zip(labels, adjusted_y):
         ax.annotate(
-            f"{value:.2f}",
+            value_format.format(value),
             xy=(bar_x, natural_y),
             xytext=(text_x, text_y),
             fontsize=8,
@@ -2034,6 +2036,140 @@ def visualize_tco_comparison(
             i,
             y_offset + 0.02,
             f"{total_sum:.2f}",
+            ha="center",
+            va="bottom",
+            fontweight="bold",
+            fontsize=10,
+            color="black",
+        )
+
+    # Expand axis limits to prevent side labels from being clipped
+    x_lo, x_hi = ax.get_xlim()
+    ax.set_xlim(x_lo - 0.3, x_hi + 0.3)
+    y_lo, y_hi = ax.get_ylim()
+    ax.set_ylim(y_lo - min_label_height, y_hi)
+
+    # Position legend to the right of the plot
+    plt.legend(title="", bbox_to_anchor=(1.05, 1), loc="upper left", ncols=1)
+
+    return fig
+
+
+def visualize_lca_comparison(
+    df: pd.DataFrame,
+    value_columns: List[str],
+    category_name_mapping: Dict[str, str],
+    scenario_name_mapping: "Dict[str, str] | None" = None,
+    config: "ScenarioDisplayConfig | None" = None,
+) -> Figure:
+    """
+    Create a BVG-style stacked bar chart comparing an LCA breakdown across
+    scenarios (global-warming potential, GWP, per revenue-km).
+
+    Mirrors :func:`visualize_tco_comparison` but is parameterized by which
+    breakdown to plot, so the same function renders both the component-type and
+    the lifecycle-scope breakdowns produced by
+    :class:`~eflips.x.steps.analyzers.output_analyzers.LCAAnalyzer`.
+
+    Args:
+        df: DataFrame with a 'scenario_name' column and the LCA breakdown
+            columns (e.g. from merge_lca_results()).
+        value_columns: Ordered list of breakdown columns to stack (e.g.
+            ``LCAAnalyzer.IMPACT_CATEGORIES`` or ``LCAAnalyzer.SCOPE_CATEGORIES``).
+        category_name_mapping: Map breakdown keys to display names (e.g.
+            ``LCAAnalyzer.CATEGORY_NAMES`` or ``LCAAnalyzer.SCOPE_NAMES``).
+        scenario_name_mapping: Map scenario_name values to multi-line display
+            names. Default: BVG scenario names (OU, DEP, TERM). Ignored if
+            *config* is provided.
+        config: Optional scenario display configuration. If provided, derives
+                *scenario_name_mapping* from ``config.display_names`` (adding line
+                breaks between words for the bar chart).
+
+    Returns:
+        matplotlib Figure
+    """
+    configure_latex_plotting()
+
+    # If config is provided, derive scenario_name_mapping from it
+    if config is not None and scenario_name_mapping is None:
+        scenario_name_mapping = {k: "\n".join(v.split()) for k, v in config.display_names.items()}
+    if scenario_name_mapping is None:
+        scenario_name_mapping = TCO_SCENARIO_NAMES
+
+    # Filter to columns that actually exist in the DataFrame
+    available_columns = [c for c in value_columns if c in df.columns]
+
+    plot_df = df.copy()
+    plot_df["scenario_display"] = (
+        plot_df["scenario_name"].map(scenario_name_mapping).fillna(plot_df["scenario_name"])
+    )
+
+    # Rename columns for display
+    rename_map = {c: category_name_mapping.get(c, c) for c in available_columns}
+
+    # Build pivot table indexed by display scenario name
+    df_pivot = plot_df.set_index("scenario_display")[available_columns].rename(columns=rename_map)
+
+    fig, ax = plt.subplots(1, 1, figsize=(PLOT_WIDTH_INCH, PLOT_HEIGHT_INCH), layout="constrained")
+    palette = sns.color_palette("Set2")
+
+    df_pivot.plot(kind="bar", stacked=True, ax=ax, color=palette)
+
+    ax.set_title("")
+    ax.set_ylabel(
+        "Global Warming Potential\n"
+        r"$\left[ \frac{\mathrm{kg\,CO_2\,eq}}{\mathrm{km}_\mathrm{rev}} \right]$"
+    )
+    ax.set_xlabel("")
+
+    # Keep x-axis labels horizontal (multi-line names read better this way)
+    plt.xticks(rotation=0, ha="center")
+
+    # Scale y-axis by 10% to accommodate sum totals on top, then compute label threshold
+    y_min, y_max = ax.get_ylim()
+    ax.set_ylim(y_min, y_max * 1.1)
+
+    y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
+    fig_h_pts = fig.get_size_inches()[1] * 72
+    min_label_height = 11 * y_range / (fig_h_pts * 0.7)
+
+    # Add value labels: inside for large segments, side labels for thin ones
+    for i, (scenario, row) in enumerate(df_pivot.iterrows()):
+        y_offset = 0.0
+        total_sum = row.sum()
+        side_labels: List[Tuple[float, float]] = []
+
+        for category, value in row.items():
+            if value > 0:
+                segment_mid_y = y_offset + value / 2
+                if value >= min_label_height:
+                    ax.text(
+                        i,
+                        segment_mid_y,
+                        f"{value:.3f}",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="black",
+                    )
+                else:
+                    side_labels.append((segment_mid_y, value))
+            y_offset += value
+
+        _place_tco_side_labels(
+            ax,
+            i,
+            side_labels,
+            n_bars=len(df_pivot),
+            min_spacing=min_label_height,
+            value_format="{:.3f}",
+        )
+
+        # Bold total on top of each bar
+        ax.text(
+            i,
+            y_offset + 0.02 * y_range,
+            f"{total_sum:.3f}",
             ha="center",
             va="bottom",
             fontweight="bold",
