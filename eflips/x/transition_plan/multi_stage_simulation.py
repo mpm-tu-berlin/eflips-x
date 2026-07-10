@@ -1271,12 +1271,25 @@ def simulate_multi_stage_electrification(
         per_stage_results[stage_id] = pf.result()
     print("All stages completed.")
 
+    # Authoritative station_id -> depot name from the electric database (the
+    # transition planner's depot ids, which key the planned-slot CSVs). Per-stage
+    # station ids are auto-generated and unstable across stages, so the depot
+    # *name* is the only reliable key linking planned and real slots.
+    electric_ctx = PipelineContext(work_dir=workdir, current_db=electric_db, params={})
+    with electric_ctx.get_session() as session:
+        depot_name_map = {
+            int(station_id): name
+            for station_id, name in session.query(Depot.station_id, Depot.name).all()
+            if station_id is not None
+        }
+
     # Persist the per-stage statistics and the plotting inputs so the slot
     # distribution plots can be regenerated without re-running the simulation.
     _save_multi_stage_csvs(
         per_stage_results,
         initial_depot_capacities,
         Path(csv_dir) if csv_dir is not None else workdir / "csv",
+        depot_name_map=depot_name_map,
     )
 
     # Reaching here means every stage's ``.result()`` returned (no error) and the
@@ -1292,6 +1305,7 @@ def _save_multi_stage_csvs(
     per_stage_results: Dict[int, Dict[str, pd.DataFrame]],
     initial_depot_capacities: Dict[int, int],
     csv_dir: Path,
+    depot_name_map: Optional[Dict[int, str]] = None,
 ) -> None:
     """Write per-stage statistics + inputs used by the slot-distribution plots.
 
@@ -1303,6 +1317,12 @@ def _save_multi_stage_csvs(
       occupancy rows with a ``year`` (stage) and an ``is_diesel`` column.
     - ``per_stage_counts.csv`` — the same for the vehicle-count rows.
     - ``depot_names.csv`` — ``station_id, depot_name`` lookup for plot labels.
+      When ``depot_name_map`` (the authoritative electric-database
+      ``station_id -> depot name``) is supplied it is used; the planned-slot
+      CSVs are keyed by those electric-database station ids, so this must cover
+      them (the per-stage occupancy station ids are auto-generated and unstable
+      and cannot be relied on for the planned frame). Missing entries are
+      supplemented from the per-stage occupancy.
     """
     csv_dir = Path(csv_dir)
     csv_dir.mkdir(parents=True, exist_ok=True)
@@ -1321,17 +1341,33 @@ def _save_multi_stage_csvs(
         if cnt is not None and not cnt.empty:
             cnt_frames.append(cnt.assign(year=year))
 
+    # Build the station_id -> depot_name lookup. The electric-database map (the
+    # transition planner's depot ids) is authoritative; per-stage occupancy only
+    # fills in station ids the map does not already cover.
+    name_by_station: Dict[int, str] = {
+        int(sid): str(name)
+        for sid, name in (depot_name_map or {}).items()
+        if sid is not None and not pd.isna(sid)
+    }
+
     if occ_frames:
         occ_all = pd.concat(occ_frames, ignore_index=True)
         occ_all["is_diesel"] = occ_all["energy_source"] == EnergySource.DIESEL
         occ_all.to_csv(csv_dir / "per_stage_occupancy.csv", index=False)
         if "station_id" in occ_all.columns:
-            (
+            for row in (
                 occ_all[["station_id", "depot_name"]]
                 .dropna()
                 .drop_duplicates()
-                .to_csv(csv_dir / "depot_names.csv", index=False)
-            )
+                .itertuples(index=False)
+            ):
+                name_by_station.setdefault(int(row.station_id), str(row.depot_name))
+
+    if name_by_station:
+        pd.DataFrame(
+            [{"station_id": sid, "depot_name": name} for sid, name in name_by_station.items()]
+        ).to_csv(csv_dir / "depot_names.csv", index=False)
+
     if cnt_frames:
         cnt_all = pd.concat(cnt_frames, ignore_index=True)
         cnt_all["is_diesel"] = cnt_all["energy_source"] == EnergySource.DIESEL
@@ -1636,7 +1672,9 @@ def _load_initial_capacities(
     return {int(row.depot_id): float(row.capacity) for row in df.itertuples(index=False)}
 
 
-def _electric_split_by_depot_year(csv_dir: Path) -> pd.DataFrame:
+def _electric_split_by_depot_year(
+    csv_dir: Path, depot_names: Optional[Dict[int, str]] = None
+) -> pd.DataFrame:
     """Split the accumulated electric depot-charger slots into operation / build.
 
     Derived solely from ``depot_electric_slots_by_year.csv``, whose (already
@@ -1652,30 +1690,41 @@ def _electric_split_by_depot_year(csv_dir: Path) -> pd.DataFrame:
     - ``under_construction`` = ``E(i) - E(i - 1)`` — slots being built during
       year ``i`` (ready at the start of year ``i + 1``).
 
-    Returns columns ``depot_id, year, reserved, in_operation_electric,
-    under_construction``.
+    The CSV's ``depot_id`` is the transition planner's (electric-database)
+    :class:`~eflips.model.Station` id; it is mapped to the depot *name* via
+    ``depot_names`` (loaded from ``depot_names.csv`` when not supplied) so the
+    result can be aligned with the real per-stage occupancy, whose station ids
+    are auto-generated and unstable across stages. Returns columns
+    ``depot_name, year, reserved, in_operation_electric, under_construction``.
     """
-    cols = ["depot_id", "year", "reserved", "in_operation_electric", "under_construction"]
+    if depot_names is None:
+        depot_names = _load_depot_names(csv_dir)
+    cols = ["depot_name", "year", "reserved", "in_operation_electric", "under_construction"]
     path = Path(csv_dir) / "depot_electric_slots_by_year.csv"
     if not path.exists():
         return pd.DataFrame(columns=cols)
     electric = pd.read_csv(path)
+    electric["depot_name"] = electric["depot_id"].map(
+        lambda d: depot_names.get(int(d), f"Depot {int(d)}")
+    )
     split = (
-        electric.groupby(["depot_id", "operational_year"])["electric_slots"]
+        electric.groupby(["depot_name", "operational_year"])["electric_slots"]
         .sum()
         .rename("reserved")
         .reset_index()
         .rename(columns={"operational_year": "year"})
-        .sort_values(["depot_id", "year"])
+        .sort_values(["depot_name", "year"])
     )
-    prev = split.groupby("depot_id")["reserved"].shift(1).fillna(0.0)
+    prev = split.groupby("depot_name")["reserved"].shift(1).fillna(0.0)
     split["in_operation_electric"] = prev
     split["under_construction"] = (split["reserved"] - prev).clip(lower=0.0)
     return split[cols]
 
 
 def _planned_slot_frame(
-    csv_dir: Path, initial_depot_capacities: Optional[Dict[int, int]]
+    csv_dir: Path,
+    initial_depot_capacities: Optional[Dict[int, int]],
+    depot_names: Optional[Dict[int, str]] = None,
 ) -> pd.DataFrame:
     """Build the planned per-depot per-year slot decomposition.
 
@@ -1684,26 +1733,38 @@ def _planned_slot_frame(
     accumulated ``depot_electric_slots_by_year.csv`` via
     :func:`_electric_split_by_depot_year`; diesel gets whatever is left of the
     depot's initial capacity (``initial - reserved``). Depots with no initial
-    capacity (new electric-only depots) get zero diesel slots.
+    capacity (new electric-only depots) get zero diesel slots. Depots are keyed
+    by name (mapped from the electric-database station ids via ``depot_names``)
+    so the planned frame aligns with the real per-stage occupancy.
     """
-    split = _electric_split_by_depot_year(csv_dir)
-    caps = _load_initial_capacities(csv_dir, initial_depot_capacities)
+    if depot_names is None:
+        depot_names = _load_depot_names(csv_dir)
+    split = _electric_split_by_depot_year(csv_dir, depot_names)
+
+    # Initial capacities are keyed by the electric-database station id; collapse
+    # them onto depot names (summing any that share a name).
+    caps: Dict[str, float] = {}
+    for station_id, capacity in _load_initial_capacities(
+        csv_dir, initial_depot_capacities
+    ).items():
+        name = depot_names.get(int(station_id), f"Depot {int(station_id)}")
+        caps[name] = caps.get(name, 0.0) + capacity
 
     years = sorted(split["year"].unique())
-    depot_ids = sorted(set(split["depot_id"]).union(caps.keys()))
-    grid = pd.MultiIndex.from_product([depot_ids, years], names=["depot_id", "year"]).to_frame(
-        index=False
-    )
+    depot_labels = sorted(set(split["depot_name"]).union(caps.keys()))
+    grid = pd.MultiIndex.from_product(
+        [depot_labels, years], names=["depot_name", "year"]
+    ).to_frame(index=False)
 
-    df = grid.merge(split, on=["depot_id", "year"], how="left")
+    df = grid.merge(split, on=["depot_name", "year"], how="left")
     for col in ("reserved", "in_operation_electric", "under_construction"):
         df[col] = df[col].fillna(0.0)
-    df["capacity"] = df["depot_id"].map(caps)
+    df["capacity"] = df["depot_name"].map(caps)
     df["in_operation_diesel"] = (df["capacity"] - df["reserved"]).clip(lower=0.0).fillna(0.0)
-    return df[["depot_id", "year", *_SLOT_SEGMENTS]]
+    return df[["depot_name", "year", *_SLOT_SEGMENTS]]
 
 
-def _real_slot_frame(csv_dir: Path) -> pd.DataFrame:
+def _real_slot_frame(csv_dir: Path, depot_names: Optional[Dict[int, str]] = None) -> pd.DataFrame:
     """Build the simulated per-depot per-year slot decomposition.
 
     Electric/diesel come from the per-stage peak occupancy (converted from
@@ -1712,10 +1773,17 @@ def _real_slot_frame(csv_dir: Path) -> pd.DataFrame:
     (``depot_electric_slots_by_year.csv`` via
     :func:`_electric_split_by_depot_year`), since the simulation does not build
     chargers.
+
+    Depots are keyed by ``depot_name``, not station id: the per-stage station
+    ids are auto-generated per stage, so they change across stages (and can even
+    collide across depots), while the depot name is stable — it is the only
+    reliable key linking a depot's occupancy across stages and to the planned
+    frame.
     """
+    if depot_names is None:
+        depot_names = _load_depot_names(csv_dir)
     occ = pd.read_csv(Path(csv_dir) / "per_stage_occupancy.csv")
-    occ = occ[occ["station_id"].notna()].copy()
-    occ["depot_id"] = occ["station_id"].astype(int)
+    occ = occ[occ["depot_name"].notna()].copy()
     occ["slots"] = occ["peak_occupancy"] * occ["size_factor"]
     if "is_diesel" in occ.columns:
         occ["is_diesel"] = occ["is_diesel"].astype(bool)
@@ -1724,13 +1792,13 @@ def _real_slot_frame(csv_dir: Path) -> pd.DataFrame:
 
     elec = (
         occ[~occ["is_diesel"]]
-        .groupby(["depot_id", "year"])["slots"]
+        .groupby(["depot_name", "year"])["slots"]
         .sum()
         .rename("in_operation_electric")
     )
     dies = (
         occ[occ["is_diesel"]]
-        .groupby(["depot_id", "year"])["slots"]
+        .groupby(["depot_name", "year"])["slots"]
         .sum()
         .rename("in_operation_diesel")
     )
@@ -1740,24 +1808,28 @@ def _real_slot_frame(csv_dir: Path) -> pd.DataFrame:
             df[col] = 0.0
     df = df.fillna(0.0).reset_index()
 
-    uc = _electric_split_by_depot_year(csv_dir)[["depot_id", "year", "under_construction"]]
-    df = df.merge(uc, on=["depot_id", "year"], how="left")
+    uc = _electric_split_by_depot_year(csv_dir, depot_names)[
+        ["depot_name", "year", "under_construction"]
+    ]
+    df = df.merge(uc, on=["depot_name", "year"], how="left")
     df["under_construction"] = df["under_construction"].fillna(0.0)
-    return df[["depot_id", "year", *_SLOT_SEGMENTS]]
+    return df[["depot_name", "year", *_SLOT_SEGMENTS]]
 
 
 def _draw_slot_distribution(
     df: pd.DataFrame,
     output_path: Path,
     title: str,
-    depot_names: Optional[Dict[int, str]] = None,
     ylabel: str = "Depot slots (12 m equiv.)",
 ) -> None:
-    """Render one stacked-bar subplot per depot (x = operational year)."""
-    depot_names = depot_names or {}
-    depot_ids = sorted(df["depot_id"].unique())
+    """Render one stacked-bar subplot per depot (x = operational year).
+
+    ``df`` is keyed by ``depot_name`` (a stable label across stages), so each
+    subplot is one depot regardless of the shifting per-stage station ids.
+    """
+    depot_labels = sorted(df["depot_name"].unique())
     all_years = sorted(df["year"].unique())
-    n = len(depot_ids)
+    n = len(depot_labels)
 
     fig, axes = plt.subplots(
         n,
@@ -1768,8 +1840,8 @@ def _draw_slot_distribution(
         squeeze=False,
     )
     x = np.array(all_years)
-    for ax, depot_id in zip(axes[:, 0], depot_ids):
-        sub = df[df["depot_id"] == depot_id].set_index("year").reindex(all_years).fillna(0.0)
+    for ax, depot_name in zip(axes[:, 0], depot_labels):
+        sub = df[df["depot_name"] == depot_name].set_index("year").reindex(all_years).fillna(0.0)
         bottom = np.zeros(len(x))
         for seg in _SLOT_SEGMENTS:
             style = _SLOT_STYLE[seg]
@@ -1785,8 +1857,7 @@ def _draw_slot_distribution(
                 label=style["label"],
             )
             bottom += heights
-        name = depot_names.get(int(depot_id), f"Depot {depot_id}")
-        ax.set_title(f"{name} (station {depot_id})", fontsize=10)
+        ax.set_title(f"{depot_name}", fontsize=10)
         ax.set_ylabel(ylabel, fontsize=8)
         ax.margins(x=0.02)
 
@@ -1838,23 +1909,21 @@ def plot_slot_distributions(
     output_dir.mkdir(parents=True, exist_ok=True)
     depot_names = _load_depot_names(csv_dir)
 
-    planned = _planned_slot_frame(csv_dir, initial_depot_capacities)
+    planned = _planned_slot_frame(csv_dir, initial_depot_capacities, depot_names)
     planned.to_csv(output_dir / "planned_slot_distribution.csv", index=False)
     _draw_slot_distribution(
         planned,
         output_dir / "planned_slot_distribution.png",
         title="Planned depot slot distribution (transition plan)",
-        depot_names=depot_names,
     )
 
     if (csv_dir / "per_stage_occupancy.csv").exists():
-        real = _real_slot_frame(csv_dir)
+        real = _real_slot_frame(csv_dir, depot_names)
         real.to_csv(output_dir / "real_slot_distribution.csv", index=False)
         _draw_slot_distribution(
             real,
             output_dir / "real_slot_distribution.png",
             title="Simulated depot slot distribution (per-stage peak occupancy)",
-            depot_names=depot_names,
         )
     else:
         logger.warning(
