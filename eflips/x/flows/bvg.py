@@ -1054,4 +1054,7 @@ def bvg_three_scenario_flow() -> None:
 # ============================================================================
 
 if __name__ == "__main__":
-    bvg_three_scenario_flow()
+
+    common_db = run_common_pipeline()
+    ou_path, df_1, df_2 = run_ou_scenario(common_db)
+    run_ou_even_scenario(ou_path)
