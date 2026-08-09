@@ -20,7 +20,10 @@ def bvg_xml_scenario_db(tmp_path_factory, test_data_dir: Path) -> Generator[Path
     TestVehicleScheduling.scenario_with_vehicle_types fixture.
     Treat as read-only; use writable_bvg_scenario_db for tests that modify data.
     """
-    xml_files = sorted(test_data_dir.glob("*.xml"))[:3]
+    # Use the whole fixture set: it is a self-contained group of lines, and
+    # eflips-ingest 2.x drops any rotation whose other lines are absent, so a
+    # subset would ingest to an empty scenario.
+    xml_files = sorted(test_data_dir.glob("*.xml"))
     assert len(xml_files) > 0, f"No XML files found in {test_data_dir}"
 
     db_path = tmp_path_factory.mktemp("bvg_xml") / "bvg_scenario.db"

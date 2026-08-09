@@ -1,1 +1,6 @@
 *.zip filter=lfs diff=lfs merge=lfs -text
+
+# BVG-XML test fixtures: preserve bytes exactly. eflips-ingest 2.x resolves a
+# rotation across every file that carries part of it, so the fixture set is a
+# self-contained group and should not vary by contributor line-ending settings.
+*.response.xml -text
