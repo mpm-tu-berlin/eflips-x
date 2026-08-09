@@ -39,11 +39,13 @@ class TestBVGXMLIngester:
         """Test that document_params returns expected parameters."""
         params = ingester.document_params()
         assert "log_level" in params
-        assert f"{ingester.__class__.__name__}.multithreading" in params
+        # eflips-ingest 2.x parallelises the parse internally; the step no longer
+        # exposes a multithreading switch.
+        assert f"{ingester.__class__.__name__}.multithreading" not in params
 
     def test_generate(self, db_session: Session, ingester: BVGXMLIngester):
         """Test that generate() creates a scenario in the database."""
-        params = {"log_level": "INFO", f"{ingester.__class__.__name__}.multithreading": False}
+        params = {"log_level": "INFO"}
 
         # Run the generator
         result = ingester.generate(db_session, params)
@@ -86,21 +88,9 @@ class TestBVGXMLIngester:
         rotations = db_session.query(Rotation).all()
         assert len(rotations) > 0
 
-    @pytest.mark.skipif(sys.platform == "darwin", reason="Multiprocessing issues on macOS")
-    def test_generate_with_multithreading(self, db_session: Session, ingester: BVGXMLIngester):
-        """Test that generate() works with multithreading enabled."""
-        params = {"log_level": "WARNING", f"{ingester.__class__.__name__}.multithreading": True}
-
-        # Should not raise an exception
-        result = ingester.generate(db_session, params)
-
-        # Basic sanity check
-        scenarios = db_session.query(Scenario).all()
-        assert len(scenarios) == 1
-
     def test_generate_with_invalid_log_level(self, db_session: Session, ingester: BVGXMLIngester):
         """Test that generate() raises error with invalid log level."""
-        params = {"log_level": "INVALID", f"{ingester.__class__.__name__}.multithreading": False}
+        params = {"log_level": "INVALID"}
 
         with pytest.raises(ValueError, match="Invalid log level"):
             ingester.generate(db_session, params)
@@ -110,7 +100,7 @@ class TestBVGXMLIngester:
         self, db_session: Session, ingester: BVGXMLIngester, log_level: str
     ):
         """Test that generate() works with different log levels."""
-        params = {"log_level": log_level, f"{ingester.__class__.__name__}.multithreading": False}
+        params = {"log_level": log_level}
 
         # Shorten the input files for faster testing
         ingester.input_files = ingester.input_files[:2]

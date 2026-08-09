@@ -31,7 +31,7 @@ def bvg_xml_scenario_db(tmp_path_factory, test_data_dir: Path) -> Generator[Path
 
     BVGXMLIngester(input_files=xml_files, cache_enabled=False).generate(
         session,
-        {"log_level": "WARNING", "BVGXMLIngester.multithreading": False},
+        {"log_level": "WARNING"},
     )
 
     scenario = session.query(Scenario).one()

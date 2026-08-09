@@ -164,7 +164,6 @@ class TestPrefectFlow:
         """Get default pipeline parameters."""
         return {
             "log_level": "WARNING",
-            "BVGXMLIngester.multithreading": False,
         }
 
     def test_simple_flow_generator_only(

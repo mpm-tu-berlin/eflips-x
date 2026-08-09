@@ -114,7 +114,6 @@ def main() -> None:
 
     params: Dict[str, Any] = {
         "log_level": "INFO",
-        "BVGXMLIngester.multithreading": True,
     }
 
     # Collect all pipeline steps in a list
