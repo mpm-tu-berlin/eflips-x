@@ -1295,14 +1295,14 @@ simpy = ">=4.0.1,<5.0.0"
 
 [[package]]
 name = "eflips-depot"
-version = "4.18.2"
+version = "4.18.5"
 description = "Depot Simulation for eFLIPS"
 optional = false
 python-versions = "<3.14,>=3.11"
 groups = ["main"]
 files = [
-    {file = "eflips_depot-4.18.2-py3-none-any.whl", hash = "sha256:ec8220984d8a17f9b76720be8a65cbdca5b2bb583b126b3dc7490a6a75745388"},
-    {file = "eflips_depot-4.18.2.tar.gz", hash = "sha256:0b7f2918fc0a03cd2227c8235b105fbeea47452240ea990ae950d426f7b05eb6"},
+    {file = "eflips_depot-4.18.5-py3-none-any.whl", hash = "sha256:429092849a42c76c9cef1a1fefb10d8a9f9a4f66b99c13d5f9ec58f2eea4b171"},
+    {file = "eflips_depot-4.18.5.tar.gz", hash = "sha256:32b3e6787514b8654291fb34a3b1741a95b1297fd5aaed1f7223dd12a72adcbd"},
 ]
 
 [package.dependencies]
@@ -1341,14 +1341,14 @@ shapely = ">=2.0.5,<3.0.0"
 
 [[package]]
 name = "eflips-impact"
-version = "2.0.0"
+version = "2.1.0"
 description = "TCO and LCA analysis for eFLIPS"
 optional = false
 python-versions = "<3.14,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_impact-2.0.0-py3-none-any.whl", hash = "sha256:2f40e5c674eb24f42d7cf7fb79363d41a6b46c6a7f67ebe82a6ff5f2083a2010"},
-    {file = "eflips_impact-2.0.0.tar.gz", hash = "sha256:44abfe4962516727c0bd8048ce44902b8cc4b0fe57e0250c55f92428ac75858f"},
+    {file = "eflips_impact-2.1.0-py3-none-any.whl", hash = "sha256:6184c1d9b394deb859fe8c48ae87cc061ae61cb9d3d352963c3fa9168520d6bd"},
+    {file = "eflips_impact-2.1.0.tar.gz", hash = "sha256:ff5c18e42041aecc4ffb3866320a415c45aef863032c236c1b4cf01b781121a1"},
 ]
 
 [package.dependencies]
@@ -1358,14 +1358,14 @@ pytest = ">=9.0.3,<10.0.0"
 
 [[package]]
 name = "eflips-ingest"
-version = "1.7.0"
+version = "1.8.1"
 description = "A collection of import scripts for converting bus schedule data into the [eflips-model](https://github.com/mpm-tu-berlin/eflips-model) data format."
 optional = false
 python-versions = "<3.14,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_ingest-1.7.0-py3-none-any.whl", hash = "sha256:ed3c2a20fc9de34b7d12685dbb9c01a2b9cf4366b01896ca558c81ab73133c36"},
-    {file = "eflips_ingest-1.7.0.tar.gz", hash = "sha256:e4cd7b0f59f516b2d176f00baec67bc65bf2e46b3c60548d90c96ee0936b0c58"},
+    {file = "eflips_ingest-1.8.1-py3-none-any.whl", hash = "sha256:75e46265683d50638ec908fb9e558d723340c346f94e2832b63b3bcecbab3089"},
+    {file = "eflips_ingest-1.8.1.tar.gz", hash = "sha256:d38f1fad88bd7c233d714bd35f8b222047d76abd1da51d68789c7d18f48f6c50"},
 ]
 
 [package.dependencies]
