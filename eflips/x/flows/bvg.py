@@ -875,20 +875,27 @@ def run_impact_analysis(
     """
     scenario_config = SCENARIO_DISPLAY_CONFIG
 
-    # Shared parameters: paths to the eflips-impact JSON files. Per-scenario
-    # parameters (scenario_name) are added inside the loop.
-    config_params = {
-        "CompleteFleet.fleet_json": str(IMPACT_DATA_DIR / "fleet.json"),
-        "TCOConfigurator.tco_json": str(IMPACT_DATA_DIR / "tco.json"),
-        "LCAConfigurator.lca_json": str(IMPACT_DATA_DIR / "lca.json"),
-        "LCAConfigurator.lca_overrides_json": str(IMPACT_DATA_DIR / "lca_overrides.json"),
-    }
-
-    complete_fleet = CompleteFleet()
-    tco_configurator = TCOConfigurator()
+    # The impact JSON paths are constructor arguments, not params, so the framework
+    # content-hashes them into each step's cache key: editing a JSON re-runs the step.
+    complete_fleet = CompleteFleet(fleet_json=IMPACT_DATA_DIR / "fleet.json")
+    tco_configurator = TCOConfigurator(tco_json=IMPACT_DATA_DIR / "tco.json")
     tco_analyzer = TCOAnalyzer()
-    lca_configurator = LCAConfigurator()
+    lca_configurator = LCAConfigurator(
+        lca_json=IMPACT_DATA_DIR / "lca.json",
+        lca_overrides_json=IMPACT_DATA_DIR / "lca_overrides.json",
+    )
     lca_analyzer = LCAAnalyzer()
+
+    # Pin the annualisation factor instead of letting eflips-impact infer it from the
+    # span between the first and last trip departure: that span omits the run time of
+    # the final trip, and capital cost per revenue-km scales with its reciprocal, so
+    # the capex/opex split of the output would be set by a data artifact. Both
+    # analyzers get the same value so TCO and LCA share a denominator.
+    scaling_factor = 365.0 / SIMULATION_DAYS
+    config_params = {
+        "TCOAnalyzer.scaling_factor": scaling_factor,
+        "LCAAnalyzer.scaling_factor": scaling_factor,
+    }
 
     tco_rows: List[pd.DataFrame] = []
     lca_rows: List[pd.DataFrame] = []

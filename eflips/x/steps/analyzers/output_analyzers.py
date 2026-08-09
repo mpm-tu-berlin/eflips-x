@@ -8,8 +8,7 @@ pipeline framework.
 
 import logging
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import matplotlib.animation as animation
@@ -20,8 +19,7 @@ from eflips.eval.output import prepare as eval_output_prepare
 from eflips.eval.output import visualize as eval_output_visualize
 from eflips.eval.output.prepare import depot_layout
 from eflips.impact.lca import calculate_lca  # type: ignore[import-untyped]
-from eflips.impact.tco import calculate_tco, init_tco_params  # type: ignore[import-untyped]
-from eflips.impact.utils import complete_fleet  # type: ignore[import-untyped]
+from eflips.impact.tco import calculate_tco  # type: ignore[import-untyped]
 from eflips.model import (
     Event,
     EventType,
@@ -33,7 +31,7 @@ from eflips.model import (
 )
 from sqlalchemy.orm import Session
 
-from eflips.x.framework import Analyzer, Modifier, ScenarioDisplayConfig
+from eflips.x.framework import Analyzer, ScenarioDisplayConfig
 
 logger = logging.getLogger(__name__)
 
@@ -647,6 +645,78 @@ Example: `params["{cls.__name__}.scenario_ids"] = [1, 2]`
         )
 
 
+def _resolve_scaling_factor(
+    step: Analyzer,
+    session: sqlalchemy.orm.session.Session,
+    scenario: Scenario,
+    params: Dict[str, Any],
+) -> Optional[float]:
+    """
+    Resolve the annualisation factor for an eflips-impact calculation.
+
+    Returns the explicitly configured ``<StepName>.scaling_factor`` when it is set.
+    When it is not, ``None`` is returned so that eflips-impact applies its own
+    default -- ``365 / (last trip departure - first trip departure)`` -- and a
+    warning is emitted naming the value that will be used.
+
+    The warning matters because the factor does not cancel out of the
+    per-revenue-km normalisation. Operating costs and revenue-km are both
+    multiplied by it, so operating cost per revenue-km is scale-invariant. Capital
+    costs are derived from vehicle counts and charging peaks, which are *not*
+    scaled, so capital cost per revenue-km is proportional to
+    ``1 / scaling_factor``. Left implicit, the capital/operating split of the
+    output is fixed by when the last bus happens to depart rather than by a
+    stated assumption.
+
+    Args:
+        step: The analyzer requesting the factor; supplies the parameter name and logger.
+        session: SQLAlchemy session connected to the scenario's database.
+        scenario: The scenario being analyzed.
+        params: Pipeline parameters.
+
+    Returns:
+        The configured factor, or ``None`` to let eflips-impact auto-detect it.
+    """
+    param_name = f"{step.__class__.__name__}.scaling_factor"
+    configured = params.get(param_name)
+    if configured is not None:
+        return float(configured)
+
+    # Mirrors eflips.impact.utils.extraction._default_scaling_factor purely so the
+    # auto-detected value can be named in the warning; the value itself is still
+    # computed by eflips-impact.
+    earliest, latest = session.execute(
+        sqlalchemy.select(
+            sqlalchemy.func.min(Trip.departure_time),
+            sqlalchemy.func.max(Trip.departure_time),
+        ).where(Trip.scenario_id == scenario.id)
+    ).one()
+
+    if earliest is None or latest is None or earliest == latest:
+        step.logger.warning(
+            "%s: '%s' is not set and the scenario has no usable trip departure span, "
+            "so eflips-impact will raise when it tries to auto-detect one.",
+            step.__class__.__name__,
+            param_name,
+        )
+        return None
+
+    span_days = (latest - earliest).total_seconds() / 86_400.0
+    step.logger.warning(
+        "%s: '%s' is not set, so eflips-impact auto-detects it as %.3f "
+        "(365 / %.4f days, the span between the first and last trip departure). "
+        "That span is a data artifact rather than a stated assumption -- it omits the "
+        "run time of the final trip -- and capital cost per revenue-km scales with its "
+        "reciprocal. Set '%s' (e.g. 365 / SIMULATION_DAYS) to pin it.",
+        step.__class__.__name__,
+        param_name,
+        365.0 / span_days,
+        span_days,
+        param_name,
+    )
+    return None
+
+
 class TCOAnalyzer(Analyzer):
     """
     Analyzer that calculates Total Cost of Ownership (TCO) using eflips-impact.
@@ -679,7 +749,7 @@ class TCOAnalyzer(Analyzer):
         "OTHER": "Other",
     }
 
-    def __init__(self, code_version: str = "v3.0.0", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v3.1.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -688,6 +758,15 @@ class TCOAnalyzer(Analyzer):
             f"{cls.__name__}.scenario_name": (
                 "Display name for this scenario in output. "
                 "Falls back to Scenario.name from the database."
+            ),
+            f"{cls.__name__}.scaling_factor": (
+                "Optional float. Annualisation factor (365 / simulated days) used to "
+                "scale simulation-period quantities to a year. When unset, eflips-impact "
+                "auto-detects it from the span between the first and last trip departure "
+                "and a warning is logged. Pin it (e.g. 365 / SIMULATION_DAYS) to make the "
+                "assumption explicit: capital cost per revenue-km scales with its "
+                "reciprocal, so it sets the capital/operating split of the result. "
+                "Default: None (auto-detect)."
             ),
         }
 
@@ -718,7 +797,8 @@ class TCOAnalyzer(Analyzer):
             scenario_name = scenario.name or "Unknown"
 
         # Calculate TCO (per revenue-km, by cost category).
-        tco_result = calculate_tco(scenario=scenario)
+        scaling_factor = _resolve_scaling_factor(self, session, scenario, params)
+        tco_result = calculate_tco(scenario=scenario, scaling_factor=scaling_factor)
         per_revenue_km = tco_result.tco_by_type_per_revenue_km
 
         result: Dict[str, Any] = {cat.name: cost for cat, cost in per_revenue_km.items()}
@@ -846,7 +926,7 @@ class LCAAnalyzer(Analyzer):
         "by_scope": "visualize_by_scope",
     }
 
-    def __init__(self, code_version: str = "v1.1.0", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v1.2.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -855,6 +935,14 @@ class LCAAnalyzer(Analyzer):
             f"{cls.__name__}.scenario_name": (
                 "Display name for this scenario in output. "
                 "Falls back to Scenario.name from the database."
+            ),
+            f"{cls.__name__}.scaling_factor": (
+                "Optional float. Annualisation factor (365 / simulated days) used to "
+                "scale simulation-period quantities to a year. When unset, eflips-impact "
+                "auto-detects it from the span between the first and last trip departure "
+                "and a warning is logged. Pin it (e.g. 365 / SIMULATION_DAYS) to make the "
+                "assumption explicit, and use the same value as TCOAnalyzer so both "
+                "results share a denominator. Default: None (auto-detect)."
             ),
         }
 
@@ -886,7 +974,8 @@ class LCAAnalyzer(Analyzer):
 
         # Calculate the LCA (GWP per revenue-km), broken down by component type
         # and by lifecycle scope.
-        lca_result = calculate_lca(scenario=scenario)
+        scaling_factor = _resolve_scaling_factor(self, session, scenario, params)
+        lca_result = calculate_lca(scenario=scenario, scaling_factor=scaling_factor)
 
         result: Dict[str, Any] = {
             item_type.name: impact_vector.gwp
