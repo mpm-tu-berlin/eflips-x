@@ -2,44 +2,26 @@ from __future__ import annotations
 
 import logging
 import shutil
-import socket
+import tempfile
 import warnings
+import zipfile
 from datetime import date, datetime, timedelta
-from multiprocessing import Pool
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Tuple
 from uuid import UUID
 
 import gtfs_kit as gk  # type: ignore[import-untyped]
 import sqlalchemy.orm.session
+from eflips.ingest.bvgxml import BvgxmlIngester
 from eflips.ingest.gtfs import GtfsIngester as EflipsIngestGtfsIngester
-from eflips.ingest.legacy.bvgxml import (
-    load_and_validate_xml,
-    create_stations,
-    TimeProfile,
-    create_routes_and_time_profiles,
-    create_trip_prototypes,
-    create_trips_and_vehicle_schedules,
-    merge_identical_stations,
-    merge_identical_rotations,
-    identify_and_delete_overlapping_rotations,
-    recenter_station,
-)
-from eflips.ingest.legacy.xmldata import Linienfahrplan
 from eflips.model import (
     Scenario,
     Route,
     ConsistencyWarning,
-    Station,
-    AssocRouteStation,
     Trip,
     Rotation,
 )
-from geoalchemy2.functions import ST_Distance
-from geoalchemy2.shape import from_shape, to_shape
 from prefect.artifacts import create_progress_artifact, update_progress_artifact
-from shapely.geometry import Point  # type: ignore[import-untyped]
-from sqlalchemy import func, text
 
 from eflips.x.framework import Generator
 
@@ -48,10 +30,31 @@ if TYPE_CHECKING:
 
 
 class BVGXMLIngester(Generator):
+    """
+    Generator that ingests BVG-XML ``Linienfahrplan`` files into a new database.
+
+    Thin wrapper around :class:`eflips.ingest.bvgxml.BvgxmlIngester`. eflips-ingest 2.x
+    replaced the loose ``eflips.ingest.legacy.bvgxml`` functions this step used to
+    orchestrate itself with a two-phase ingester built on the standard ingester API:
+
+    - ``prepare()`` takes a **zip** of ``*.xml`` files, parses and validates each one,
+      and merges them into a single corpus so that contradictions between files surface
+      before anything is written. It returns either a UUID naming the staged data or a
+      dict of field errors.
+    - ``ingest()`` resolves that corpus (network, routes, rotations, schedule) and writes
+      it to the database in one insert-only pass, then fixes the id sequences.
+
+    The merging, deduplication and station recentering that this step used to drive
+    itself are part of that resolution now, so they are no longer done here.
+
+    Input files may be given either as individual ``*.xml`` paths (they are zipped into
+    a temporary archive) or as a single ``*.zip``, which is passed through untouched.
+    """
+
     def __init__(
         self,
         input_files: List[Path],
-        code_version: str = "v1",
+        code_version: str = "v2",
         cache_enabled: bool = True,
     ):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
@@ -62,285 +65,122 @@ class BVGXMLIngester(Generator):
         if not all(f.exists() for f in self.input_files):
             missing_files = [str(f) for f in self.input_files if not f.exists()]
             raise ValueError(f"The following input files do not exist: {missing_files}")
+        if not self.input_files:
+            raise ValueError("At least one input file must be provided")
 
     @classmethod
     def document_params(cls) -> Dict[str, str]:
         """
-        This method documents the parameters of the generator. It returns a dictionary where the keys are the parameter
-        and the values are a description of the parameter. The values may use markdown formatting. They may be
-        multi-line strings.
-        If the parameters are specific to a subclass, the key should be prefixed with the class name and a dot.
-        For example, if the class is MyGenerator and the parameter is my_param, the key should be MyGenerator.my_param.
+        Document the parameters of this generator.
+
+        The ``multithreading`` parameter is gone: eflips-ingest 2.x parallelises the
+        parse internally, so there is nothing left for the caller to choose.
+
         :return: A dictionary documenting the parameters of the generator.
         """
         return {
-            "log_level": "Logging level. One of DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is INFO.",
-            f"{cls.__name__}.multithreading": "Whether to use multithreading. Default is True.",
+            "log_level": (
+                "Logging level. One of DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is INFO."
+            ),
         }
 
+    def _zip_for_ingest(self, work_dir: Path) -> Path:
+        """Return a zip of the input files, creating one if they are loose XML files.
+
+        ``BvgxmlIngester.prepare`` only accepts a zip, and rejects a zip that contains
+        another zip rather than unpacking it, so a single ``*.zip`` input is passed
+        straight through instead of being re-wrapped.
+        """
+        if len(self.input_files) == 1 and self.input_files[0].suffix.lower() == ".zip":
+            return self.input_files[0]
+
+        zip_path = work_dir / "bvgxml_input.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for xml_file in self.input_files:
+                # Flatten into the archive root: prepare() globs recursively, but a flat
+                # layout keeps the extracted tree predictable.
+                archive.write(xml_file, arcname=xml_file.name)
+        return zip_path
+
     def generate(self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]) -> None:
+        """
+        Ingest the BVG-XML input files into the session's database.
+
+        :param session: Session on the database to populate. Note that the ingester opens
+            its *own* connection to the same database and commits there, so this session
+            is rolled back first to make sure it is not holding a transaction, and
+            expired afterwards so it sees the newly written rows.
+        :param params: Pipeline parameters.
+        :raises ValueError: If the input files cannot be prepared for ingestion.
+        """
         # PipelineStep.set_log_level() (called from PipelineStep.execute()) has
         # already configured logging from params["log_level"] before generate()
-        # runs, so no per-step match/case is needed here. Still validate the
-        # value so direct callers (e.g. tests) get the same error contract.
+        # runs. Still validate the value so direct callers (e.g. tests) get the
+        # same error contract.
         self._validate_log_level_param(params)
         logger = logging.getLogger(__name__)
 
-        # Set up an empty progress artifact
         progress_artifact_id = create_progress_artifact(
             progress=0.0, key=self.__class__.__name__.lower()
         )
         assert isinstance(progress_artifact_id, UUID)
 
-        TOTAL_STEPS = 11
-        current_step = 0
+        # get_bind() is typed as Engine | Connection; .engine narrows both to the Engine.
+        database_url = session.get_bind().engine.url.render_as_string(hide_password=False)
 
-        ### STEP 1: Load the XML files into memory
-        # First, we go through all the files and load them into memory
-        multithreading = params[f"{self.__class__.__name__}.multithreading"]
-        logger.info(f"Using multithreading: {multithreading}")
+        # The ingester writes through its own session and commits. Release anything this
+        # session may be holding so the two do not contend for the SQLite write lock.
+        session.rollback()
 
-        if multithreading:
-            with Pool() as pool:
-                schedules = pool.map(load_and_validate_xml, self.input_files)
-        else:
-            schedules = []
-            for path in self.input_files:
-                schedules.append(load_and_validate_xml(path))
+        def report(offset: float, description: str) -> Callable[[float], None]:
+            """Map an ingester progress fraction onto half of the Prefect progress bar."""
 
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Loaded XML files",
-        )
-        logger.info(f"Loaded {len(schedules)} schedules from XML files")
-
-        ### STEP 1.5: Create the scenario
-        scenario = Scenario(
-            name=f"Created by BVG-XML Ingestion on {socket.gethostname()} at {datetime.now().isoformat()}"
-        )
-        session.add(scenario)
-        session.flush()
-        scenario_id = scenario.id
-
-        ### STEP 2: Create the stations
-        # Now, we go through the schedules and create the stations
-        # No multithreading, because that would just create duplicate stations
-        for schedule in schedules:
-            create_stations(schedule, scenario_id, session)
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Created stations",
-        )
-        logger.info("Created stations")
-
-        ### STEP 3: Create the routes and save some data for later
-        # Again no multithreading
-        create_route_results: List[
-            Tuple[
-                Linienfahrplan,
-                Dict[int, Dict[int, List[TimeProfile.TimeProfilePoint]]],
-                Dict[int, None | Route],
-            ]
-        ] = []
-        for schedule in schedules:
-            trip_time_profiles, db_routes_by_lfd_nr = create_routes_and_time_profiles(
-                schedule, scenario_id, session
-            )
-            create_route_results.append((schedule, trip_time_profiles, db_routes_by_lfd_nr))
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Created routes",
-        )
-        logger.info("Created routes")
-
-        ### STEP 4: Create the trip prototypes
-        # This can be done in parallel, but we don't need to do it, it's fast enough
-        all_trip_protoypes: List[Dict[int, None | TimeProfile]] = []
-        for create_route_result in create_route_results:
-            trip_prototypes = create_trip_prototypes(
-                create_route_result[0], create_route_result[1], create_route_result[2]
-            )
-            all_trip_protoypes.append(trip_prototypes)
-
-        # Unify the dictionaries, making sure the contents are the same if there is a duplicate key
-        trip_prototypes = {}
-        for the_dict in all_trip_protoypes:
-            for fahrt_id, time_profile in the_dict.items():
-                if fahrt_id in trip_prototypes:
-                    if trip_prototypes[fahrt_id] != time_profile:
-                        raise ValueError(
-                            f"Trip {fahrt_id} has two different time profiles in different schedules"
-                        )
-                else:
-                    trip_prototypes[fahrt_id] = time_profile
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Created trip prototypes",
-        )
-        logger.info("Created trip prototypes")
-
-        ### STEP 5: Create the trips and vehicle schedules
-        for schedule in schedules:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=ConsistencyWarning)
-                create_trips_and_vehicle_schedules(schedule, trip_prototypes, scenario_id, session)
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Created trips and vehicle schedules",
-        )
-        logger.info("Created trips and vehicle schedules")
-
-        ### STEP 6: Set the geom of the stations
-        # No multithreading, because it should be fast enough
-        stations_without_geom_q = (
-            session.query(Station)
-            .join(AssocRouteStation)
-            .filter(Station.scenario_id == scenario_id)
-            .distinct(Station.id)
-        )
-        for station in stations_without_geom_q:
-            # Get the median of the assoc_route_stations
-            recenter_station(station, session)
-
-        # Flush the session to convert the geoms from string to binary
-        session.flush()
-        session.expire_all()
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Set station geom",
-        )
-        logger.info("Set station geom")
-
-        ### STEP 7: Fix the routes with very large distances:
-        # There are some routes which have a distance of zero even once the last point is reached
-        # We set their distance to a very large number. Now we set it to the geometric distance between the first and last
-        # point
-        long_route_q = (
-            session.query(Route)
-            .filter(Route.scenario_id == scenario_id)
-            .filter(Route.distance >= 1e6 * 1000)
-        )
-        for route in long_route_q:
-            # Drop Z before ST_Transform: SpatiaLite's planar ST_Distance returns NULL
-            # for 3D inputs, which would set distance = NULL and trip the positive-check
-            # constraint when this fallback fires.
-            first_pt = to_shape(route.departure_station.geom)  # type: ignore[arg-type]
-            last_pt = to_shape(route.arrival_station.geom)  # type: ignore[arg-type]
-            first_point_2d = from_shape(Point(first_pt.x, first_pt.y), srid=4326)
-            last_point_2d = from_shape(Point(last_pt.x, last_pt.y), srid=4326)
-
-            first_point_soldner = func.ST_Transform(first_point_2d, 3068)
-            last_point_soldner = func.ST_Transform(last_point_2d, 3068)
-            dist_q = ST_Distance(first_point_soldner, last_point_soldner)
-
-            dist = session.query(dist_q).one()[0]
-
-            with session.no_autoflush:
-                route.distance = dist
-                route.assoc_route_stations[-1].elapsed_distance = dist
-            route.name = "CHECK DISTANCE: " + route.name
-
-        session.flush()
-        session.expire_all()
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Fixed long routes",
-        )
-        logger.info("Fixed long routes")
-
-        # STEP 8: Merge identical stations
-        print(f"(8/{TOTAL_STEPS}) Merging identical stations")
-        merge_identical_stations(scenario_id, session)
-
-        session.flush()
-        session.expire_all()
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Merged identical stations",
-        )
-
-        # STEP 9: Combine rotations with the same name
-        print(f"(9/{TOTAL_STEPS}) Merging identical rotations")
-        merge_identical_rotations(scenario_id, session)
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Merged identical rotations",
-        )
-        logger.info("Merged identical rotations")
-
-        # STEP 10: Identify overlapping rotations
-        print(f"(10/{TOTAL_STEPS}) Identifying and deleting overlapping rotations")
-        identify_and_delete_overlapping_rotations(scenario_id, session)
-        current_step += 1
-        update_progress_artifact(
-            artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Identified and deleted overlapping rotations",
-        )
-        logger.info("Identified and deleted overlapping rotations")
-
-        # STEP 11: Fix the max sequence numbers
-        print(f"(11/{TOTAL_STEPS}) Fixing max sequence numbers")
-        TABLES = [
-            "Scenario",
-            "Plan",
-            "Process",
-            "BatteryType",
-            "VehicleClass",
-            "Line",
-            "Station",
-            "Depot",
-            "AssocPlanProcess",
-            "VehicleType",
-            "Route",
-            "Area",
-            "Vehicle",
-            "AssocVehicleTypeVehicleClass",
-            "AssocRouteStation",
-            "AssocAreaProcess",
-            "Rotation",
-            "Trip",
-            "Event",
-            "StopTime",
-        ]
-
-        for table_name in TABLES:
-            # Read the maximum id from the table
-            result = session.execute(text(f'SELECT MAX(id) FROM "{table_name}"'))
-            max_id = result.scalar()  # scalar() returns None if no rows or if MAX(id) is NULL
-
-            if max_id is not None:
-                # Update the sqlite_sequence table
-                session.execute(
-                    text(
-                        f'UPDATE sqlite_sequence SET seq = {max_id+1} WHERE name = "{table_name}"'
-                    )
+            def callback(fraction: float) -> None:
+                update_progress_artifact(
+                    artifact_id=progress_artifact_id,
+                    progress=offset + 50.0 * fraction,
+                    description=description,
                 )
-        current_step += 1
+
+            return callback
+
+        ingester = BvgxmlIngester(database_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_path = self._zip_for_ingest(Path(temp_dir))
+            logger.info("Preparing %d BVG-XML input file(s) for ingestion", len(self.input_files))
+
+            success, result = ingester.prepare(
+                zip_path,
+                progress_callback=report(0.0, "Parsing and merging XML files"),
+            )
+            if not success:
+                raise ValueError(f"BVG-XML preparation failed: {result}")
+            assert isinstance(result, UUID)
+
+            try:
+                logger.info("Ingesting prepared BVG-XML corpus %s", result)
+                ingester.ingest(
+                    result,
+                    progress_callback=report(50.0, "Writing scenario to the database"),
+                )
+            finally:
+                # prepare() stages a pickle under the system temp dir keyed by UUID and
+                # nothing else cleans it up; for a full-city import that is hundreds of MB.
+                shutil.rmtree(ingester.path_for_uuid(result), ignore_errors=True)
+
+        # The rows were written on the ingester's connection, so drop anything this
+        # session has cached before the framework commits and hands it on.
+        session.expire_all()
+
+        scenario = session.query(Scenario).one()
+        logger.info("Ingested BVG-XML data into scenario '%s'", scenario.name)
+
         update_progress_artifact(
             artifact_id=progress_artifact_id,
-            progress=current_step / (TOTAL_STEPS / 100),
-            description="Fixed max sequence numbers",
+            progress=100.0,
+            description="Ingestion complete",
         )
-        logger.info("Fixed max sequence numbers")
 
 
 class GTFSIngester(Generator):
