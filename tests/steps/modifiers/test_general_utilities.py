@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from eflips.model import (
+    EnergySource,
     Rotation,
     Scenario,
     Trip,
@@ -22,8 +23,10 @@ from sqlalchemy.orm import Session
 from eflips.x.steps.modifiers.general_utilities import (
     AddTemperatures,
     CalculateConsumptionScaling,
+    CreateDieselVehicleTypes,
     RemoveConsumptionLuts,
     RemoveUnusedData,
+    VehicleTypeBlockAssignment,
 )
 
 
@@ -646,3 +649,252 @@ class TestCalculateConsumptionScaling:
         docs = CalculateConsumptionScaling().document_params()
         assert isinstance(docs, dict)
         assert "CalculateConsumptionScaling.real_quarterly_consumption" in docs
+
+
+class TestCreateDieselVehicleTypes:
+    """Test suite for the CreateDieselVehicleTypes modifier."""
+
+    @pytest.fixture
+    def scenario_with_electric_types(self, db_session: Session) -> Scenario:
+        """Scenario with two battery-electric vehicle types and one rotation each."""
+        scenario = Scenario(name="Diesel Test", name_short="DT")
+        db_session.add(scenario)
+        db_session.flush()
+
+        for name, short in (("Electric Bus 12m", "EN"), ("Electric Bus 18m", "GN")):
+            db_session.add(
+                VehicleType(
+                    scenario_id=scenario.id,
+                    name=name,
+                    name_short=short,
+                    battery_capacity=350.0,
+                    battery_capacity_reserve=0.0,
+                    charging_curve=[[0, 150], [1, 150]],
+                    opportunity_charging_capable=True,
+                    minimum_charging_power=10,
+                    charging_efficiency=0.95,
+                    empty_mass=10000,
+                    allowed_mass=20000,
+                    consumption=1.2,
+                    energy_source=EnergySource.BATTERY_ELECTRIC,
+                    length=12.0,
+                    width=2.5,
+                    height=3.5,
+                )
+            )
+        db_session.flush()
+        return scenario
+
+    def test_creates_one_diesel_type_per_electric_type(
+        self, temp_db: Path, db_session: Session, scenario_with_electric_types: Scenario
+    ):
+        CreateDieselVehicleTypes().modify(db_session, {})
+        db_session.flush()
+
+        diesel_types = (
+            db_session.query(VehicleType)
+            .filter(VehicleType.name_short.startswith("Diesel "))
+            .all()
+        )
+        assert {vt.name_short for vt in diesel_types} == {"Diesel EN", "Diesel GN"}
+        for diesel_type in diesel_types:
+            assert diesel_type.energy_source == EnergySource.DIESEL
+            assert diesel_type.consumption == CreateDieselVehicleTypes.DIESEL_CONSUMPTION
+
+    def test_copies_dimensions_needed_by_depot_layout(
+        self, temp_db: Path, db_session: Session, scenario_with_electric_types: Scenario
+    ):
+        """DepotGenerator's optimal-layout mode requires length/width/height."""
+        CreateDieselVehicleTypes().modify(db_session, {})
+        db_session.flush()
+
+        source = db_session.query(VehicleType).filter(VehicleType.name_short == "EN").one()
+        diesel = db_session.query(VehicleType).filter(VehicleType.name_short == "Diesel EN").one()
+        assert (diesel.length, diesel.width, diesel.height) == (
+            source.length,
+            source.width,
+            source.height,
+        )
+
+    def test_is_idempotent(
+        self, temp_db: Path, db_session: Session, scenario_with_electric_types: Scenario
+    ):
+        step = CreateDieselVehicleTypes()
+        step.modify(db_session, {})
+        db_session.flush()
+        step.modify(db_session, {})
+        db_session.flush()
+
+        assert (
+            db_session.query(VehicleType).filter(VehicleType.name_short == "Diesel EN").count()
+            == 1
+        )
+
+    def test_covers_vehicle_types_that_never_set_energy_source(
+        self, temp_db: Path, db_session: Session
+    ):
+        """energy_source is NOT NULL and defaults to BATTERY_ELECTRIC.
+
+        Vehicle types created without naming it are battery-electric already, so they
+        must still get diesel counterparts.
+        """
+        scenario = Scenario(name="Implicit Source", name_short="IS")
+        db_session.add(scenario)
+        db_session.flush()
+        db_session.add(
+            VehicleType(
+                scenario_id=scenario.id,
+                name="Unspecified Bus",
+                name_short="UB",
+                battery_capacity=350.0,
+                battery_capacity_reserve=0.0,
+                charging_curve=[[0, 150], [1, 150]],
+                opportunity_charging_capable=False,
+                minimum_charging_power=10,
+                charging_efficiency=0.95,
+                empty_mass=10000,
+                allowed_mass=20000,
+                consumption=1.2,
+            )
+        )
+        db_session.flush()
+
+        CreateDieselVehicleTypes().modify(db_session, {})
+        db_session.flush()
+
+        assert (
+            db_session.query(VehicleType).filter(VehicleType.name_short == "Diesel UB").count()
+            == 1
+        )
+
+    def test_document_params(self):
+        assert CreateDieselVehicleTypes.document_params() == {}
+
+
+class TestVehicleTypeBlockAssignment:
+    """Test suite for the VehicleTypeBlockAssignment modifier."""
+
+    @pytest.fixture
+    def scenario_with_diesel_types(self, db_session: Session) -> Scenario:
+        """Scenario with electric types, diesel counterparts, and two rotations."""
+        scenario = Scenario(name="Assignment Test", name_short="AT")
+        db_session.add(scenario)
+        db_session.flush()
+
+        electric = VehicleType(
+            scenario_id=scenario.id,
+            name="Electric Bus 12m",
+            name_short="EN",
+            battery_capacity=350.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            charging_efficiency=0.95,
+            empty_mass=10000,
+            allowed_mass=20000,
+            consumption=1.2,
+            energy_source=EnergySource.BATTERY_ELECTRIC,
+        )
+        db_session.add(electric)
+        db_session.flush()
+
+        for index in range(2):
+            db_session.add(
+                Rotation(
+                    scenario_id=scenario.id,
+                    vehicle_type_id=electric.id,
+                    allow_opportunity_charging=False,
+                    name=f"Rotation {index}",
+                )
+            )
+        db_session.flush()
+
+        CreateDieselVehicleTypes().modify(db_session, {})
+        db_session.flush()
+        return scenario
+
+    def test_reassigns_all_rotations_by_default(
+        self, temp_db: Path, db_session: Session, scenario_with_diesel_types: Scenario
+    ):
+        VehicleTypeBlockAssignment().modify(db_session, {})
+        db_session.flush()
+
+        for rotation in db_session.query(Rotation).all():
+            assert rotation.vehicle_type.name_short == "Diesel EN"
+
+    def test_reassigns_only_listed_blocks(
+        self, temp_db: Path, db_session: Session, scenario_with_diesel_types: Scenario
+    ):
+        rotations = db_session.query(Rotation).order_by(Rotation.id).all()
+        target = rotations[0]
+
+        VehicleTypeBlockAssignment().modify(
+            db_session, {"VehicleTypeBlockAssignment.block_ids": [target.id]}
+        )
+        db_session.flush()
+
+        assert target.vehicle_type.name_short == "Diesel EN"
+        assert rotations[1].vehicle_type.name_short == "EN"
+
+    def test_empty_block_list_is_a_no_op(
+        self, temp_db: Path, db_session: Session, scenario_with_diesel_types: Scenario
+    ):
+        VehicleTypeBlockAssignment().modify(
+            db_session, {"VehicleTypeBlockAssignment.block_ids": []}
+        )
+        db_session.flush()
+
+        for rotation in db_session.query(Rotation).all():
+            assert rotation.vehicle_type.name_short == "EN"
+
+    def test_is_idempotent(
+        self, temp_db: Path, db_session: Session, scenario_with_diesel_types: Scenario
+    ):
+        """Rotations already pointing at a diesel type are skipped, not re-prefixed."""
+        step = VehicleTypeBlockAssignment()
+        step.modify(db_session, {})
+        db_session.flush()
+        step.modify(db_session, {})
+        db_session.flush()
+
+        for rotation in db_session.query(Rotation).all():
+            assert rotation.vehicle_type.name_short == "Diesel EN"
+
+    def test_raises_when_no_diesel_types_exist(self, temp_db: Path, db_session: Session):
+        scenario = Scenario(name="No Diesel", name_short="ND")
+        db_session.add(scenario)
+        db_session.flush()
+
+        with pytest.raises(ValueError, match="No diesel vehicle types found"):
+            VehicleTypeBlockAssignment().modify(db_session, {})
+
+    def test_raises_when_a_rotation_has_no_diesel_counterpart(
+        self, temp_db: Path, db_session: Session, scenario_with_diesel_types: Scenario
+    ):
+        orphan_type = VehicleType(
+            scenario_id=scenario_with_diesel_types.id,
+            name="Unmatched Bus",
+            name_short="XX",
+            battery_capacity=350.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=False,
+            minimum_charging_power=10,
+            charging_efficiency=0.95,
+            empty_mass=10000,
+            allowed_mass=20000,
+            consumption=1.2,
+            energy_source=EnergySource.BATTERY_ELECTRIC,
+        )
+        db_session.add(orphan_type)
+        db_session.flush()
+        db_session.query(Rotation).order_by(Rotation.id).first().vehicle_type_id = orphan_type.id
+        db_session.flush()
+
+        with pytest.raises(ValueError, match="No diesel counterpart"):
+            VehicleTypeBlockAssignment().modify(db_session, {})
+
+    def test_document_params(self):
+        params = VehicleTypeBlockAssignment.document_params()
+        assert "VehicleTypeBlockAssignment.block_ids" in params

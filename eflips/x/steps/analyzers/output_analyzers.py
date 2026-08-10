@@ -1,14 +1,14 @@
 """
-Analyzers for output evaluation using eflips-eval and eflips-tco.
+Analyzers for output evaluation using eflips-eval and eflips-impact.
 
 These analyzers wrap the eflips.eval.output module's prepare/visualize functions
-and the eflips-tco TCO calculator to make them usable within the eflips-x pipeline
-framework.
+and the eflips-impact TCO calculator to make them usable within the eflips-x
+pipeline framework.
 """
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import matplotlib.animation as animation
@@ -18,8 +18,9 @@ import sqlalchemy
 from eflips.eval.output import prepare as eval_output_prepare
 from eflips.eval.output import visualize as eval_output_visualize
 from eflips.eval.output.prepare import depot_layout
+from eflips.impact.lca import calculate_lca  # type: ignore[import-untyped]
+from eflips.impact.tco import calculate_tco  # type: ignore[import-untyped]
 from eflips.model import (
-    EnergySource,
     Event,
     EventType,
     Route,
@@ -27,15 +28,6 @@ from eflips.model import (
     Trip,
     Vehicle,
     VehicleType,
-)
-from eflips.tco.data_queries import init_tco_parameters  # type: ignore[import-untyped]
-from eflips.tco.tco_calculator import TCOCalculator  # type: ignore[import-untyped]
-from eflips.tco.tco_parameter_config import (  # type: ignore[import-untyped]
-    BatteryTypeTCOParameter,
-    ChargingInfrastructureTCOParameter,
-    ChargingPointTypeTCOParameter,
-    ScenarioTCOParameter,
-    VehicleTypeTCOParameter,
 )
 from sqlalchemy.orm import Session
 
@@ -653,19 +645,89 @@ Example: `params["{cls.__name__}.scenario_ids"] = [1, 2]`
         )
 
 
+def _resolve_scaling_factor(
+    step: Analyzer,
+    session: sqlalchemy.orm.session.Session,
+    scenario: Scenario,
+    params: Dict[str, Any],
+) -> Optional[float]:
+    """
+    Resolve the annualisation factor for an eflips-impact calculation.
+
+    Returns the explicitly configured ``<StepName>.scaling_factor`` when it is set.
+    When it is not, ``None`` is returned so that eflips-impact applies its own
+    default -- ``365 / (last trip departure - first trip departure)`` -- and a
+    warning is emitted naming the value that will be used.
+
+    The warning matters because the factor does not cancel out of the
+    per-revenue-km normalisation. Operating costs and revenue-km are both
+    multiplied by it, so operating cost per revenue-km is scale-invariant. Capital
+    costs are derived from vehicle counts and charging peaks, which are *not*
+    scaled, so capital cost per revenue-km is proportional to
+    ``1 / scaling_factor``. Left implicit, the capital/operating split of the
+    output is fixed by when the last bus happens to depart rather than by a
+    stated assumption.
+
+    Args:
+        step: The analyzer requesting the factor; supplies the parameter name and logger.
+        session: SQLAlchemy session connected to the scenario's database.
+        scenario: The scenario being analyzed.
+        params: Pipeline parameters.
+
+    Returns:
+        The configured factor, or ``None`` to let eflips-impact auto-detect it.
+    """
+    param_name = f"{step.__class__.__name__}.scaling_factor"
+    configured = params.get(param_name)
+    if configured is not None:
+        return float(configured)
+
+    # Mirrors eflips.impact.utils.extraction._default_scaling_factor purely so the
+    # auto-detected value can be named in the warning; the value itself is still
+    # computed by eflips-impact.
+    earliest, latest = session.execute(
+        sqlalchemy.select(
+            sqlalchemy.func.min(Trip.departure_time),
+            sqlalchemy.func.max(Trip.departure_time),
+        ).where(Trip.scenario_id == scenario.id)
+    ).one()
+
+    if earliest is None or latest is None or earliest == latest:
+        step.logger.warning(
+            "%s: '%s' is not set and the scenario has no usable trip departure span, "
+            "so eflips-impact will raise when it tries to auto-detect one.",
+            step.__class__.__name__,
+            param_name,
+        )
+        return None
+
+    span_days = (latest - earliest).total_seconds() / 86_400.0
+    step.logger.warning(
+        "%s: '%s' is not set, so eflips-impact auto-detects it as %.3f "
+        "(365 / %.4f days, the span between the first and last trip departure). "
+        "That span is a data artifact rather than a stated assumption -- it omits the "
+        "run time of the final trip -- and capital cost per revenue-km scales with its "
+        "reciprocal. Set '%s' (e.g. 365 / SIMULATION_DAYS) to pin it.",
+        step.__class__.__name__,
+        param_name,
+        365.0 / span_days,
+        span_days,
+        param_name,
+    )
+    return None
+
+
 class TCOAnalyzer(Analyzer):
     """
-    Analyzer for calculating Total Cost of Ownership (TCO) using the eflips-tco package.
+    Analyzer that calculates Total Cost of Ownership (TCO) using eflips-impact.
 
     Computes TCO broken down by cost category (vehicle, battery, infrastructure,
-    energy, maintenance, staff, other) normalized to EUR/km. Uses constant energy
-    consumption mode, where the per-vehicle-type energy consumption factor is an
-    explicit parameter rather than being derived from simulation events.
+    energy, maintenance, staff, other) normalized to EUR/revenue-km, using the
+    constant energy-consumption mode.
 
-    The energy_consumption_factor parameter specifies per-vehicle-type average energy
-    consumption (kWh/km) for cost estimation. This is typically lower than simulated
-    worst-case consumption, reflecting average-day operations rather than the
-    planning-conservative values used in simulation.
+    This analyzer only reads the database: the fleet topology and
+    ``tco_parameters`` it depends on must already be present, written by
+    :class:`TCOConfigurator`. Run ``TCOConfigurator`` before this analyzer.
     """
 
     COST_CATEGORIES = [
@@ -687,7 +749,7 @@ class TCOAnalyzer(Analyzer):
         "OTHER": "Other",
     }
 
-    def __init__(self, code_version: str = "v1.0.2", cache_enabled: bool = True):
+    def __init__(self, code_version: str = "v3.1.0", cache_enabled: bool = True):
         super().__init__(code_version=code_version, cache_enabled=cache_enabled)
 
     @classmethod
@@ -697,56 +759,15 @@ class TCOAnalyzer(Analyzer):
                 "Display name for this scenario in output. "
                 "Falls back to Scenario.name from the database."
             ),
-            f"{cls.__name__}.vehicle_type_tco_params": (
-                "Dict mapping vehicle type name_short to TCO parameters. "
-                'Each value: {"useful_life": int, "procurement_cost": float, '
-                '"cost_escalation": float}. Required.'
+            f"{cls.__name__}.scaling_factor": (
+                "Optional float. Annualisation factor (365 / simulated days) used to "
+                "scale simulation-period quantities to a year. When unset, eflips-impact "
+                "auto-detects it from the span between the first and last trip departure "
+                "and a warning is logged. Pin it (e.g. 365 / SIMULATION_DAYS) to make the "
+                "assumption explicit: capital cost per revenue-km scales with its "
+                "reciprocal, so it sets the capital/operating split of the result. "
+                "Default: None (auto-detect)."
             ),
-            f"{cls.__name__}.battery_type_tco_params": (
-                "Dict mapping vehicle type name_short to battery TCO parameters. "
-                'Each value: {"name": str, "procurement_cost": float (EUR per kWh), '
-                '"useful_life": int, "cost_escalation": float, '
-                '"specific_mass": float (kWh/kg, required for new battery types), '
-                '"chemistry": str (required for new battery types)}. Required.'
-            ),
-            f"{cls.__name__}.charging_point_type_params": (
-                "List of dicts for charging point types. Each: "
-                '{"type": "depot"|"opportunity", "name": str, "procurement_cost": float, '
-                '"useful_life": int, "cost_escalation": float}. Required.'
-            ),
-            f"{cls.__name__}.charging_infrastructure_params": (
-                "List of dicts for charging infrastructure. Each: "
-                '{"type": "depot"|"station", "name": str, "procurement_cost": float, '
-                '"useful_life": int, "cost_escalation": float}. Required.'
-            ),
-            f"{cls.__name__}.energy_consumption_factor": (
-                "Dict mapping vehicle type name_short to average energy consumption "
-                "in kWh/km. This should be lower than the simulated worst-case "
-                "consumption, reflecting average-day operations for cost estimation. "
-                "Required."
-            ),
-            f"{cls.__name__}.project_duration": "Project duration in years. Default: 20",
-            f"{cls.__name__}.interest_rate": "Interest rate. Default: 0.04",
-            f"{cls.__name__}.inflation_rate": "Inflation/discount rate. Default: 0.02",
-            f"{cls.__name__}.staff_cost": "Cost per driver hour in EUR. Default: 25.0",
-            f"{cls.__name__}.fuel_cost": "Electricity cost per kWh in EUR. Default: 0.1794",
-            f"{cls.__name__}.diesel_fuel_cost": "Diesel cost per litre in EUR. Default: 1.50",
-            f"{cls.__name__}.maint_cost": "Electric vehicle maintenance cost per km in EUR. Default: 0.35",
-            f"{cls.__name__}.diesel_maint_cost": "Diesel vehicle maintenance cost per km in EUR. Default: 0.45",
-            f"{cls.__name__}.maint_infr_cost": (
-                "Infrastructure maintenance cost per year per charging slot in EUR. "
-                "Default: 1000"
-            ),
-            f"{cls.__name__}.taxes": ("Tax cost per vehicle per year in EUR. Default: 278"),
-            f"{cls.__name__}.insurance": (
-                "Insurance cost per vehicle per year in EUR. Default: 9693"
-            ),
-            f"{cls.__name__}.pef_general": "General price escalation factor. Default: 0.02",
-            f"{cls.__name__}.pef_wages": "Wage price escalation factor. Default: 0.025",
-            f"{cls.__name__}.pef_fuel": (
-                "Fuel/electricity price escalation factor. Default: 0.038"
-            ),
-            f"{cls.__name__}.pef_insurance": ("Insurance price escalation factor. Default: 0.02"),
         }
 
     def analyze(
@@ -755,17 +776,19 @@ class TCOAnalyzer(Analyzer):
         """
         Calculate TCO for the scenario in the database.
 
-        Initializes TCO parameters in the (temporary) database, then runs the
-        TCO calculator with constant energy consumption mode.
+        Runs the eflips-impact TCO calculator (constant energy-consumption mode)
+        against the already-configured database. The fleet topology and
+        ``tco_parameters`` must have been written by :class:`TCOConfigurator`
+        beforehand.
 
         Args:
             session: SQLAlchemy session connected to the eflips-model database
-            params: Pipeline parameters including TCO configuration
+            params: Pipeline parameters including ``TCOAnalyzer.scenario_name``
 
         Returns:
             Single-row DataFrame with columns: scenario_name + one column per
             cost category (VEHICLE, BATTERY, INFRASTRUCTURE, ENERGY, MAINTENANCE,
-            STAFF, OTHER). Values are in EUR/km.
+            STAFF, OTHER). Values are in EUR/revenue-km.
         """
         scenario = session.query(Scenario).one()
 
@@ -773,153 +796,16 @@ class TCOAnalyzer(Analyzer):
         if not scenario_name:
             scenario_name = scenario.name or "Unknown"
 
-        # Get required parameters
-        vt_tco_params: Dict[str, Dict[str, Any]] = params.get(
-            f"{self.__class__.__name__}.vehicle_type_tco_params", {}
-        )
-        bt_tco_params: Dict[str, Dict[str, Any]] = params.get(
-            f"{self.__class__.__name__}.battery_type_tco_params", {}
-        )
-        cp_type_params: List[Dict[str, Any]] = params.get(
-            f"{self.__class__.__name__}.charging_point_type_params", []
-        )
-        infra_params: List[Dict[str, Any]] = params.get(
-            f"{self.__class__.__name__}.charging_infrastructure_params", []
-        )
-        energy_factors: Dict[str, float] = params.get(
-            f"{self.__class__.__name__}.energy_consumption_factor", {}
-        )
+        # Calculate TCO (per revenue-km, by cost category).
+        scaling_factor = _resolve_scaling_factor(self, session, scenario, params)
+        tco_result = calculate_tco(scenario=scenario, scaling_factor=scaling_factor)
+        per_revenue_km = tco_result.tco_by_type_per_revenue_km
 
-        if not all([vt_tco_params, bt_tco_params, cp_type_params, infra_params, energy_factors]):
-            raise ValueError(
-                f"{self.__class__.__name__} requires vehicle_type_tco_params, "
-                "battery_type_tco_params, charging_point_type_params, "
-                "charging_infrastructure_params, and energy_consumption_factor"
-            )
-
-        # Resolve vehicle type name_shorts to determine energy source
-        vehicle_types = (
-            session.query(VehicleType).filter(VehicleType.scenario_id == scenario.id).all()
-        )
-        vt_by_name = {vt.name_short: vt for vt in vehicle_types}
-
-        # Build VehicleTypeTCOParameter list (includes energy consumption per vehicle type)
-        vehicle_type_params: List[VehicleTypeTCOParameter] = []
-        for name_short, tco_info in vt_tco_params.items():
-            vt = vt_by_name.get(name_short)
-            if vt is None:
-                logger.warning(f"Vehicle type '{name_short}' not found in database, skipping")
-                continue
-            energy_factor = energy_factors.get(name_short, 0.0)
-            if vt.energy_source == EnergySource.DIESEL:
-                vt_param = VehicleTypeTCOParameter(
-                    name_short=name_short,
-                    useful_life=tco_info["useful_life"],
-                    procurement_cost=tco_info["procurement_cost"],
-                    cost_escalation=tco_info["cost_escalation"],
-                    average_diesel_consumption=energy_factor,
-                )
-            else:
-                vt_param = VehicleTypeTCOParameter(
-                    name_short=name_short,
-                    useful_life=tco_info["useful_life"],
-                    procurement_cost=tco_info["procurement_cost"],
-                    cost_escalation=tco_info["cost_escalation"],
-                    average_electricity_consumption=energy_factor,
-                )
-            vehicle_type_params.append(vt_param)
-
-        # Build BatteryTypeTCOParameter list
-        battery_type_params: List[BatteryTypeTCOParameter] = []
-        for name_short, bt_info in bt_tco_params.items():
-            battery_type_params.append(
-                BatteryTypeTCOParameter(
-                    vehicle_name_short=name_short,
-                    procurement_cost=bt_info["procurement_cost"],
-                    useful_life=bt_info["useful_life"],
-                    cost_escalation=bt_info["cost_escalation"],
-                    specific_mass=bt_info.get("specific_mass"),
-                    chemistry=bt_info.get("chemistry"),
-                )
-            )
-
-        # Build ChargingPointTypeTCOParameter list
-        charging_point_type_params: List[ChargingPointTypeTCOParameter] = [
-            ChargingPointTypeTCOParameter(
-                type=cp["type"],
-                name=cp.get("name"),
-                procurement_cost=cp["procurement_cost"],
-                useful_life=cp["useful_life"],
-                cost_escalation=cp["cost_escalation"],
-            )
-            for cp in cp_type_params
-        ]
-
-        # Build ChargingInfrastructureTCOParameter list
-        charging_infra_params: List[ChargingInfrastructureTCOParameter] = [
-            ChargingInfrastructureTCOParameter(
-                type=infra["type"],
-                procurement_cost=infra["procurement_cost"],
-                useful_life=infra["useful_life"],
-                cost_escalation=infra["cost_escalation"],
-            )
-            for infra in infra_params
-        ]
-
-        # Build ScenarioTCOParameter with defaults
-        prefix = f"{self.__class__.__name__}"
-        electricity_cost: float = params.get(f"{prefix}.fuel_cost", 0.1794)
-        diesel_cost: float = params.get(f"{prefix}.diesel_fuel_cost", 1.50)
-        electricity_maint: float = params.get(f"{prefix}.maint_cost", 0.35)
-        diesel_maint: float = params.get(f"{prefix}.diesel_maint_cost", 0.45)
-        pef_fuel: float = params.get(f"{prefix}.pef_fuel", 0.038)
-        scenario_params = ScenarioTCOParameter(
-            project_duration=params.get(f"{prefix}.project_duration", 20),
-            interest_rate=params.get(f"{prefix}.interest_rate", 0.04),
-            inflation_rate=params.get(f"{prefix}.inflation_rate", 0.02),
-            staff_cost=params.get(f"{prefix}.staff_cost", 25.0),
-            fuel_cost={"electricity": electricity_cost, "diesel": diesel_cost},
-            vehicle_maint_cost={"electricity": electricity_maint, "diesel": diesel_maint},
-            infra_maint_cost=params.get(f"{prefix}.maint_infr_cost", 1000),
-            cost_escalation_rate={
-                "general": params.get(f"{prefix}.pef_general", 0.02),
-                "staff": params.get(f"{prefix}.pef_wages", 0.025),
-                "electricity": pef_fuel,
-                "diesel": pef_fuel,
-                "insurance": params.get(f"{prefix}.pef_insurance", 0.02),
-            },
-            insurance=params.get(f"{prefix}.insurance", 9693),
-            taxes=params.get(f"{prefix}.taxes", 278),
-        )
-
-        # Initialize TCO parameters in the (temporary) database
-        init_tco_parameters(
-            scenario=scenario,
-            scenario_params=scenario_params,
-            vehicle_type_params=vehicle_type_params,
-            battery_type_params=battery_type_params,
-            charging_point_type_params=charging_point_type_params,
-            charging_infra_params=charging_infra_params,
-        )
-
-        # Calculate TCO
-        tco_calculator = TCOCalculator(
-            scenario=scenario,
-            energy_consumption_mode="constant",
-        )
-        tco_result = tco_calculator.calculate()
-
-        # Get results and merge CHARGING_POINT into INFRASTRUCTURE (backwards compatibility)
-        result: Dict[str, Any] = dict(tco_result.tco_by_type)
-        result["INFRASTRUCTURE"] = result.get("INFRASTRUCTURE", 0.0) + result.get(
-            "CHARGING_POINT", 0.0
-        )
-        result.pop("CHARGING_POINT", None)
+        result: Dict[str, Any] = {cat.name: cost for cat, cost in per_revenue_km.items()}
 
         # Ensure all standard categories are present
-        for cat in self.COST_CATEGORIES:
-            if cat not in result:
-                result[cat] = 0.0
+        for cat_name in self.COST_CATEGORIES:
+            result.setdefault(cat_name, 0.0)
 
         result["scenario_name"] = scenario_name
 
@@ -981,6 +867,231 @@ def merge_tco_results(results: List[pd.DataFrame]) -> pd.DataFrame:
 
     Args:
         results: List of single-row DataFrames from TCOAnalyzer.analyze()
+
+    Returns:
+        Combined DataFrame with all scenarios
+    """
+    return pd.concat(results, ignore_index=True)
+
+
+class LCAAnalyzer(Analyzer):
+    """
+    Analyzer that calculates a Life Cycle Assessment (LCA) using eflips-impact.
+
+    Computes the global-warming potential (GWP, kg CO₂-eq) normalized to GWP
+    per revenue-km, broken down two ways:
+
+    - by component type (vehicle, battery, infrastructure, energy), and
+    - by lifecycle scope (production & end-of-life, use phase).
+
+    Both breakdowns sum to the same fleet total. Two separate stacked-bar
+    plots are produced via :meth:`visualize_by_type` and
+    :meth:`visualize_by_scope`; the :attr:`VISUALIZERS` map lets a flow save
+    each to its own file.
+
+    This analyzer only reads the database: the fleet topology and
+    ``lca_parameters`` it depends on must already be present, written by
+    :class:`LCAConfigurator`. Run ``LCAConfigurator`` before this analyzer.
+    """
+
+    # ItemType enum member names produced by eflips-impact's LCA calculator.
+    IMPACT_CATEGORIES = [
+        "VEHICLE",
+        "BATTERY",
+        "INFRASTRUCTURE",
+        "ENERGY",
+    ]
+    CATEGORY_NAMES = {
+        "VEHICLE": "Vehicle",
+        "BATTERY": "Battery",
+        "INFRASTRUCTURE": "Infrastructure",
+        "ENERGY": "Energy",
+    }
+
+    # LCAScope enum member names produced by eflips-impact's LCA calculator.
+    SCOPE_CATEGORIES = [
+        "PRODUCTION_AND_EOL",
+        "USE_PHASE",
+    ]
+    SCOPE_NAMES = {
+        "PRODUCTION_AND_EOL": "Production and End-of-Life",
+        "USE_PHASE": "Use Phase",
+    }
+
+    # Maps an output-file suffix to the visualize method that produces it, so a
+    # flow can save each breakdown to its own file (e.g. ``lca_by_type.html``
+    # and ``lca_by_scope.html``).
+    VISUALIZERS = {
+        "by_type": "visualize_by_type",
+        "by_scope": "visualize_by_scope",
+    }
+
+    def __init__(self, code_version: str = "v1.2.0", cache_enabled: bool = True):
+        super().__init__(code_version=code_version, cache_enabled=cache_enabled)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.scenario_name": (
+                "Display name for this scenario in output. "
+                "Falls back to Scenario.name from the database."
+            ),
+            f"{cls.__name__}.scaling_factor": (
+                "Optional float. Annualisation factor (365 / simulated days) used to "
+                "scale simulation-period quantities to a year. When unset, eflips-impact "
+                "auto-detects it from the span between the first and last trip departure "
+                "and a warning is logged. Pin it (e.g. 365 / SIMULATION_DAYS) to make the "
+                "assumption explicit, and use the same value as TCOAnalyzer so both "
+                "results share a denominator. Default: None (auto-detect)."
+            ),
+        }
+
+    def analyze(
+        self, session: sqlalchemy.orm.session.Session, params: Dict[str, Any]
+    ) -> pd.DataFrame:
+        """
+        Calculate the LCA for the scenario in the database.
+
+        Runs the eflips-impact LCA calculator against the already-configured
+        database. The fleet topology and ``lca_parameters`` must have been
+        written by :class:`LCAConfigurator` beforehand.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database
+            params: Pipeline parameters including ``LCAAnalyzer.scenario_name``
+
+        Returns:
+            Single-row DataFrame with columns: scenario_name + one column per
+            component type (VEHICLE, BATTERY, INFRASTRUCTURE, ENERGY) + one
+            column per lifecycle scope (PRODUCTION_AND_EOL, USE_PHASE). Values
+            are GWP in kg CO₂-eq per revenue-km.
+        """
+        scenario = session.query(Scenario).one()
+
+        scenario_name: str = params.get(f"{self.__class__.__name__}.scenario_name", "")
+        if not scenario_name:
+            scenario_name = scenario.name or "Unknown"
+
+        # Calculate the LCA (GWP per revenue-km), broken down by component type
+        # and by lifecycle scope.
+        scaling_factor = _resolve_scaling_factor(self, session, scenario, params)
+        lca_result = calculate_lca(scenario=scenario, scaling_factor=scaling_factor)
+
+        result: Dict[str, Any] = {
+            item_type.name: impact_vector.gwp
+            for item_type, impact_vector in lca_result.emissions_by_type.items()
+        }
+        result.update(
+            {
+                scope.name: impact_vector.gwp
+                for scope, impact_vector in lca_result.emissions_by_scope.items()
+            }
+        )
+
+        # Ensure all standard categories are present
+        for cat_name in self.IMPACT_CATEGORIES + self.SCOPE_CATEGORIES:
+            result.setdefault(cat_name, 0.0)
+
+        result["scenario_name"] = scenario_name
+
+        return pd.DataFrame([result])
+
+    @staticmethod
+    def _stacked_bar_figure(
+        prepared_data: pd.DataFrame,
+        categories: List[str],
+        labels: Dict[str, str],
+    ) -> go.Figure:
+        """
+        Build a stacked-bar figure of GWP per revenue-km for one breakdown.
+
+        Args:
+            prepared_data: DataFrame with a 'scenario_name' column and one
+                column per category.
+            categories: Category column names to stack (in stacking order).
+            labels: Mapping from category column name to display name.
+
+        Returns:
+            Plotly figure object with one stacked bar per scenario and a total
+            annotation on top of each bar.
+        """
+        present = [c for c in categories if c in prepared_data.columns]
+
+        fig = go.Figure()
+        for cat in present:
+            fig.add_trace(
+                go.Bar(
+                    name=labels.get(cat, cat),
+                    x=prepared_data["scenario_name"],
+                    y=prepared_data[cat],
+                    text=[f"{v:.3f}" for v in prepared_data[cat]],
+                    textposition="inside",
+                )
+            )
+
+        if present:
+            totals = prepared_data[present].sum(axis=1)
+            for scenario, total in zip(prepared_data["scenario_name"], totals):
+                fig.add_annotation(
+                    x=scenario,
+                    y=total,
+                    text=f"<b>{total:.3f}</b>",
+                    showarrow=False,
+                    yshift=10,
+                    font=dict(size=12),
+                )
+
+        fig.update_layout(
+            barmode="stack",
+            yaxis_title="GWP [kg CO₂-eq / revenue-km]",
+            xaxis_title="",
+            showlegend=True,
+            legend_title="",
+        )
+
+        return fig
+
+    @staticmethod
+    def visualize_by_type(prepared_data: pd.DataFrame) -> go.Figure:
+        """
+        Create a stacked bar plot of GWP per revenue-km by component type.
+
+        Args:
+            prepared_data: DataFrame from analyze() or merged results from
+                          merge_lca_results(). Must have a 'scenario_name' column
+                          and the component-type columns.
+
+        Returns:
+            Plotly figure object.
+        """
+        return LCAAnalyzer._stacked_bar_figure(
+            prepared_data, LCAAnalyzer.IMPACT_CATEGORIES, LCAAnalyzer.CATEGORY_NAMES
+        )
+
+    @staticmethod
+    def visualize_by_scope(prepared_data: pd.DataFrame) -> go.Figure:
+        """
+        Create a stacked bar plot of GWP per revenue-km by lifecycle scope.
+
+        Args:
+            prepared_data: DataFrame from analyze() or merged results from
+                          merge_lca_results(). Must have a 'scenario_name' column
+                          and the lifecycle-scope columns.
+
+        Returns:
+            Plotly figure object.
+        """
+        return LCAAnalyzer._stacked_bar_figure(
+            prepared_data, LCAAnalyzer.SCOPE_CATEGORIES, LCAAnalyzer.SCOPE_NAMES
+        )
+
+
+def merge_lca_results(results: List[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Merge multiple single-scenario LCA result DataFrames.
+
+    Args:
+        results: List of single-row DataFrames from LCAAnalyzer.analyze()
 
     Returns:
         Combined DataFrame with all scenarios

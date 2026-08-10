@@ -23,7 +23,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
-
 # ---------------------------------------------------------------------------
 # kv_cache concurrency patch — must be applied before any module that calls
 # ``eflips.model.util.geometry.get_altitude`` runs against the cache, but the

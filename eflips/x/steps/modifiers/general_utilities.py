@@ -5,10 +5,12 @@ This module contains modifiers that perform general data cleanup operations,
 such as removing unused routes, lines, and stations from a scenario.
 """
 
+import json
 import logging
 import warnings
 from datetime import datetime
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Set, Union
 from zoneinfo import ZoneInfo
 
 import eflips.model
@@ -22,7 +24,15 @@ from eflips.model import (
     VehicleType,
     ConsumptionLut,
     VehicleClass,
+    EnergySource,
+    BatteryType,
+    ChargingPointType,
 )
+
+from eflips.impact.utils import complete_fleet  # type: ignore[import-untyped]
+from eflips.impact.tco import init_tco_params  # type: ignore[import-untyped]
+from eflips.impact.lca import init_lca_params  # type: ignore[import-untyped]
+
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import Modifier
@@ -708,3 +718,632 @@ class RemoveConsumptionLuts(Modifier):
         session.flush()
 
         return None
+
+
+ALLOW_INCOMPLETE_PARAMS_DOC = """
+Bool. When False (the default), the step verifies after configuration that every
+VehicleType, BatteryType and ChargingPointType in the scenario actually carries the
+parameters it needs, and raises ValueError listing those that do not. Set to True to
+downgrade that to a warning -- useful when the scenario deliberately contains vehicle
+types the JSON does not describe.
+Default: False
+Type: bool
+"""
+
+
+def _assert_vehicle_types_covered(
+    step: Modifier,
+    session: Session,
+    scenario: Scenario,
+    declared: Set[str],
+    json_name: str,
+    section: str,
+    allow_incomplete: bool,
+    battery_electric_only: bool = False,
+) -> None:
+    """
+    Verify that every vehicle type in the scenario is described by the parameter JSON.
+
+    ``init_tco_params`` and ``init_lca_params`` warn-and-skip when a JSON entry has no
+    matching database row, and ``init_lca_params`` skips the *entire* scenario when a
+    battery-electric vehicle type is absent from the overrides. Crucially, a skipped
+    row is **not** left empty: ``tco_parameters`` and ``lca_parameters`` carry
+    server-side defaults in eflips-model (placeholder values such as
+    ``useful_life: 14``, ``procurement_cost: null``, ``average_consumption_kwh_per_km:
+    1.5`` and a full set of emission factors). A vehicle type the JSON forgot is
+    therefore costed at those placeholders and produces a plausible-looking result
+    rather than an obviously broken one -- so checking for empty columns would not
+    catch it. Coverage of the JSON against the scenario is checked instead.
+
+    The reverse direction -- JSON entries with no matching vehicle type -- is only
+    logged, because one parameter file is deliberately shared across scenarios that
+    contain different subsets of the fleet (the BVG flow reuses a single ``tco.json``
+    for the electric and diesel scenarios).
+
+    Args:
+        step: The modifier performing the check; supplies the bypass name and logger.
+        session: SQLAlchemy session connected to the eflips-model database.
+        scenario: The scenario being configured.
+        declared: ``name_short`` values the JSON provides parameters for.
+        json_name: File name of the JSON, for the error message.
+        section: The JSON section the values came from, for the error message.
+        allow_incomplete: When True, log a warning instead of raising.
+        battery_electric_only: Only require coverage of battery-electric vehicle types.
+
+    Raises:
+        ValueError: If a vehicle type is not covered and *allow_incomplete* is False.
+    """
+    query = session.query(VehicleType).filter(VehicleType.scenario_id == scenario.id)
+    if battery_electric_only:
+        query = query.filter(VehicleType.energy_source == EnergySource.BATTERY_ELECTRIC)
+    vehicle_types = query.all()
+
+    present = {vt.name_short for vt in vehicle_types if vt.name_short is not None}
+
+    unused = declared - present
+    if unused:
+        step.logger.info(
+            "%s: '%s' section '%s' has entries with no matching vehicle type in this "
+            "scenario: %s. Ignoring them (a shared parameter file usually covers several "
+            "scenarios).",
+            step.__class__.__name__,
+            json_name,
+            section,
+            sorted(unused),
+        )
+
+    uncovered = present - declared
+    if not uncovered:
+        return
+
+    described = []
+    for vehicle_type in vehicle_types:
+        if vehicle_type.name_short not in uncovered:
+            continue
+        rotation_count = (
+            session.query(Rotation)
+            .filter(
+                Rotation.scenario_id == scenario.id,
+                Rotation.vehicle_type_id == vehicle_type.id,
+            )
+            .count()
+        )
+        in_use = f"used by {rotation_count} rotation(s)" if rotation_count else "unused"
+        described.append(f"'{vehicle_type.name_short}' ({in_use})")
+
+    bypass = f"{step.__class__.__name__}.allow_incomplete_parameters"
+    message = (
+        f"{step.__class__.__name__}: {json_name} section '{section}' does not cover "
+        f"{len(uncovered)} vehicle type(s) present in the scenario: "
+        f"{'; '.join(sorted(described))}. eflips-impact skips them, which leaves "
+        "eflips-model's placeholder parameter defaults in place rather than an empty "
+        "value -- the result would look plausible but would not reflect these vehicle "
+        f"types. Add them to {json_name}, or set '{bypass}' to True to accept the "
+        "defaults."
+    )
+    if allow_incomplete:
+        step.logger.warning(message)
+        return
+    raise ValueError(message)
+
+
+class CompleteFleet(Modifier):
+    """
+    Complete the fleet topology in the database based on a JSON file.
+
+    The fleet JSON defines the fleet topology: which BatteryType / ChargingPointType
+    rows exist and how they map to vehicle types and charging locations. Applied via
+    :func:`eflips.impact.utils.complete_fleet` with ``delete_existing_data=True``,
+    so any pre-existing topology rows are rebuilt to match the JSON (and re-written by
+    the installed eflips-model, avoiding stale encodings).
+
+    The JSON path is a constructor argument rather than a pipeline parameter so that
+    it can be registered as an ``additional_files`` entry: the framework hashes those
+    files into the cache key, so editing the JSON in place re-runs the step. Passing
+    the path through ``params`` would only hash the *path*, and edits to the file
+    would silently serve cached results.
+    """
+
+    def __init__(
+        self,
+        fleet_json: Union[str, Path],
+        code_version: str = "v2.0.0",
+        **kwargs: Any,
+    ):
+        """
+        Args:
+            fleet_json: Path to the eflips-impact fleet topology JSON (``battery_types``
+                + ``charging_point_types``). Content-hashed into the cache key.
+            code_version: Cache-invalidation version for this step.
+        """
+        self.fleet_json = Path(fleet_json)
+        super().__init__(additional_files=[self.fleet_json], code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        """The fleet JSON path is a constructor argument, not a pipeline parameter."""
+        return {
+            f"{cls.__name__}.allow_incomplete_parameters": ALLOW_INCOMPLETE_PARAMS_DOC,
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Complete the fleet topology in the database based on a JSON file.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters, optionally including
+                ``CompleteFleet.allow_incomplete_parameters``.
+
+        Raises:
+            FileNotFoundError: If the fleet JSON does not exist.
+            ValueError: If there is not exactly one scenario, or if a battery-electric
+                vehicle type is left without a BatteryType and
+                ``allow_incomplete_parameters`` is not set.
+        """
+        if not self.fleet_json.is_file():
+            raise FileNotFoundError(f"Fleet topology JSON not found: {self.fleet_json}")
+
+        scenario = session.query(Scenario).one()
+
+        # Rebuild the fleet topology from fleet.json (delete + recreate) so the
+        # BatteryType / ChargingPointType rows match the JSON and are re-written
+        # by the installed eflips-model.
+        complete_fleet(
+            scenario=scenario,
+            json_path=self.fleet_json,
+            delete_existing_data=True,
+        )
+        session.flush()
+
+        # complete_fleet warns and returns without mutating on any validation
+        # failure, which would leave the downstream configurators silently writing
+        # nothing. Catch that here rather than three steps later.
+        unassigned = [
+            vt.name_short
+            for vt in session.query(VehicleType)
+            .filter(
+                VehicleType.scenario_id == scenario.id,
+                VehicleType.energy_source == EnergySource.BATTERY_ELECTRIC,
+            )
+            .all()
+            if vt.battery_type_id is None
+        ]
+        if not unassigned:
+            return
+
+        bypass = f"{self.__class__.__name__}.allow_incomplete_parameters"
+        message = (
+            f"{self.__class__.__name__}: no BatteryType was assigned to battery-electric "
+            f"vehicle type(s) {sorted(unassigned)} after applying "
+            f"'{self.fleet_json.name}'. eflips-impact's complete_fleet warns and returns "
+            "without mutating the database when its pre-flight validation fails, so the "
+            "TCO/LCA configurators would then have nothing to write onto. Check that the "
+            f"fleet JSON lists every vehicle type, or set '{bypass}' to True to proceed."
+        )
+        if params.get(bypass, False):
+            self.logger.warning(message)
+            return
+        raise ValueError(message)
+
+
+class TCOConfigurator(Modifier):
+    """
+    Modifier that writes the eflips-impact TCO parameters into the database, so that
+    a downstream :class:`TCOAnalyzer` can compute the TCO.
+
+    The TCO JSON defines the financial parameters (scenario, vehicle types, battery
+    types, charging point types, charging infrastructure). Applied via
+    :func:`eflips.impact.tco.init_tco_params`.
+
+    This depends on the fleet topology (BatteryType / ChargingPointType rows) already
+    being present, so run :class:`CompleteFleet` before it.
+
+    The JSON path is a constructor argument rather than a pipeline parameter so that
+    it can be registered as an ``additional_files`` entry and content-hashed into the
+    cache key; see :class:`CompleteFleet`.
+
+    Because it writes to the database, this is a Modifier: the changes are
+    committed and chained into the next pipeline database.
+    """
+
+    def __init__(
+        self,
+        tco_json: Union[str, Path],
+        code_version: str = "v2.0.0",
+        **kwargs: Any,
+    ):
+        """
+        Args:
+            tco_json: Path to the eflips-impact TCO parameter JSON (scenario,
+                vehicle_types, battery_types, charging_point_types,
+                charging_infrastructure). Content-hashed into the cache key.
+            code_version: Cache-invalidation version for this step.
+        """
+        self.tco_json = Path(tco_json)
+        super().__init__(additional_files=[self.tco_json], code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.allow_incomplete_parameters": ALLOW_INCOMPLETE_PARAMS_DOC,
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Write the TCO parameters into the database.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters, optionally including
+                ``TCOConfigurator.allow_incomplete_parameters``.
+
+        Raises:
+            FileNotFoundError: If the TCO JSON does not exist.
+            ValueError: If any entity is left without ``tco_parameters`` and
+                ``allow_incomplete_parameters`` is not set.
+        """
+        if not self.tco_json.is_file():
+            raise FileNotFoundError(f"TCO parameter JSON not found: {self.tco_json}")
+
+        scenario = session.query(Scenario).one()
+
+        # Write tco_parameters onto scenario / vehicle types / battery types /
+        # charging point types / stations.
+        init_tco_params(scenario=scenario, json_path=self.tco_json)
+        session.flush()
+
+        allow_incomplete = bool(
+            params.get(f"{self.__class__.__name__}.allow_incomplete_parameters", False)
+        )
+        payload = json.loads(self.tco_json.read_text(encoding="utf-8"))
+        _assert_vehicle_types_covered(
+            step=self,
+            session=session,
+            scenario=scenario,
+            declared={entry["name_short"] for entry in payload.get("vehicle_types", [])},
+            json_name=self.tco_json.name,
+            section="vehicle_types",
+            allow_incomplete=allow_incomplete,
+        )
+        _assert_vehicle_types_covered(
+            step=self,
+            session=session,
+            scenario=scenario,
+            declared={entry["vehicle_name_short"] for entry in payload.get("battery_types", [])},
+            json_name=self.tco_json.name,
+            section="battery_types",
+            allow_incomplete=allow_incomplete,
+            battery_electric_only=True,
+        )
+
+
+class LCAConfigurator(Modifier):
+    """
+    Modifier that writes the eflips-impact LCA parameters into the database, so
+    that a downstream :class:`LCAAnalyzer` can compute the life-cycle assessment.
+
+    Two JSON files drive it:
+
+    - the LCA JSON is an openLCA emission-factor export defining the impact
+      vectors for the materials and processes used in the assessment.
+    - the LCA overrides JSON defines the per-scenario overrides (per-vehicle-type
+      parameters and charging-point-type infrastructure parameters).
+
+    Both are applied via :func:`eflips.impact.lca.init_lca_params`, which writes
+    ``VehicleTypeLCAParams``, ``BatteryTypeLCAParams`` and
+    ``ChargingPointTypeLCAParams`` onto the corresponding entities.
+
+    This depends on the fleet topology (BatteryType / ChargingPointType rows)
+    already being present, so run :class:`CompleteFleet` before it.
+
+    The JSON paths are constructor arguments rather than pipeline parameters so that
+    they can be registered as ``additional_files`` entries and content-hashed into
+    the cache key; see :class:`CompleteFleet`.
+
+    Because it writes to the database, this is a Modifier: the changes are
+    committed and chained into the next pipeline database.
+    """
+
+    def __init__(
+        self,
+        lca_json: Union[str, Path],
+        lca_overrides_json: Union[str, Path],
+        code_version: str = "v2.0.0",
+        **kwargs: Any,
+    ):
+        """
+        Args:
+            lca_json: Path to the openLCA emission-factor JSON. Content-hashed into
+                the cache key.
+            lca_overrides_json: Path to the per-scenario LCA overrides JSON
+                (``vehicle_type_overrides`` + charging-point infrastructure params).
+                Content-hashed into the cache key.
+            code_version: Cache-invalidation version for this step.
+        """
+        self.lca_json = Path(lca_json)
+        self.lca_overrides_json = Path(lca_overrides_json)
+        super().__init__(
+            additional_files=[self.lca_json, self.lca_overrides_json],
+            code_version=code_version,
+            **kwargs,
+        )
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        return {
+            f"{cls.__name__}.allow_incomplete_parameters": ALLOW_INCOMPLETE_PARAMS_DOC,
+        }
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Write the LCA parameters into the database.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters, optionally including
+                ``LCAConfigurator.allow_incomplete_parameters``.
+
+        Raises:
+            FileNotFoundError: If either JSON does not exist.
+            ValueError: If any entity is left without ``lca_parameters`` and
+                ``allow_incomplete_parameters`` is not set.
+        """
+        for json_path in (self.lca_json, self.lca_overrides_json):
+            if not json_path.is_file():
+                raise FileNotFoundError(f"LCA parameter JSON not found: {json_path}")
+
+        scenario = session.query(Scenario).one()
+
+        # Write lca_parameters onto vehicle types / battery types / charging point
+        # types.
+        init_lca_params(
+            scenario=scenario,
+            lca_json_path=self.lca_json,
+            overrides_json_path=self.lca_overrides_json,
+        )
+        session.flush()
+
+        # init_lca_params refuses to write *anything* when a battery-electric vehicle
+        # type is missing from the overrides, so incomplete coverage silently leaves
+        # the whole scenario on eflips-model's placeholder defaults.
+        payload = json.loads(self.lca_overrides_json.read_text(encoding="utf-8"))
+        _assert_vehicle_types_covered(
+            step=self,
+            session=session,
+            scenario=scenario,
+            declared={entry["name_short"] for entry in payload.get("vehicle_type_overrides", [])},
+            json_name=self.lca_overrides_json.name,
+            section="vehicle_type_overrides",
+            allow_incomplete=bool(
+                params.get(f"{self.__class__.__name__}.allow_incomplete_parameters", False)
+            ),
+            battery_electric_only=True,
+        )
+
+
+class CreateDieselVehicleTypes(Modifier):
+    """
+    Create a diesel counterpart for every electric vehicle type in the scenario.
+
+    Ported from the bus-type-creation half of
+    :class:`eflips.x.transition_plan.multi_stage_simulation.CreateHybridFleet`: a
+    diesel :class:`~eflips.model.VehicleType` is created for every
+    ``EnergySource.BATTERY_ELECTRIC`` vehicle type, using the
+    ``"Diesel {name}"`` / ``"Diesel {name_short}"`` naming convention. Diesel
+    vehicle types get near-zero consumption and ``energy_source=EnergySource.DIESEL``.
+
+    Unlike ``CreateHybridFleet`` this step does **not** reassign any blocks
+    (rotations); it only creates the vehicle-type records. Block reassignment is
+    left to :class:`VehicleTypeBlockAssignment`, which recovers the diesel
+    counterparts from the database via the same ``name_short`` naming convention --
+    so no mapping has to be passed between the two steps.
+
+    Idempotent: a diesel vehicle type whose ``name_short`` already exists in the
+    scenario is reused, never duplicated.
+    """
+
+    DIESEL_PREFIX = "Diesel "
+    DIESEL_CONSUMPTION = 0.0001  # Near-zero consumption for diesel simulation (kWh/km)
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        """This modifier has no configurable parameters."""
+        return {}
+
+    def _create_diesel_vehicle_type(
+        self, session: Session, electric_type: VehicleType, scenario: Scenario
+    ) -> VehicleType:
+        """Create a diesel version of an electric vehicle type."""
+        diesel_type = VehicleType(
+            scenario=scenario,
+            name=f"{self.DIESEL_PREFIX}{electric_type.name}",
+            name_short=f"{self.DIESEL_PREFIX}{electric_type.name_short}",
+            battery_capacity=electric_type.battery_capacity,
+            charging_curve=electric_type.charging_curve,
+            opportunity_charging_capable=electric_type.opportunity_charging_capable,
+            consumption=self.DIESEL_CONSUMPTION,
+            battery_capacity_reserve=electric_type.battery_capacity_reserve,
+            minimum_charging_power=electric_type.minimum_charging_power,
+            charging_efficiency=electric_type.charging_efficiency,
+            energy_source=EnergySource.DIESEL,
+            empty_mass=electric_type.empty_mass,
+            allowed_mass=electric_type.allowed_mass,
+            # Dimensions are required by DepotGenerator's optimal-layout mode, and a
+            # diesel counterpart occupies the same footprint as the electric vehicle
+            # it stands in for.
+            length=electric_type.length,
+            width=electric_type.width,
+            height=electric_type.height,
+        )
+        session.add(diesel_type)
+        return diesel_type
+
+    def _electric_vehicle_types(self, session: Session, scenario: Scenario) -> List[VehicleType]:
+        """Return the scenario's battery-electric vehicle types.
+
+        ``VehicleType.energy_source`` is NOT NULL and defaults to
+        ``BATTERY_ELECTRIC``, so databases that never set it explicitly are already
+        covered by this query -- no fallback for unset energy sources is needed.
+        """
+        return (
+            session.query(VehicleType)
+            .filter(
+                VehicleType.scenario_id == scenario.id,
+                VehicleType.energy_source == EnergySource.BATTERY_ELECTRIC,
+            )
+            .all()
+        )
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Create a diesel counterpart for every electric vehicle type.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters (unused by this step).
+        """
+        scenario = session.query(Scenario).one()
+        electric_types = self._electric_vehicle_types(session, scenario)
+
+        created = 0
+        for electric_type in electric_types:
+            diesel_short = f"{self.DIESEL_PREFIX}{electric_type.name_short}"
+            existing = (
+                session.query(VehicleType)
+                .filter(
+                    VehicleType.scenario_id == scenario.id,
+                    VehicleType.name_short == diesel_short,
+                )
+                .one_or_none()
+            )
+            if existing is None:
+                self._create_diesel_vehicle_type(session, electric_type, scenario)
+                created += 1
+
+        session.flush()
+        self.logger.info(
+            "CreateDieselVehicleTypes: %d electric vehicle type(s); created %d diesel "
+            "counterpart(s) (others already existed).",
+            len(electric_types),
+            created,
+        )
+
+
+class VehicleTypeBlockAssignment(Modifier):
+    """
+    Reassign a set of blocks (rotations) to their diesel vehicle-type counterparts.
+
+    The diesel vehicle types must already exist in the database (created by
+    :class:`CreateDieselVehicleTypes`). Their correspondence to the electric vehicle
+    types is recovered directly from the database via the ``"Diesel {name_short}"``
+    naming convention -- no mapping is passed between steps.
+
+    For each target rotation, the rotation's current (electric) vehicle type is
+    looked up by ``name_short`` and the rotation is reassigned to the matching
+    ``"Diesel {name_short}"`` vehicle type. Rotations already pointing at a diesel
+    vehicle type are skipped; a rotation whose electric vehicle type has no diesel
+    counterpart raises :class:`ValueError`.
+    """
+
+    DIESEL_PREFIX = CreateDieselVehicleTypes.DIESEL_PREFIX
+
+    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+        super().__init__(code_version=code_version, **kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary describing the configurable parameter.
+        """
+        return {
+            f"{cls.__name__}.block_ids": """
+            Optional list of Rotation (block) ids to reassign to their diesel
+            vehicle-type counterpart. When omitted or None, ALL rotations in the
+            scenario are reassigned (the diesel-reference scenario). An explicit
+            list reassigns only those rotations; an empty list is a no-op.
+            Default: None (reassign all rotations)
+            Type: Optional[List[int]]
+            """,
+        }
+
+    def _diesel_types_by_source_short(
+        self, session: Session, scenario: Scenario
+    ) -> Dict[str, VehicleType]:
+        """Map each electric VT's ``name_short`` to its diesel counterpart.
+
+        Recovers the mapping created by :class:`CreateDieselVehicleTypes` from the
+        database: every vehicle type whose ``name_short`` starts with the
+        ``"Diesel "`` prefix is keyed by the stripped (electric) ``name_short``.
+        """
+        diesel_types: Dict[str, VehicleType] = {}
+        for vt in session.query(VehicleType).filter(VehicleType.scenario_id == scenario.id).all():
+            if vt.name_short and vt.name_short.startswith(self.DIESEL_PREFIX):
+                source_short = vt.name_short[len(self.DIESEL_PREFIX) :]
+                diesel_types[source_short] = vt
+        return diesel_types
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Reassign the requested rotations to their diesel vehicle types.
+
+        Args:
+            session: SQLAlchemy session connected to the eflips-model database.
+            params: Pipeline parameters including the optional
+                ``VehicleTypeBlockAssignment.block_ids`` list.
+
+        Raises:
+            ValueError: If no diesel vehicle types are present (run
+                :class:`CreateDieselVehicleTypes` first), or if a target rotation's
+                vehicle type has no diesel counterpart.
+        """
+        scenario = session.query(Scenario).one()
+
+        diesel_types = self._diesel_types_by_source_short(session, scenario)
+        if not diesel_types:
+            raise ValueError(
+                "No diesel vehicle types found. Run CreateDieselVehicleTypes before "
+                "VehicleTypeBlockAssignment."
+            )
+
+        block_ids = params.get(f"{self.__class__.__name__}.block_ids", None)
+        query = session.query(Rotation).filter(Rotation.scenario_id == scenario.id)
+        if block_ids is None:
+            rotations = query.all()
+            self.logger.info("Reassigning all %d rotation(s) to diesel.", len(rotations))
+        else:
+            rotations = query.filter(Rotation.id.in_(block_ids)).all()
+            self.logger.info(
+                "Reassigning %d of %d requested rotation(s) to diesel.",
+                len(rotations),
+                len(block_ids),
+            )
+
+        reassigned = 0
+        for rotation in rotations:
+            current = rotation.vehicle_type
+            if current.name_short and current.name_short.startswith(self.DIESEL_PREFIX):
+                continue  # already diesel
+            if current.name_short not in diesel_types:
+                raise ValueError(
+                    f"No diesel counterpart for vehicle type '{current.name_short}'. "
+                    f"Available: {sorted(diesel_types.keys())}"
+                )
+            rotation.vehicle_type = diesel_types[current.name_short]
+            reassigned += 1
+
+        session.flush()
+        self.logger.info("Reassigned %d rotation(s) to diesel vehicle types.", reassigned)

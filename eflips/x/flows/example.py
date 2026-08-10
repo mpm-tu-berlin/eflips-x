@@ -14,6 +14,7 @@ The pipeline follows a simple pattern:
 - Execute them in sequence
 - Save visualization outputs
 """
+
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path

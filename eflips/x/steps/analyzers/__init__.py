@@ -24,11 +24,13 @@ from eflips.x.steps.analyzers.output_analyzers import (
     DepotEventAnalyzer,
     EnergyConsumptionByVehicleTypeAnalyzer,
     InteractiveMapAnalyzer,
+    LCAAnalyzer,
     PowerAndOccupancyAnalyzer,
     SpecificEnergyConsumptionAnalyzer,
     TCOAnalyzer,
     VehicleSocAnalyzer,
     merge_energy_consumption_results,
+    merge_lca_results,
     merge_tco_results,
 )
 
@@ -49,11 +51,13 @@ __all__ = [
     "DepotEventAnalyzer",
     "EnergyConsumptionByVehicleTypeAnalyzer",
     "InteractiveMapAnalyzer",
+    "LCAAnalyzer",
     "PowerAndOccupancyAnalyzer",
     "SpecificEnergyConsumptionAnalyzer",
     "TCOAnalyzer",
     "VehicleSocAnalyzer",
     "DepotActivityAnalyzer",
     "merge_energy_consumption_results",
+    "merge_lca_results",
     "merge_tco_results",
 ]

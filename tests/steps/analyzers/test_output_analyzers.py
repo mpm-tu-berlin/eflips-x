@@ -28,7 +28,6 @@ from eflips.x.steps.analyzers.output_analyzers import (
     VehicleSocAnalyzer,
 )
 
-
 # ---------------------------------------------------------------------------
 # Module-level fixture aliases — delegate to the shared simulated_db defined
 # in tests/steps/analyzers/conftest.py so that test_bvg_tools.py can reuse

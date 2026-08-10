@@ -19,7 +19,6 @@ from eflips.x.steps.analyzers.input_analyzers import (
     SingleRotationInfoAnalyzer,
 )
 
-
 # ---------------------------------------------------------------------------
 # Module-level fixture overrides — use the module-scoped small_multi_depot_db
 # from tests/steps/conftest.py so the expensive scenario is built only once.

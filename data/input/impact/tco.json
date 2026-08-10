@@ -1,0 +1,113 @@
+{
+  "scenario": {
+    "project_duration": 20,
+    "interest_rate": 0.04,
+    "inflation_rate": 0.02,
+    "staff_cost": 25.0,
+    "fuel_cost": {"diesel": 1.0, "electricity": 0.1794},
+    "vehicle_maint_cost": {"diesel": 0.5, "electricity": 0.35},
+    "infra_maint_cost": 1000.0,
+    "cost_escalation_rate": {
+      "general": 0.02,
+      "staff": 0.025,
+      "diesel": 0.0,
+      "electricity": 0.038,
+      "insurance": 0.02
+    },
+    "insurance": 9693.0,
+    "taxes": 278.0,
+    "eta_avail": 0.9
+  },
+  "vehicle_types": [
+    {
+      "name_short": "EN",
+      "useful_life": 14,
+      "procurement_cost": 580000.0,
+      "cost_escalation": -0.02,
+      "average_electricity_consumption": 1.48
+    },
+    {
+      "name_short": "DD",
+      "useful_life": 14,
+      "procurement_cost": 780000.0,
+      "cost_escalation": -0.02,
+      "average_electricity_consumption": 2.16
+    },
+    {
+      "name_short": "GN",
+      "useful_life": 14,
+      "procurement_cost": 780000.0,
+      "cost_escalation": -0.02,
+      "average_electricity_consumption": 2.16
+    },
+    {
+      "name_short": "Diesel EN",
+      "useful_life": 14,
+      "procurement_cost": 275000.0,
+      "cost_escalation": 0.02,
+      "average_diesel_consumption": 0.449
+    },
+    {
+      "name_short": "Diesel DD",
+      "useful_life": 14,
+      "procurement_cost": 330000.0,
+      "cost_escalation": 0.02,
+      "average_diesel_consumption": 0.589
+    },
+    {
+      "name_short": "Diesel GN",
+      "useful_life": 14,
+      "procurement_cost": 510000.0,
+      "cost_escalation": 0.02,
+      "average_diesel_consumption": 0.589
+    }
+  ],
+  "battery_types": [
+    {
+      "vehicle_name_short": "EN",
+      "procurement_cost": 190,
+      "useful_life": 7,
+      "cost_escalation": -0.03
+    },
+    {
+      "vehicle_name_short": "DD",
+      "procurement_cost": 190,
+      "useful_life": 7,
+      "cost_escalation": -0.03
+    },
+    {
+      "vehicle_name_short": "GN",
+      "procurement_cost": 190,
+      "useful_life": 7,
+      "cost_escalation": -0.03
+    }
+  ],
+  "charging_point_types": [
+    {
+      "type": "depot",
+      "procurement_cost": 119899.50,
+      "useful_life": 20,
+      "cost_escalation": 0.02
+    },
+    {
+      "type": "opportunity",
+      "procurement_cost": 299748.74,
+      "useful_life": 20,
+      "cost_escalation": 0.02
+    }
+  ],
+  "charging_infrastructure": [
+    {
+      "type": "depot",
+      "procurement_cost": 2397989.95,
+      "useful_life": 20,
+      "cost_escalation": 0.02
+    },
+    {
+      "type": "station",
+      "procurement_cost": 269773.87,
+      "useful_life": 20,
+      "cost_escalation": 0.02
+    }
+  ]
+}
