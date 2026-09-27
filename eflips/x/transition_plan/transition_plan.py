@@ -263,6 +263,7 @@ class DieselFleetAnalyzer(Analyzer):
             slot_to_bus_ratio=(
                 total_slot_amount / slot_amount_all_buses if slot_amount_all_buses > 0 else 0.0
             ),
+            useful_life=14,  # TODO: read from TCO parameters instead of hard-coded
         )
         return self.result
 
@@ -484,7 +485,6 @@ class TransitionPlanner(Analyzer):
         )
         procurement_breakdown = model.compute_cost_breakdown(
             params.get(f"{cn}.procurement_components", []),
-            shifted_components=tuple(params.get(f"{cn}.shifted_procurement_components", [])),
         )
 
         if csv_save_dir is not None:

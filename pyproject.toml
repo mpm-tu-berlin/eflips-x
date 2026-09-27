@@ -13,7 +13,7 @@ dependencies = [
     "eflips-depot",
     "eflips-ingest",
     "eflips-eval",
-    "eflips-opt @ git+ssh://git@github.com/mpm-tu-berlin/eflips-opt.git@feature/enable-partial-rotation-assignment",
+    "eflips-opt @ git+ssh://git@github.com/mpm-tu-berlin/eflips-opt.git@feature/eflips-transition-compatibility",
     "eflips-transition @ git+ssh://git@github.com/mpm-tu-berlin/eflips-transition.git",
 #    "eflips-tco @ git+https://github.com/mpm-tu-berlin/eflips-tco.git@feature/revenue-km",
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
@@ -27,7 +27,7 @@ dependencies = [
     "pandas (>=2.0)",
     "openpyxl (>=3.1.0)",
     "eflips-model (>=11.1.0,<12.0.0)",
-#    "eflips-impact (>=2.0.0,<3.0.0)",
+    "eflips-impact (>=2.0.0,<3.0.0)",
 
 ]
 

@@ -30,10 +30,11 @@ from eflips.x.transition_plan.transition_plan import PlaygroundAnalyzer
 
 if __name__ == "__main__":
 
-    electric_input_db = Path("/home/shuyao/PycharmProjects/eflips-data/electric_mini.db")
-    diesel_input_db = Path("/home/shuyao/PycharmProjects/eflips-data/electric_mini.db")
+    electric_input_db = Path("/home/shuyao/eflips-data/electric_8_depots.db")
+    diesel_input_db = Path("/home/shuyao/eflips-data/diesel_one_week.db")
 
-    work_dir_name = "test"
+
+    work_dir_name = "bvg_full"
 
     work_dir = (
         Path(__file__).parent.parent.parent.parent
@@ -117,6 +118,7 @@ if __name__ == "__main__":
         from eflips.transition.parameter_registry import DieselFleetParams
 
         diesel_fleet_params = DieselFleetParams(
+            useful_life=14,
             bus_count_by_type={12: 67, 13: 112},
             initial_depot_capacities={160522: 202, 103159411: 33},
             slot_to_bus_ratio=1.0,

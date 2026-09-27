@@ -14,19 +14,19 @@ constraints = ConstraintsParams(
     diesel_salvage_cutoff_age=12,
 )
 
-sets = ["V", "VT", "B", "S", "I", "D", "DE_pairs", "PY", "AgeIdx"]
+sets = ["V", "VT", "S", "I", "D", "DE_pairs", "PY", "AgeIdx", "DepletedIdx"]
 variables = [
     "ElectrifyVehicle",
     "StationOperational",
     "DepotChargerCount",
     "DepotOperational",
     "ReplacedDieselBus",
-    "RetiredDieselBus",
+    # The following 2 variables are helper variables
+    "DieselCohortDepleted",
     "DepotChargerProcurement",
 ]
 
 constraints_long_term = [
-    # "YearlyReplacedUpperBound",
     "InitialElectricVehicleConstraint",
     "InitialElectrifiedStationConstraint",
     "NoStationUninstallationConstraint",
@@ -35,13 +35,12 @@ constraints_long_term = [
     "InitialDepotConstraint",
     "DepotBeforeVehicleConstraint",
     "DepotConstructionLimit",
-    # "StationConstructionPerYearConstraint",
+    "StationConstructionPerYearConstraint",
     # "NoEarlyStationBuildingConstraint",
-    "AssignmentBlockYearConstraint",
     "FullElectrificationConstraint",
     "NoDuplicatedVehicleElectrificationConstraint",
     # "BudgetConstraint",
-    "DepotChargerConstructionLimit",
+    "DepotChargerCoversCluster",
     "DepotChargerRequiresDepot",
     "DepotChargerNoUninstallation",
     "DepotChargerProcurementLower",
@@ -50,17 +49,15 @@ constraints_long_term = [
     "DieselReplacedLowerBound",
     "DieselReplacedUpperBound",  # Lower bound and upper bound are for limiting diesel bus number to integers
     "DieselOldestFirstReplacement",
-    "DieselMandatoryRetirement",
-    "DieselRetirementCap",
     "DieselReplacementCap",
-    "DieselEarlyRetirementEquality",
-    "DieselNaturalRetirementCap",
+    "DieselCohortDepletedDefinition",
+    "DieselCohortDepletedChain",
     "DieselBusCapacityConstraint",
     # "NoDieselBusProcurement",  # activate to forbid any new diesel bus purchases
 ]
 
 expressions_long_term = [
-    "BlockElectrified",
+    "VehicleElectrifiedCumulative",
     "NewlyBuiltStation",
     "ElectricBusDepreciation",
     "DieselBusDepreciation",
