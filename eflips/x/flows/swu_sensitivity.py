@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 
 # ---------------------------------------------------------------------------
 # kv_cache concurrency patch — must be applied before any module that calls
-# ``eflips.model.util.geometry.get_altitude`` runs against the cache, but the
+# ``eflips.model.util.geometry.get_altitudes`` runs against the cache, but the
 # class-level monkey-patch is also safe to apply after the module-level store
 # was constructed (method lookup goes through the class).
 # ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ def _patch_kv_cache_for_parallel_access() -> None:
     """Make ``kv_cache.KVStore`` safe to share between many parallel workers.
 
     The eflips altitude cache at ``~/.cache/eflips/.../eflips_ingest_altitude_cache.db``
-    is read on every depot-rotation matching iteration via ``get_altitude``.
+    is read on every depot-rotation matching iteration via ``get_altitudes``.
     Two design choices in ``kv_cache`` cause it to deadlock under high
     parallelism:
 
