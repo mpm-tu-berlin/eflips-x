@@ -1453,7 +1453,7 @@ class RepresentativeVehicleSocAnalyzer(Analyzer):
             label="SoC",
         )
 
-        ax.set_ylabel(r"State of Charge [\%]")
+        ax.set_ylabel(r"Net State of Charge [\%]")
         soc_min_pct = float(sorted_data["soc"].min() * 100)
         if soc_min_pct < 0:
             ax.set_ylim(soc_min_pct - 5, 105)

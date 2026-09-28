@@ -167,7 +167,7 @@ OUTPUT_LABEL: Dict[str, str] = {
     "depot_chargers": "Depot chargers",
     "peak_depot_power_kw": "Peak depot power [kW]",
     "mean_rotation_duration_h": "Mean rotation duration [h]",
-    "mean_depot_arrival_soc": "Mean depot-arrival SoC",
+    "mean_depot_arrival_soc": "Mean net depot-arrival SoC",
 }
 
 # Cap Dask parallelism. On a 64-core box, the LocalCluster default of one
@@ -802,7 +802,7 @@ def plot_arrival_soc_hist2d(table: pd.DataFrame, output_dir: Path, bins: int = 1
             ax.set_ylim(*ylim)
             ax.set_title(ctype)
             ax.set_xlabel(FACTOR_LABEL[factor])
-        axes[0].set_ylabel("Depot arrival SoC")
+        axes[0].set_ylabel("Net depot-arrival SoC")
         if mappable is not None:
             fig.colorbar(mappable, ax=axes, label="Rotations / bin")
 
