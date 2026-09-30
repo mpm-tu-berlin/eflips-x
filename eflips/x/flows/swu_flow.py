@@ -7,6 +7,13 @@ Runs both DEPOT and OPPORTUNITY charging variants for SWU Verkehr GmbH
 using the SWU GTFS feed. Exports a JSON scenario after depot assignment
 (before terminus charger placement).
 
+The whole network is assumed to run on 18 m articulated buses with the
+Solaris Urbino 18 parameters of the BVG flow. Energy consumption uses a
+Ji2022 look-up table generated from those masses and calibrated against the
+measured BVG 18 m table (``data/input/consumption_lut_gn.xlsx``), so that the
+incline dependence of the regression model is kept while the absolute level
+matches real-world data.
+
 Usage:
     python -m eflips.x.flows.swu_flow [--plots]
 """
@@ -48,9 +55,9 @@ from eflips.x.steps.analyzers.bvg_tools import (
 from eflips.x.steps.analyzers.output_analyzers import SpecificEnergyConsumptionAnalyzer
 from eflips.x.steps.generators import GTFSIngester, CopyCreator
 from eflips.x.steps.modifiers.bvg_tools import MergeStations
-from eflips.x.steps.modifiers.consumption_luts import ConsumptionLut
 from eflips.x.steps.modifiers.general_utilities import (
     AddTemperatures,
+    CalibrateConsumptionLut,
     RemoveConsumptionLuts,
     RemoveUnusedData,
 )
@@ -189,16 +196,24 @@ BATTERY_CAPACITY_KWH = 600.0
 CHARGING_CURVE: List[List[float]] = [[0.0, 300.0], [1.0, 300.0]]
 TERMINUS_CHARGING_POWER_KW = 300.0
 
-# 12m solo bus mass values (matching the EN values used in eflips/x/flows/bvg.py).
-# allowed_mass follows the bvg_tools.py convention: empty_mass + 120 passengers * 68 kg.
-EMPTY_MASS_KG = 17000.0
-ALLOWED_MASS_KG = EMPTY_MASS_KG + 120 * 68
+# 18 m articulated bus (Solaris Urbino 18, large battery) mass values, matching the
+# "GN" vehicle type in eflips/x/steps/modifiers/bvg_tools.py:
+# allowed_mass = empty_mass + 100 passengers * 68 kg.
+VEHICLE_TYPE_NAME = "Solaris Urbino 18"
+VEHICLE_TYPE_NAME_SHORT = "GN"
+EMPTY_MASS_KG = 19000.0
+ALLOWED_MASS_KG = EMPTY_MASS_KG + 100 * 68
+
+# Measured speed × temperature consumption table of the BVG Solaris Urbino 18 fleet.
+# CalibrateConsumptionLut scales the Ji2022 table generated from the masses above
+# to match it (see the module docstring).
+MEASURED_CONSUMPTION_LUT = PROJECT_ROOT / "data" / "input" / "consumption_lut_gn.xlsx"
 
 DEPOT_CONFIG: List[Dict[str, Any]] = [
     {
         "depot_station": (9.967748831666805, 48.39658695394624),  # (lon, lat)
         "name": "SWU Betriebshof",
-        "vehicle_type": ["DEFAULT"],  # Matches ConfigureVehicleTypes.name_short
+        "vehicle_type": [VEHICLE_TYPE_NAME_SHORT],  # Matches ConfigureVehicleTypes.name_short
         "capacity": 9999,
     },
 ]
@@ -257,7 +272,9 @@ def _pick_representative_day(session: Session) -> tuple[datetime, datetime]:
 # ---------------------------------------------------------------------------
 
 
-DEFAULT_TEMPERATURE_CELSIUS = 10.0
+# Worst-case design temperature, same as the BVG flow (DIN/TS 12831-1 design
+# temperature for Berlin). The measured 18 m table covers -14 °C to +36 °C.
+DEFAULT_TEMPERATURE_CELSIUS = -12.0
 DEFAULT_DEPOT_CHARGING_POWER_KW = 75.0
 
 
@@ -307,9 +324,9 @@ def run_common_phase(
 
     When ``pre_common_db`` is supplied, the three GTFS-only steps are skipped and
     we instead start from ``CopyCreator(input_files=[pre_common_db])`` — only
-    ``ConfigureVehicleTypes`` and ``AddTemperatures`` run on top. This is the
-    fast path used by the sensitivity sweep. The canonical ``swu_flow()`` call
-    leaves it ``None`` and runs all five steps.
+    ``ConfigureVehicleTypes``, ``CalibrateConsumptionLut`` and ``AddTemperatures``
+    run on top. This is the fast path used by the sensitivity sweep. The canonical
+    ``swu_flow()`` call leaves it ``None`` and runs all steps.
 
     Note: ``AddTemperatures`` is not idempotent (it appends a Temperatures row
     rather than replacing), so we cannot simply layer it onto an existing common
@@ -326,13 +343,17 @@ def run_common_phase(
         "GTFSIngester.bus_only": True,
         "GTFSIngester.duration": "WEEK",
         "GTFSIngester.agency_ids": AGENCY_IDS,
-        "ConfigureVehicleTypes.vehicle_type_names": ["default"],
+        "ConfigureVehicleTypes.vehicle_type_names": [VEHICLE_TYPE_NAME],
         "ConfigureVehicleTypes.battery_capacity": battery_capacity_kwh,
-        "ConfigureVehicleTypes.consumption": ConsumptionLut.NOR_BUS_12M,
+        # Placeholder constant consumption; CalibrateConsumptionLut replaces it with
+        # the calibrated Ji2022 look-up table in the next step.
+        "ConfigureVehicleTypes.consumption": 1.5,
         "ConfigureVehicleTypes.charging_curve": charging_curve,
         "ConfigureVehicleTypes.empty_mass": EMPTY_MASS_KG,
         "ConfigureVehicleTypes.allowed_mass": ALLOWED_MASS_KG,
-        "ConfigureVehicleTypes.name_short": "DEFAULT",
+        "ConfigureVehicleTypes.name_short": VEHICLE_TYPE_NAME_SHORT,
+        "ConfigureVehicleTypes.length": 18.0,
+        "CalibrateConsumptionLut.vehicle_type_names": [VEHICLE_TYPE_NAME_SHORT],
         "AddTemperatures.temperature_celsius": temperature_celsius,
     }
 
@@ -344,11 +365,16 @@ def run_common_phase(
             RemoveTramLines(),
             RemoveUnusedData(),
             ConfigureVehicleTypes(),
+            CalibrateConsumptionLut(measured_lut_path=MEASURED_CONSUMPTION_LUT),
             AddTemperatures(),
         ]
     else:
         CopyCreator(input_files=[pre_common_db]).execute(context=context)
-        steps = [ConfigureVehicleTypes(), AddTemperatures()]
+        steps = [
+            ConfigureVehicleTypes(),
+            CalibrateConsumptionLut(measured_lut_path=MEASURED_CONSUMPTION_LUT),
+            AddTemperatures(),
+        ]
     run_steps(steps=steps, context=context)
 
     assert context.current_db is not None

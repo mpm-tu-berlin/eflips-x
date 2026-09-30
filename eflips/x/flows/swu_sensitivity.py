@@ -112,7 +112,10 @@ logger = logging.getLogger(__name__)
 
 SWEEPS: Dict[str, List[float]] = {
     "battery_capacity_kwh": [300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0],
-    "temperature_celsius": [-10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
+    # -12 °C is the baseline (design temperature, see swu_flow). The measured 18 m
+    # table used for calibration ends at -14 °C; below that the scaling factor is
+    # nearest-neighbour extrapolated.
+    "temperature_celsius": [-12.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
     "depot_charging_power_kw": [50.0, 100.0, 150.0, 200.0, 250.0, 300.0],
     "terminus_charging_power_kw": [
         100.0,
@@ -136,7 +139,7 @@ CHARGE_TYPES: List[str] = ["DEP", "TERM"]
 # sweep reproduces today's published results.
 DEFAULTS: Dict[str, float] = {
     "battery_capacity_kwh": 600.0,
-    "temperature_celsius": 10.0,
+    "temperature_celsius": -12.0,
     "depot_charging_power_kw": 75.0,
     "terminus_charging_power_kw": 300.0,
 }
