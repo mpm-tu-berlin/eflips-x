@@ -1378,14 +1378,14 @@ xsdata = {version = ">=24.1,<25.0", extras = ["cli", "lxml"]}
 
 [[package]]
 name = "eflips-model"
-version = "11.3.1"
+version = "11.3.2"
 description = "A common data model for the eflips family of electric vehicle simulation & optimization tools."
 optional = false
 python-versions = "<4.0,>=3.10"
 groups = ["main"]
 files = [
-    {file = "eflips_model-11.3.1-py3-none-any.whl", hash = "sha256:09f0725b42d1b6e7efdd5119de675866b0df811bb81441c93a7b7a095d14c24c"},
-    {file = "eflips_model-11.3.1.tar.gz", hash = "sha256:57687fd3a4ec774008a724d00e81653b9b67290e79cec3d30357c7c7b4fa9094"},
+    {file = "eflips_model-11.3.2-py3-none-any.whl", hash = "sha256:4d21148484a59333138dca80c5cb273f64d3c32c58cbb7a886554593100dfe6b"},
+    {file = "eflips_model-11.3.2.tar.gz", hash = "sha256:4f733efc18bb259414acff369f2c0ea70635097e4a49cb59706f99016b687c5e"},
 ]
 
 [package.dependencies]

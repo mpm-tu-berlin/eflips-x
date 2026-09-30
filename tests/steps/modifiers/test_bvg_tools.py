@@ -300,7 +300,10 @@ class TestSetUpBvgVehicleTypes:
             .one()
         )
 
-        assert np.isclose(max(consumption_lut.values), 12.744117566234737)
+        # Twice (multiplier 2.0) the maximum of the Ji2022 table generated for the GN
+        # masses with eflips-model >= 11.3.2 (corrected mass per level of loading and
+        # slope-term efficiencies): 2 * 12.326153122544612.
+        assert np.isclose(max(consumption_lut.values), 24.652306245089225)
 
     def test_remove_unused_vehicle_types_with_path(
         self, temp_db: Path, scenario_with_vehicle_types, db_session: Session
