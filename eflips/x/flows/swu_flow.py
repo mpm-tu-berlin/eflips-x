@@ -352,7 +352,10 @@ def run_common_phase(
         "ConfigureVehicleTypes.empty_mass": EMPTY_MASS_KG,
         "ConfigureVehicleTypes.allowed_mass": ALLOWED_MASS_KG,
         "ConfigureVehicleTypes.name_short": VEHICLE_TYPE_NAME_SHORT,
+        # The model requires length, width and height to be set together or not at all.
         "ConfigureVehicleTypes.length": 18.0,
+        "ConfigureVehicleTypes.width": 2.55,
+        "ConfigureVehicleTypes.height": 3.3,
         "CalibrateConsumptionLut.vehicle_type_names": [VEHICLE_TYPE_NAME_SHORT],
         "AddTemperatures.temperature_celsius": temperature_celsius,
     }
