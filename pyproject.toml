@@ -13,7 +13,7 @@ dependencies = [
     "eflips-depot",
     "eflips-ingest (>=2.3.0,<3.0.0)",
     "eflips-eval",
-    "eflips-opt (>=1.0.10,<2.0.0)",
+    "eflips-opt (>=1.0.11,<2.0.0)",
     "eflips-impact (>=2.0.0,<3.0.0)",
     "prefect[dask,sqlalchemy] (>=3.4.6,<4.0.0)",
     # Pin griffe <2: griffe 2.x removed the top-level Docstring symbol that prefect 3.x
