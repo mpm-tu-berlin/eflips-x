@@ -17,7 +17,6 @@ import networkx as nx  # type: ignore[import-untyped]
 import pandas as pd
 import sqlalchemy.orm.session
 from eflips.depot.api import (  # type: ignore[import-untyped]
-    generate_consumption_result,
     simple_consumption_simulation,
     ConsumptionResult,
     group_rotations_by_start_end_stop,
@@ -41,6 +40,7 @@ from sqlalchemy import func, not_
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
+from eflips.x.steps.modifiers.consumption_luts import generate_clamped_consumption_result
 from eflips.x.framework import Modifier, Analyzer
 
 #: Default opportunity charging power in kW, shared across IntegratedScheduling,
@@ -1047,7 +1047,9 @@ class VehicleScheduling(Modifier):
         if charge_type == ChargeType.DEPOT:
             self.logger.info("Calculating consumption results for DEPOT charge type")
             # Create a dictionary of the energy consumption for each rotation
-            consumption: Dict[int, ConsumptionResult] = generate_consumption_result(scenario)
+            consumption: Dict[int, ConsumptionResult] = generate_clamped_consumption_result(
+                scenario
+            )
 
             # Convert to the format eflips-opt expects: {trip_id: delta_soc, ...}
             # Also turn the delta_soc into a positive number
@@ -1666,7 +1668,7 @@ class InsufficientChargingTimeAnalyzer(Analyzer):
             _electrify_station(s, ChargeType.OPPORTUNITY, charging_power)
 
         # Generate consumption results
-        consumption_results = generate_consumption_result(scenario)
+        consumption_results = generate_clamped_consumption_result(scenario)
 
         # Run consumption simulation
         simple_consumption_simulation(
@@ -1980,7 +1982,7 @@ class StationElectrification(Modifier):
         # Compute consumption results ONCE before the loop. The driving energy consumption
         # (delta_soc per trip) is constant across iterations — only opportunity charging
         # at newly-electrified stations changes between iterations.
-        consumption_results = generate_consumption_result(scenario)
+        consumption_results = generate_clamped_consumption_result(scenario)
         # generate_consumption_result may have detached our scenario object from the session
         session.add(scenario)
         session.flush()
@@ -2134,7 +2136,7 @@ class StationElectrification(Modifier):
         try:
             # Use pre-computed consumption results if available, otherwise compute them
             if consumption_results is None:
-                consumption_results = generate_consumption_result(scenario)
+                consumption_results = generate_clamped_consumption_result(scenario)
                 # generate_consumption_result may have detached our scenario object from the session
                 session.add(scenario)
                 session.flush()

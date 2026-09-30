@@ -11,7 +11,6 @@ from typing import Any, Dict
 import sqlalchemy.orm.session
 from eflips.depot.api import (  # type: ignore[import-untyped]
     apply_even_smart_charging,
-    generate_consumption_result,
     simple_consumption_simulation,
     group_rotations_by_start_end_stop,
     generate_depot_layout,
@@ -30,6 +29,7 @@ from eflips.model import (
 )
 from sqlalchemy.exc import MultipleResultsFound
 
+from eflips.x.steps.modifiers.consumption_luts import generate_clamped_consumption_result
 from eflips.x.framework import Modifier
 
 
@@ -437,7 +437,7 @@ Default: True
         scenario = session.query(Scenario).one()
 
         ##### Step 1: Consumption simulation
-        consumption_results = generate_consumption_result(scenario)
+        consumption_results = generate_clamped_consumption_result(scenario)
         simple_consumption_simulation(
             scenario,
             initialize_vehicles=True,
@@ -457,7 +457,7 @@ Default: True
         )
 
         ##### Step 3: Consumption simulation
-        consumption_results = generate_consumption_result(scenario)
+        consumption_results = generate_clamped_consumption_result(scenario)
         simple_consumption_simulation(
             scenario,
             initialize_vehicles=False,
@@ -536,7 +536,7 @@ No default — must be explicitly specified.
 
         # Re-run consumption simulation to update energy values
         self.logger.info("Re-running consumption simulation after smart charging.")
-        consumption_results = generate_consumption_result(scenario)
+        consumption_results = generate_clamped_consumption_result(scenario)
         simple_consumption_simulation(
             scenario, initialize_vehicles=False, consumption_result=consumption_results
         )
