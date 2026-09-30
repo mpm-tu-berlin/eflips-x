@@ -9,14 +9,25 @@ length). They follow the column convention expected by
 Measured two-dimensional (speed × temperature) tables such as
 ``data/input/consumption_lut_gn.xlsx`` use a different, spreadsheet-style
 layout and are read with :func:`load_measured_speed_temperature_lut`.
+
+:func:`generate_clamped_consumption_result` wraps eflips-depot's per-trip
+consumption calculation so that no trip ends with a net energy gain.
 """
 
+import logging
 from enum import Enum
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
+from eflips.depot.api import (  # type: ignore[import-untyped]
+    ConsumptionResult,
+    generate_consumption_result,
+)
+from eflips.model import Scenario
+
+logger = logging.getLogger(__name__)
 
 CONSUMPTION_LUT_DIR = Path(__file__).resolve().parents[4] / "data" / "input" / "consumption_luts"
 
@@ -66,3 +77,37 @@ def load_measured_speed_temperature_lut(
             if not np.isnan(value):
                 points.append((float(speed), float(temperature), float(value)))
     return points
+
+
+def generate_clamped_consumption_result(scenario: Scenario) -> Dict[int, ConsumptionResult]:
+    """
+    Compute per-trip consumption results like eflips-depot's ``generate_consumption_result``,
+    but clamp every trip's net SoC change to at most zero.
+
+    With a LUT that has a negative (recuperating) incline term, a short, steep downhill trip
+    can come out with a net energy gain, especially at mild temperatures where the flat-ground
+    consumption is low. ``simple_consumption_simulation`` rejects such a trip with "The
+    delta_soc_total must be <= 0 when using a consumption result." Clamping treats the trip as
+    energy-neutral instead: the vehicle arrives with the SoC it departed with, and the
+    cumulative SoC timeseries is capped at zero as well.
+
+    :param scenario: The scenario to compute consumption results for.
+    :return: A dictionary mapping trip IDs to (clamped) consumption results.
+    """
+    results: Dict[int, ConsumptionResult] = generate_consumption_result(scenario)
+
+    clamped_trip_ids = []
+    for trip_id, result in results.items():
+        if result.delta_soc_total > 0:
+            clamped_trip_ids.append(trip_id)
+            result.delta_soc_total = 0.0
+        if result.delta_soc is not None:
+            result.delta_soc = [min(d, 0.0) for d in result.delta_soc]
+
+    if clamped_trip_ids:
+        logger.info(
+            "Clamped %d trip(s) with a net energy gain to zero consumption (trip IDs: %s)",
+            len(clamped_trip_ids),
+            ", ".join(str(t) for t in sorted(clamped_trip_ids)),
+        )
+    return results
