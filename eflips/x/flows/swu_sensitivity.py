@@ -163,7 +163,9 @@ FACTOR_LABEL: Dict[str, str] = {
 }
 
 OUTPUT_LABEL: Dict[str, str] = {
-    "mean_energy_consumption_kwh_per_km": "Mean energy consumption [kWh/km]",
+    # Stacked fraction keeps the rotated y-label short enough to fit the figure height
+    "mean_energy_consumption_kwh_per_km": r"Mean energy consumption "
+    r"$\left[\frac{\mathrm{kWh}}{\mathrm{km}}\right]$",
     "vehicle_count": "Vehicle count",
     "electrified_termini": "Electrified termini",
     "terminus_chargers_utilized": "Terminus chargers utilised",
