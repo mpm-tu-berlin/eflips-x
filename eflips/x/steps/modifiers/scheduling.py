@@ -159,6 +159,11 @@ class IntegratedScheduling(Modifier):
         None
             This modifier modifies the database in place by updating rotation plans
         """
+        # Work on a copy: the longer-break parameters set below are internal to this step. Writing
+        # them into the shared params dict would make downstream cache keys depend on whether this
+        # step actually ran or was a cache hit, invalidating every later step after a cache hit.
+        params = dict(params)
+
         max_iterations_key = f"{self.__class__.__name__}.max_iterations"
         max_iterations = params.get(max_iterations_key, 3)
 
