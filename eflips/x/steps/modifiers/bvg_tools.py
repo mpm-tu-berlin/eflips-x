@@ -15,8 +15,6 @@ from typing import Any, Dict, List, Tuple, Union, Optional
 from zoneinfo import ZoneInfo
 
 import eflips.model
-import numpy as np
-import pandas as pd
 import sqlalchemy
 from eflips.model import (
     Rotation,
@@ -37,6 +35,7 @@ from sqlalchemy import not_, func
 from sqlalchemy.orm import Session, joinedload
 
 from eflips.x.framework import Modifier
+from eflips.x.steps.modifiers.consumption_luts import load_measured_speed_temperature_lut
 
 
 def depots_for_bvg(
@@ -536,33 +535,17 @@ for the vehicle type.
         session.add(consumption_lut)
 
         if path is not None:
-            with open(path, "rb") as f:
-                consumption_lut_file = pd.read_excel(f)
-
-            # The LUT is a 2D table. The first column is the average speed.
-            # The first row contains the temperatures.
-            # Turn it into a multi-indexed dataframe
-            emp_temperatures = np.array(consumption_lut_file.columns[1:]).astype(np.float64)
-            emp_speeds = np.array(consumption_lut_file.iloc[:, 0]).astype(np.float64)
-            emp_data = np.array(consumption_lut_file.iloc[:, 1:]).astype(np.float64)
-
-            new_coordinates = []
-            new_values = []
-
-            # Update the LUT with the empirical data
+            # The measured table only resolves speed and temperature. It is stored
+            # at zero incline and a mean level of loading; the interpolator in
+            # eflips-depot falls back to nearest neighbour for other inclines/loads.
+            measured = load_measured_speed_temperature_lut(path)
             incline = 0.0
             level_of_loading = 0.5
-            for i, temperature in enumerate(emp_temperatures):
-                for j, speed in enumerate(emp_speeds):
-                    # emp_data shape is (n_speeds, n_temps): row=speed_idx, col=temp_idx
-                    consumption = emp_data[j, i]
-                    if not np.isnan(consumption):
-                        new_coordinates.append((incline, temperature, level_of_loading, speed))
-                        new_values.append(consumption)
             consumption_lut.data_points = [
-                [float(value) for value in coord] for coord in new_coordinates
+                [incline, temperature, level_of_loading, speed]
+                for speed, temperature, _ in measured
             ]
-            consumption_lut.values = [float(value) for value in new_values]
+            consumption_lut.values = [value for _, _, value in measured]
             logger.info(
                 f"Loaded consumption LUT for vehicle type {vehicle_type.name_short} from {path}"
             )
