@@ -400,6 +400,7 @@ with pipeline.get_session() as session:
 | `AddTemperatures`             | Add temperature data for consumption simulation                                                       |
 | `ConfigureVehicleTypes`       | Set battery capacity, consumption, and charging curves (GTFS utility)                                 |
 | `CalculateConsumptionScaling` | Calculate consumption scaling factors                                                                 |
+| `CalibrateConsumptionLut`     | Generate a Ji2022 consumption LUT per vehicle type and calibrate it to a measured speed × temperature table |
 | `RemoveConsumptionLuts`       | Remove consumption lookup tables                                                                      |
 | **Charging**                  |                                                                                                       |
 | `SmartCharging`               | Apply a smart charging strategy to an already-simulated scenario                                      |

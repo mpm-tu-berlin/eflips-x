@@ -10,7 +10,7 @@ import logging
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import eflips.model
@@ -36,6 +36,7 @@ from eflips.impact.lca import init_lca_params  # type: ignore[import-untyped]
 from sqlalchemy.orm import Session
 
 from eflips.x.framework import Modifier
+from eflips.x.steps.modifiers.consumption_luts import load_measured_speed_temperature_lut
 
 
 class RemoveUnusedData(Modifier):
@@ -628,6 +629,262 @@ class CalculateConsumptionScaling(Modifier):
         session.flush()
         self.logger.info("Consumption scaling complete")
 
+        return None
+
+
+class CalibrateConsumptionLut(Modifier):
+    """
+    Generate a Ji2022 consumption look-up table per vehicle type and calibrate it
+    against a measured speed × temperature table.
+
+    This implements the "calibration target" use of the regression model. The
+    synthetic four-dimensional table (incline × temperature × level of loading ×
+    speed) produced by ``eflips.model.ConsumptionLut.from_vehicle_type`` covers the
+    whole parameter space, but its absolute level is only as good as the regression
+    it is derived from. A measured table (layout: see
+    ``data/input/consumption_lut_gn.xlsx``) resolves only speed and temperature, at
+    zero incline and a mean passenger load. The modifier
+
+    1. builds the synthetic table from the vehicle type's empty and allowed mass,
+    2. evaluates it at every measured (speed, temperature) point that lies inside
+       the synthetic grid, at incline 0 and level of loading 0.5,
+    3. computes the ratio measured / synthetic at each of these points,
+    4. interpolates the ratio over (temperature, speed) — linearly inside the
+       measured region, nearest neighbour outside it — and
+    5. multiplies the flat-ground part of every entry by the ratio at its own
+       temperature and speed, for all loads, and adds the incline offset of the
+       synthetic table back unchanged.
+
+    The slope term of the synthetic table is purely additive (potential energy per
+    kilometre), and the measurements contain no incline information, so the incline
+    offset ``c(i, T, l, v) - c(0, T, l, v)`` is deliberately not scaled. The calibrated
+    table therefore reproduces the measured values on flat ground at mean load,
+    extends them to other loads with the shape of the regression model, and keeps
+    the physics-based slope term as generated.
+
+    Any existing consumption LUT and vehicle class on the affected vehicle types is
+    replaced, and ``VehicleType.consumption`` is set to None (a vehicle type may
+    carry either a constant consumption or a LUT, not both).
+    """
+
+    def __init__(
+        self,
+        measured_lut_path: Union[str, Path],
+        code_version: str = "v1.0.0",
+        **kwargs: Any,
+    ):
+        self.measured_lut_path = Path(measured_lut_path)
+        super().__init__(
+            additional_files=[self.measured_lut_path],
+            code_version=code_version,
+            **kwargs,
+        )
+        self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def document_params(cls) -> Dict[str, str]:
+        """
+        Document the parameters of this modifier.
+
+        Returns:
+        --------
+        Dict[str, str]
+            Dictionary describing the configurable parameters
+        """
+        return {
+            f"{cls.__name__}.vehicle_type_names": """
+            List of vehicle type short names (``VehicleType.name_short``) to calibrate.
+            Every listed vehicle type must have ``empty_mass`` and ``allowed_mass`` set.
+            Default: None (all vehicle types in the scenario)
+            Type: Optional[List[str]]
+            Example: ["GN"]
+            """,
+        }
+
+    @staticmethod
+    def calibrate_values(
+        data_points: Sequence[Sequence[float]],
+        values: Sequence[float],
+        measured: Sequence[Tuple[float, float, float]],
+        incline: float = 0.0,
+        level_of_loading: float = 0.5,
+    ) -> Tuple[List[float], Dict[str, float]]:
+        """
+        Scale a synthetic 4D consumption table so that it matches measured points.
+
+        Parameters:
+        -----------
+        data_points : Sequence[Sequence[float]]
+            LUT coordinates in the order (incline, t_amb, level_of_loading, mean_speed_kmh).
+        values : Sequence[float]
+            Synthetic consumption values (kWh/km), one per coordinate.
+        measured : Sequence[Tuple[float, float, float]]
+            Measured points as ``(mean_speed_kmh, t_amb, consumption_kwh_per_km)``.
+        incline, level_of_loading : float
+            Where in the synthetic table the measured points are assumed to lie.
+
+        Returns:
+        --------
+        Tuple[List[float], Dict[str, float]]
+            The calibrated values (same order as ``values``) and summary statistics of
+            the scaling factors (``n_points``, ``ratio_min``, ``ratio_mean``, ``ratio_max``).
+            Only the flat-ground (incline == ``incline``) part of each value is scaled;
+            the incline offset relative to that slice is added back unchanged.
+        """
+        import numpy as np
+        from scipy import interpolate
+        from scipy.spatial import QhullError  # type: ignore[import-untyped]
+
+        points = np.asarray(data_points, dtype=float)
+        synthetic = np.asarray(values, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 4 or len(synthetic) != len(points):
+            raise ValueError("data_points must be N×4 and values must have length N")
+
+        # Rebuild the regular grid of the synthetic table.
+        scales = [np.unique(points[:, i]) for i in range(4)]
+        grid = np.full([len(scale) for scale in scales], np.nan)
+        index = tuple(np.searchsorted(scales[i], points[:, i]) for i in range(4))
+        grid[index] = synthetic
+        if np.isnan(grid).any():
+            raise ValueError("The synthetic consumption LUT is not a complete regular grid")
+        model = interpolate.RegularGridInterpolator(
+            tuple(scales), grid, method="linear", bounds_error=False, fill_value=np.nan
+        )
+
+        # Evaluate the synthetic table at the measured points and form the ratios.
+        m = np.asarray(measured, dtype=float)
+        if m.ndim != 2 or m.shape[1] != 3 or len(m) == 0:
+            raise ValueError("measured must be a non-empty list of (speed, t_amb, value)")
+        query = np.column_stack(
+            [
+                np.full(len(m), incline),
+                m[:, 1],
+                np.full(len(m), level_of_loading),
+                m[:, 0],
+            ]
+        )
+        # Points outside the synthetic grid come back as NaN and are dropped: the
+        # Ji2022 model is strongly non-linear in speed, so extrapolating it below the
+        # grid's lowest speed would produce meaningless ratios.
+        model_at_measured = np.asarray(model(query), dtype=float)
+        usable = np.isfinite(model_at_measured) & (model_at_measured > 0) & (m[:, 2] > 0)
+        if not usable.any():
+            raise ValueError("No measured point could be matched to the synthetic LUT")
+        ratio = m[usable, 2] / model_at_measured[usable]
+        xy = np.column_stack([m[usable, 1], m[usable, 0]])  # (t_amb, speed)
+
+        # Interpolate the ratio over (t_amb, speed): linear inside the measured
+        # region, nearest neighbour outside of it (and if the points are degenerate).
+        targets = np.column_stack([points[:, 1], points[:, 3]])
+        try:
+            linear = interpolate.LinearNDInterpolator(xy, ratio)
+            factors = np.asarray(linear(targets), dtype=float)
+        except (QhullError, ValueError):
+            factors = np.full(len(targets), np.nan)
+        outside = np.isnan(factors)
+        if outside.any():
+            nearest = interpolate.NearestNDInterpolator(xy, ratio)
+            factors[outside] = np.asarray(nearest(targets[outside]), dtype=float)
+
+        # Split every entry into its flat-ground part and its incline offset. The
+        # slope term of the synthetic table is additive, so the offset is exactly the
+        # slope contribution. Scale only the flat part; the measurements say nothing
+        # about inclines.
+        flat_index = int(np.argmin(np.abs(scales[0] - incline)))
+        flat_values = grid[flat_index][index[1:]]
+        slope_offset = synthetic - flat_values
+        scaled = flat_values * factors + slope_offset
+        stats = {
+            "n_points": float(usable.sum()),
+            "ratio_min": float(ratio.min()),
+            "ratio_mean": float(ratio.mean()),
+            "ratio_max": float(ratio.max()),
+        }
+        return [float(v) for v in scaled], stats
+
+    def modify(self, session: Session, params: Dict[str, Any]) -> None:
+        """
+        Attach a calibrated Ji2022 consumption LUT to the selected vehicle types.
+
+        Parameters:
+        -----------
+        session : Session
+            SQLAlchemy session connected to the database to modify
+        params : Dict[str, Any]
+            Pipeline parameters
+
+        Returns:
+        --------
+        None
+            This modifier modifies the database in place
+        """
+        vehicle_type_names: Optional[List[str]] = params.get(
+            f"{self.__class__.__name__}.vehicle_type_names", None
+        )
+
+        scenarios = session.query(Scenario).all()
+        if len(scenarios) != 1:
+            raise ValueError(f"Expected exactly one scenario, found {len(scenarios)}")
+        scenario = scenarios[0]
+
+        measured = load_measured_speed_temperature_lut(self.measured_lut_path)
+        if not measured:
+            raise ValueError(
+                f"Measured consumption LUT {self.measured_lut_path} contains no values"
+            )
+
+        query = session.query(VehicleType).filter(VehicleType.scenario_id == scenario.id)
+        if vehicle_type_names is not None:
+            query = query.filter(VehicleType.name_short.in_(vehicle_type_names))
+        vehicle_types = query.all()
+        if vehicle_type_names is not None:
+            missing = set(vehicle_type_names) - {vt.name_short for vt in vehicle_types}
+            if missing:
+                raise ValueError(f"Vehicle types not found in scenario: {sorted(missing)}")
+        if not vehicle_types:
+            raise ValueError("No vehicle types found to calibrate")
+
+        for vt in vehicle_types:
+            if vt.empty_mass is None or vt.allowed_mass is None:
+                raise ValueError(
+                    f"Vehicle type {vt.name_short} needs empty_mass and allowed_mass "
+                    "to generate a consumption LUT"
+                )
+
+            # Drop any previous LUT / vehicle class so the model's "consumption xor LUT"
+            # rule holds afterwards.
+            for vehicle_class in list(vt.vehicle_classes):
+                if len(vehicle_class.vehicle_types) > 1:
+                    vehicle_class.vehicle_types.remove(vt)
+                    continue
+                if vehicle_class.consumption_lut is not None:
+                    session.delete(vehicle_class.consumption_lut)
+                session.delete(vehicle_class)
+            vt.consumption = None  # type: ignore[assignment]
+            session.flush()
+
+            vehicle_class = VehicleClass(
+                scenario_id=vt.scenario_id,
+                name=f"Consumption LUT for {vt.name_short}",
+                vehicle_types=[vt],
+            )
+            session.add(vehicle_class)
+            session.flush()
+
+            lut = ConsumptionLut.from_vehicle_type(vt, vehicle_class)
+            scaled_values, stats = self.calibrate_values(lut.data_points, lut.values, measured)
+            lut.values = scaled_values
+            lut.name = f"Ji2022 calibrated to {self.measured_lut_path.name} for {vt.name}"
+            session.add(lut)
+
+            self.logger.info(
+                f"Calibrated consumption LUT for vehicle type {vt.name_short} against "
+                f"{int(stats['n_points'])} measured points from {self.measured_lut_path.name}: "
+                f"scaling factor min {stats['ratio_min']:.3f}, mean {stats['ratio_mean']:.3f}, "
+                f"max {stats['ratio_max']:.3f}"
+            )
+
+        session.flush()
         return None
 
 

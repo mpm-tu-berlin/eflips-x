@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from eflips.x.steps.modifiers.general_utilities import (
     AddTemperatures,
     CalculateConsumptionScaling,
+    CalibrateConsumptionLut,
     CreateDieselVehicleTypes,
     RemoveConsumptionLuts,
     RemoveUnusedData,
@@ -898,3 +899,290 @@ class TestVehicleTypeBlockAssignment:
     def test_document_params(self):
         params = VehicleTypeBlockAssignment.document_params()
         assert "VehicleTypeBlockAssignment.block_ids" in params
+
+
+class TestCalibrateConsumptionLut:
+    """Tests for the CalibrateConsumptionLut modifier."""
+
+    @staticmethod
+    def _write_measured_xlsx(path: Path, value: float = 2.0) -> None:
+        """Write a small speed × temperature table in the consumption_lut_gn.xlsx layout."""
+        import numpy as np
+        import pandas as pd
+
+        temperatures = [-10.0, 0.0, 10.0, 20.0, 30.0]
+        speeds = [10.0, 20.0, 30.0, 40.0]
+        data = np.full((len(speeds), len(temperatures)), value)
+        data[0, 0] = np.nan  # ragged corner, like the real table
+        df = pd.DataFrame(data, columns=temperatures)
+        df.insert(0, "Temperatur (x) / Durchschnittsgeschwindigkeit (y)", speeds)
+        df.to_excel(path, index=False)
+
+    @pytest.fixture
+    def scenario_with_vehicle_type(self, db_session: Session) -> Scenario:
+        scenario = Scenario(name="Calibration Test", name_short="CAL")
+        db_session.add(scenario)
+        db_session.flush()
+        vt = VehicleType(
+            name="Solaris Urbino 18",
+            name_short="GN",
+            scenario_id=scenario.id,
+            battery_capacity=600.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 300], [1, 300]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            empty_mass=19000.0,
+            allowed_mass=19000.0 + 100 * 68,
+            consumption=1.5,
+        )
+        db_session.add(vt)
+        db_session.commit()
+        return scenario
+
+    @staticmethod
+    def _lut_for(db_session: Session, name_short: str):
+        from eflips.model import AssocVehicleTypeVehicleClass, ConsumptionLut, VehicleClass
+
+        return (
+            db_session.query(ConsumptionLut)
+            .join(VehicleClass)
+            .join(AssocVehicleTypeVehicleClass)
+            .join(VehicleType)
+            .filter(VehicleType.name_short == name_short)
+            .one()
+        )
+
+    @staticmethod
+    def _interpolate(lut, incline: float, t_amb: float, lol: float, speed: float) -> float:
+        import numpy as np
+        from scipy import interpolate
+
+        pts = np.asarray(lut.data_points, dtype=float)
+        vals = np.asarray(lut.values, dtype=float)
+        scales = [np.unique(pts[:, i]) for i in range(4)]
+        grid = np.full([len(s) for s in scales], np.nan)
+        grid[tuple(np.searchsorted(scales[i], pts[:, i]) for i in range(4))] = vals
+        f = interpolate.RegularGridInterpolator(tuple(scales), grid, bounds_error=False)
+        return float(f([[incline, t_amb, lol, speed]])[0])
+
+    def test_attaches_calibrated_lut(
+        self, temp_db: Path, tmp_path: Path, db_session: Session, scenario_with_vehicle_type
+    ):
+        xlsx = tmp_path / "measured.xlsx"
+        self._write_measured_xlsx(xlsx, value=2.0)
+
+        CalibrateConsumptionLut(measured_lut_path=xlsx).modify(
+            db_session, {"CalibrateConsumptionLut.vehicle_type_names": ["GN"]}
+        )
+        db_session.commit()
+
+        vt = db_session.query(VehicleType).filter_by(name_short="GN").one()
+        assert vt.consumption is None
+        lut = self._lut_for(db_session, "GN")
+        assert "measured.xlsx" in lut.name
+        assert len(lut.values) == len(lut.data_points) > 0
+
+        # At a measured point (flat, mean load) the table reproduces the measurement.
+        for t_amb, speed in [(0.0, 20.0), (10.0, 30.0), (20.0, 40.0)]:
+            assert self._interpolate(lut, 0.0, t_amb, 0.5, speed) == pytest.approx(2.0, rel=0.05)
+
+        # The incline dependence of the regression model survives the calibration.
+        downhill = self._interpolate(lut, -0.05, 10.0, 0.5, 30.0)
+        flat = self._interpolate(lut, 0.0, 10.0, 0.5, 30.0)
+        uphill = self._interpolate(lut, 0.05, 10.0, 0.5, 30.0)
+        assert downhill < flat < uphill
+
+    def test_slope_offset_is_not_scaled(self, temp_db: Path, db_session: Session):
+        """Calibration scales the flat part only; the incline offset stays as generated."""
+        import numpy as np
+        from eflips.model import ConsumptionLut, VehicleClass
+
+        scenario = Scenario(name="Slope", name_short="SL")
+        db_session.add(scenario)
+        db_session.flush()
+        vt = VehicleType(
+            name="Bus",
+            name_short="B",
+            scenario_id=scenario.id,
+            battery_capacity=400.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            empty_mass=19000.0,
+            allowed_mass=19000.0 + 100 * 68,
+            consumption=None,
+        )
+        db_session.add(vt)
+        db_session.flush()
+        vc = VehicleClass(scenario_id=scenario.id, name="vc", vehicle_types=[vt])
+        db_session.add(vc)
+        db_session.flush()
+        lut = ConsumptionLut.from_vehicle_type(vt, vc)
+
+        pts = np.asarray(lut.data_points, dtype=float)
+        vals = np.asarray(lut.values, dtype=float)
+        # Measured = twice the synthetic flat-ground values -> ratio field is exactly 2.
+        on_plane = (pts[:, 0] == 0.0) & (pts[:, 2] == 0.5)
+        measured = [
+            (float(p[3]), float(p[1]), float(2.0 * v))
+            for p, v in zip(pts[on_plane], vals[on_plane])
+        ]
+        scaled, stats = CalibrateConsumptionLut.calibrate_values(
+            lut.data_points, lut.values, measured
+        )
+        scaled = np.asarray(scaled)
+        assert stats["ratio_min"] == pytest.approx(2.0)
+        assert stats["ratio_max"] == pytest.approx(2.0)
+
+        # Flat part doubled ...
+        assert np.allclose(scaled[on_plane], 2.0 * vals[on_plane])
+        # ... while the incline offset relative to the flat slice is unchanged.
+        flat_of = {}
+        for p, v in zip(pts, vals):
+            if p[0] == 0.0:
+                flat_of[(p[1], p[2], p[3])] = v
+        for p, v_old, v_new in zip(pts, vals, scaled):
+            key = (p[1], p[2], p[3])
+            assert v_new - 2.0 * flat_of[key] == pytest.approx(v_old - flat_of[key], abs=1e-9)
+
+    def test_identity_when_measured_equals_model(self, temp_db: Path, db_session: Session):
+        """Measured points taken from the synthetic table itself leave the values unchanged."""
+        import numpy as np
+        from eflips.model import ConsumptionLut, VehicleClass
+
+        scenario = Scenario(name="Identity", name_short="ID")
+        db_session.add(scenario)
+        db_session.flush()
+        vt = VehicleType(
+            name="Bus",
+            name_short="B",
+            scenario_id=scenario.id,
+            battery_capacity=400.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            empty_mass=12000.0,
+            allowed_mass=12000.0 + 70 * 68,
+            consumption=None,
+        )
+        db_session.add(vt)
+        db_session.flush()
+        vc = VehicleClass(scenario_id=scenario.id, name="vc", vehicle_types=[vt])
+        db_session.add(vc)
+        db_session.flush()
+        lut = ConsumptionLut.from_vehicle_type(vt, vc)
+
+        pts = np.asarray(lut.data_points, dtype=float)
+        vals = np.asarray(lut.values, dtype=float)
+        on_plane = (pts[:, 0] == 0.0) & (pts[:, 2] == 0.5)
+        measured = [
+            (float(p[3]), float(p[1]), float(v)) for p, v in zip(pts[on_plane], vals[on_plane])
+        ]
+
+        scaled, stats = CalibrateConsumptionLut.calibrate_values(
+            lut.data_points, lut.values, measured
+        )
+        assert stats["n_points"] == on_plane.sum()
+        assert stats["ratio_min"] == pytest.approx(1.0)
+        assert stats["ratio_max"] == pytest.approx(1.0)
+        assert np.allclose(scaled, vals)
+
+    def test_measured_points_outside_the_grid_are_ignored(
+        self, temp_db: Path, db_session: Session
+    ):
+        """Measurements outside the synthetic grid are dropped instead of extrapolated."""
+        import numpy as np
+        from eflips.model import ConsumptionLut, VehicleClass
+
+        scenario = Scenario(name="Outside", name_short="OU")
+        db_session.add(scenario)
+        db_session.flush()
+        vt = VehicleType(
+            name="Bus",
+            name_short="B",
+            scenario_id=scenario.id,
+            battery_capacity=400.0,
+            battery_capacity_reserve=0.0,
+            charging_curve=[[0, 150], [1, 150]],
+            opportunity_charging_capable=True,
+            minimum_charging_power=10,
+            empty_mass=19000.0,
+            allowed_mass=19000.0 + 100 * 68,
+            consumption=None,
+        )
+        db_session.add(vt)
+        db_session.flush()
+        vc = VehicleClass(scenario_id=scenario.id, name="vc", vehicle_types=[vt])
+        db_session.add(vc)
+        db_session.flush()
+        lut = ConsumptionLut.from_vehicle_type(vt, vc)
+
+        pts = np.asarray(lut.data_points, dtype=float)
+        vals = np.asarray(lut.values, dtype=float)
+        on_plane = (pts[:, 0] == 0.0) & (pts[:, 2] == 0.5)
+        in_grid = [
+            (float(p[3]), float(p[1]), float(2.0 * v))
+            for p, v in zip(pts[on_plane], vals[on_plane])
+        ]
+        # A speed below and a temperature above the generated grid, with absurd values.
+        min_speed, max_temp = pts[:, 3].min(), pts[:, 1].max()
+        outside = [(min_speed - 1.0, 0.0, 99.0), (20.0, max_temp + 1.0, 99.0)]
+
+        scaled, stats = CalibrateConsumptionLut.calibrate_values(
+            lut.data_points, lut.values, in_grid + outside
+        )
+        assert stats["n_points"] == len(in_grid)
+        assert stats["ratio_max"] == pytest.approx(2.0)
+        assert np.allclose(np.asarray(scaled)[on_plane], 2.0 * vals[on_plane])
+
+    def test_raises_without_masses(self, temp_db: Path, tmp_path: Path, db_session: Session):
+        xlsx = tmp_path / "measured.xlsx"
+        self._write_measured_xlsx(xlsx)
+        scenario = Scenario(name="No mass", name_short="NM")
+        db_session.add(scenario)
+        db_session.flush()
+        db_session.add(
+            VehicleType(
+                name="Bus",
+                name_short="B",
+                scenario_id=scenario.id,
+                battery_capacity=400.0,
+                battery_capacity_reserve=0.0,
+                charging_curve=[[0, 150], [1, 150]],
+                opportunity_charging_capable=True,
+                minimum_charging_power=10,
+                consumption=1.5,
+            )
+        )
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="empty_mass and allowed_mass"):
+            CalibrateConsumptionLut(measured_lut_path=xlsx).modify(db_session, {})
+
+    def test_raises_for_unknown_vehicle_type(
+        self, temp_db: Path, tmp_path: Path, db_session: Session, scenario_with_vehicle_type
+    ):
+        xlsx = tmp_path / "measured.xlsx"
+        self._write_measured_xlsx(xlsx)
+        with pytest.raises(ValueError, match="not found in scenario"):
+            CalibrateConsumptionLut(measured_lut_path=xlsx).modify(
+                db_session, {"CalibrateConsumptionLut.vehicle_type_names": ["XX"]}
+            )
+
+    def test_raises_when_multiple_scenarios(
+        self, temp_db: Path, tmp_path: Path, db_session: Session
+    ):
+        xlsx = tmp_path / "measured.xlsx"
+        self._write_measured_xlsx(xlsx)
+        db_session.add(Scenario(name="S1", name_short="S1"))
+        db_session.add(Scenario(name="S2", name_short="S2"))
+        db_session.commit()
+        with pytest.raises(ValueError, match="Expected exactly one scenario, found 2"):
+            CalibrateConsumptionLut(measured_lut_path=xlsx).modify(db_session, {})
+
+    def test_document_params(self, tmp_path: Path):
+        docs = CalibrateConsumptionLut(measured_lut_path=tmp_path / "x.xlsx").document_params()
+        assert "CalibrateConsumptionLut.vehicle_type_names" in docs
