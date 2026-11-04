@@ -36,6 +36,8 @@ from eflips.model import (
 )
 from eflips.opt.depot_rotation_matching import DepotRotationOptimizer
 from eflips.opt.scheduling import create_graph, solve, write_back_rotation_plan
+from eflips.opt.scheduling.deadheads import assign_delta_socs, materialize_deadhead_candidates
+from eflips.opt.scheduling.nearby import NearbyDepartureOptions
 from sqlalchemy import func, not_
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
@@ -789,9 +791,14 @@ class VehicleScheduling(Modifier):
 
     The optimization is performed separately for each vehicle type that has rotations
     in the scenario.
+
+    Trips may also be followed by departures from nearby stops, reached by a short deadhead
+    (see ``nearby_departures``). In DEPOT mode, these deadheads are written to the database as
+    candidates first, so their energy consumption is computed with the same consumption model as
+    the trips' (``generate_clamped_consumption_result``).
     """
 
-    def __init__(self, code_version: str = "v1.0.1", **kwargs: Any):
+    def __init__(self, code_version: str = "v1.1.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -829,6 +836,11 @@ class VehicleScheduling(Modifier):
     def _get_default_save_graphs() -> bool:
         """Get the default save_graphs setting."""
         return False
+
+    @staticmethod
+    def _get_default_nearby_departures() -> NearbyDepartureOptions:
+        """Get the default nearby departure options."""
+        return NearbyDepartureOptions()
 
     @classmethod
     def document_params(cls) -> Dict[str, str]:
@@ -912,6 +924,19 @@ class VehicleScheduling(Modifier):
             Type: bool
             Example: True
             """.strip(),
+            f"{cls.__name__}.nearby_departures": """
+            Also connect trips to departures from nearby stops: after its break at the arrival stop,
+            the vehicle drives a short deadhead to one of the nearest other stops and departs there.
+            Such a connection is only offered if it does not wait longer than staying at the arrival
+            stop (plus a tolerance), or if there is no departure at the arrival stop. The deadheads
+            are routed with OpenRouteService (environment variable OPENROUTESERVICE_BASE_URL, and
+            OPENROUTESERVICE_API_KEY if the server needs one). The deadheads used are written to the
+            database as empty trips. Set to None to only connect trips at the same stop.
+
+            Default: NearbyDepartureOptions() (the 5 nearest stops within 1000 m, no tolerance)
+            Type: Optional[eflips.opt.scheduling.nearby.NearbyDepartureOptions]
+            Example: NearbyDepartureOptions(max_nearby_stations=3, extra_wait_tolerance=timedelta(minutes=2))
+            """.strip(),
             f"{cls.__name__}.graph_output_dir": """
             Optional custom directory path where graph files should be saved.
             Only used when save_graphs is True.
@@ -981,6 +1006,10 @@ class VehicleScheduling(Modifier):
 
         save_graphs = params.get(save_graphs_key, self._get_default_save_graphs())
         graph_output_dir = params.get(graph_output_dir_key, None)
+        nearby_departures = params.get(
+            f"{self.__class__.__name__}.nearby_departures",
+            self._get_default_nearby_departures(),
+        )
 
         # Validate parameters
         if not isinstance(minimum_break_time, timedelta):
@@ -1009,6 +1038,24 @@ class VehicleScheduling(Modifier):
             )
         if not isinstance(charge_type, ChargeType):
             raise ValueError(f"charge_type must be a ChargeType, got {type(charge_type).__name__}")
+
+        if nearby_departures is not None and not isinstance(
+            nearby_departures, NearbyDepartureOptions
+        ):
+            raise ValueError(
+                "nearby_departures must be a NearbyDepartureOptions or None, got "
+                f"{type(nearby_departures).__name__}"
+            )
+        if nearby_departures is not None and nearby_departures.router is None:
+            # eflips-opt routes the deadheads with the OpenRouteService server given by BASE_URL
+            base_url = os.environ.get("OPENROUTESERVICE_BASE_URL")
+            if not base_url:
+                raise ValueError(
+                    "Environment variable 'OPENROUTESERVICE_BASE_URL' is not set. It is needed to "
+                    "route the deadheads to nearby stops; set VehicleScheduling.nearby_departures "
+                    "to None to schedule without them."
+                )
+            os.environ["BASE_URL"] = base_url
 
         # Validate save_graphs parameter
         if not isinstance(save_graphs, bool):
@@ -1047,26 +1094,6 @@ class VehicleScheduling(Modifier):
             f"longer_break_time_duration={longer_break_time_duration}"
         )
 
-        # If we are in DEPOT charge type, calculate consumption results, they will be fed into the optimizer
-        delta_socs: Dict[int, float] | None
-        if charge_type == ChargeType.DEPOT:
-            self.logger.info("Calculating consumption results for DEPOT charge type")
-            # Create a dictionary of the energy consumption for each rotation
-            consumption: Dict[int, ConsumptionResult] = generate_clamped_consumption_result(
-                scenario
-            )
-
-            # Convert to the format eflips-opt expects: {trip_id: delta_soc, ...}
-            # Also turn the delta_soc into a positive number
-            delta_socs = {}
-            for trip_id, result in consumption.items():
-                delta_socs[trip_id] = -1 * result.delta_soc_total / (1 - battery_margin)
-        else:
-            self.logger.info("Skipping consumption calculation for OPPORTUNITY charge type")
-            delta_socs = None
-
-        self.logger.info("Generated consumption results")
-
         # Get all vehicle types that have rotations
         all_vehicle_types = session.query(VehicleType).join(Rotation).distinct().all()
         num_vehicle_types = len(all_vehicle_types)
@@ -1076,16 +1103,11 @@ class VehicleScheduling(Modifier):
 
         self.logger.info(f"Processing {num_vehicle_types} vehicle type(s)")
 
-        # Create output directory if graph saving is enabled
-        if save_graphs:
-            assert graph_output_dir is not None
-            graph_output_dir.mkdir(parents=True, exist_ok=True)
-            self.logger.info(f"Saving graphs to: {graph_output_dir}")
-
-        # Process each vehicle type separately
+        # Create the graph of all possible connections between trips, for each vehicle type
+        graphs: List[Tuple[VehicleType, nx.DiGraph]] = []
         for i, vehicle_type in enumerate(all_vehicle_types):
             self.logger.info(
-                f"Processing vehicle type {i+1}/{num_vehicle_types}: {vehicle_type.name_short}"
+                f"Creating graph for vehicle type {i+1}/{num_vehicle_types}: {vehicle_type.name_short}"
             )
 
             # Get all passenger trips for this vehicle type
@@ -1097,18 +1119,58 @@ class VehicleScheduling(Modifier):
                 .all()
             )
 
-            # Create the graph of all possible connections between trips
             graph = create_graph(
                 trips=trips,
-                delta_socs=delta_socs,
                 maximum_schedule_duration=maximum_schedule_duration,
                 minimum_break_time=minimum_break_time,
                 longer_break_time_trips=longer_break_time_trips,
                 longer_break_time_duration=longer_break_time_duration,
+                nearby_departures=nearby_departures,
             )
             self.logger.info(
                 f"Created graph for vehicle type {vehicle_type.name_short} "
                 f"with {len(graph.nodes)} nodes and {len(graph.edges)} edges"
+            )
+            graphs.append((vehicle_type, graph))
+
+        # If we are in DEPOT charge type, calculate consumption results, they will be fed into the optimizer.
+        # The deadheads to nearby stops are written to the database first, so their consumption is calculated
+        # together with (and like) the trips'.
+        if charge_type == ChargeType.DEPOT:
+            for vehicle_type, graph in graphs:
+                candidates = materialize_deadhead_candidates(graph, session)
+                self.logger.info(
+                    f"Created {len(candidates)} deadhead candidates for vehicle type "
+                    f"{vehicle_type.name_short}"
+                )
+
+            self.logger.info("Calculating consumption results for DEPOT charge type")
+            consumption: Dict[int, ConsumptionResult] = generate_clamped_consumption_result(
+                scenario
+            )
+
+            # Convert to the format eflips-opt expects: {trip_id: delta_soc, ...}
+            # Also turn the delta_soc into a positive number
+            delta_socs: Dict[int, float] = {}
+            for trip_id, result in consumption.items():
+                delta_socs[trip_id] = -1 * result.delta_soc_total / (1 - battery_margin)
+
+            for _, graph in graphs:
+                assign_delta_socs(graph, delta_socs)
+            self.logger.info("Generated consumption results")
+        else:
+            self.logger.info("Skipping consumption calculation for OPPORTUNITY charge type")
+
+        # Create output directory if graph saving is enabled
+        if save_graphs:
+            assert graph_output_dir is not None
+            graph_output_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Saving graphs to: {graph_output_dir}")
+
+        # Solve each vehicle type separately
+        for i, (vehicle_type, graph) in enumerate(graphs):
+            self.logger.info(
+                f"Processing vehicle type {i+1}/{num_vehicle_types}: {vehicle_type.name_short}"
             )
 
             # Save graph if requested
