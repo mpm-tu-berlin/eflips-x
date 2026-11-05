@@ -552,9 +552,8 @@ class TestVehicleScheduling:
         result = []
         for rotation in db_session.query(Rotation).all():
             trips = sorted(rotation.trips, key=lambda t: t.departure_time)
-            result += [
-                t for t in trips[1:-1] if t.trip_type == TripType.EMPTY
-            ]  # first/last are depot trips
+            # Empty trips at either end would be depot trips, not deadheads to nearby stops
+            result += [t for t in trips[1:-1] if t.trip_type == TripType.EMPTY]
         return result
 
     def test_vehicle_scheduling_nearby_departures(

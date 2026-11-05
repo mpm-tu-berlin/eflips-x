@@ -1,5 +1,6 @@
 """Tests for BVG-specific modifier tools."""
 
+import logging
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -1061,6 +1062,54 @@ class TestMergeStations:
         # With stricter criteria, no stations should be merged
         stations = db_session.query(Station).all()
         assert len(stations) == 5  # All original stations remain
+
+    def test_merge_stations_same_place_different_names(
+        self, temp_db: Path, db_session: Session, caplog: pytest.LogCaptureFixture
+    ):
+        """Stations at most 1 m apart are merged whatever their names, with a warning."""
+        scenario = Scenario(name="Test Scenario", name_short="TEST")
+        db_session.add(scenario)
+        db_session.flush()
+
+        def station(name: str, wkt: str) -> Station:
+            return Station(
+                name=name,
+                name_short=name[:4],
+                scenario_id=scenario.id,
+                geom=WKTElement(wkt, srid=4326),
+                is_electrified=False,
+            )
+
+        bus_stop = station("Rathaus", "POINT Z (13.0 52.0 0)")
+        same_place = station("Betriebshof Mitte", "POINT Z (13.000005 52.0 0)")  # ~0.3 m
+        a_bit_away = station("Schule", "POINT Z (13.0 52.00002 0)")  # ~2.2 m, kept apart
+        destination = station("Endstelle", "POINT Z (13.01 52.01 0)")
+        db_session.add_all([bus_stop, same_place, a_bit_away, destination])
+        db_session.flush()
+        db_session.add_all(
+            [
+                Route(
+                    name=f"Route {s.name}",
+                    name_short=s.name_short,
+                    scenario_id=scenario.id,
+                    departure_station=s,
+                    arrival_station=destination,
+                    distance=1500,
+                )
+                for s in (bus_stop, same_place, a_bit_away)
+            ]
+        )
+        db_session.commit()
+
+        with caplog.at_level(logging.WARNING):
+            MergeStations().modify(session=db_session, params={})
+        db_session.commit()
+
+        names = {s.name for s in db_session.query(Station).all()}
+        assert names == {"Rathaus", "Schule", "Endstelle"}
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Betriebshof Mitte" in warnings[0].getMessage()
 
     def test_merge_stations_updates_routes(
         self, temp_db: Path, scenario_with_nearby_stations, db_session: Session
