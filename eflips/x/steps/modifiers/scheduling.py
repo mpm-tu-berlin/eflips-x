@@ -933,9 +933,18 @@ class VehicleScheduling(Modifier):
             OPENROUTESERVICE_API_KEY if the server needs one). The deadheads used are written to the
             database as empty trips. Set to None to only connect trips at the same stop.
 
+            NearbyDepartureOptions fields:
+            - max_nearby_stations (int, default 5): how many of the nearest other stops to consider
+            - max_straight_line_distance (float, default 1000.0): the maximum straight-line distance
+              to a nearby stop in meters
+            - extra_wait_tolerance (timedelta, default 0): how much longer than the first departure
+              at the arrival stop a departure from a nearby stop may wait
+            - router (default None): computes the deadheads; None uses OpenRouteService
+
             Default: NearbyDepartureOptions() (the 5 nearest stops within 1000 m, no tolerance)
             Type: Optional[eflips.opt.scheduling.nearby.NearbyDepartureOptions]
-            Example: NearbyDepartureOptions(max_nearby_stations=3, extra_wait_tolerance=timedelta(minutes=2))
+            Example: NearbyDepartureOptions(max_nearby_stations=3, max_straight_line_distance=500.0,
+            extra_wait_tolerance=timedelta(minutes=2))
             """.strip(),
             f"{cls.__name__}.graph_output_dir": """
             Optional custom directory path where graph files should be saved.
