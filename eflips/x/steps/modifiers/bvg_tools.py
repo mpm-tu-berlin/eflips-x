@@ -909,6 +909,10 @@ class MergeStations(Modifier):
     1. Within a specified distance of each other (geospatial proximity)
     2. Have similar names (fuzzy name matching above a threshold)
 
+    Stations at most ``UNCONDITIONAL_MERGE_DISTANCE_METERS`` (1 m) apart are merged regardless of their
+    names (with a warning): they are the same place. Vehicle scheduling cannot connect them by a
+    deadhead, as a route between them would have no length.
+
     The modifier performs the following operations:
     1. Identifies stations that are used in routes (departure or arrival stations)
     2. Finds nearby stations within max_distance_meters
@@ -919,7 +923,10 @@ class MergeStations(Modifier):
     7. Deletes the merged stations
     """
 
-    def __init__(self, code_version: str = "v1.0.0", **kwargs: Any):
+    UNCONDITIONAL_MERGE_DISTANCE_METERS = 1.0
+    """Stations at most this far apart are merged whatever their names."""
+
+    def __init__(self, code_version: str = "v1.1.0", **kwargs: Any):
         super().__init__(code_version=code_version, **kwargs)
         self.logger = logging.getLogger(__name__)
 
@@ -963,6 +970,8 @@ Uses the Levenshtein distance ratio (0-100) to compare station names.
 **Default:** 80.0
 
 **Example:** "Berlin Hauptbahnhof" and "S+U Berlin Hauptbahnhof" would have a high match percentage.
+
+**Note:** Stations at most 1 m apart are merged regardless of their names (a warning is logged).
             """.strip(),
         }
 
@@ -1021,26 +1030,37 @@ Uses the Levenshtein distance ratio (0-100) to compare station names.
             station_pt = to_shape(station.geom)  # type: ignore[arg-type]
             geom_2d_wkb = Point(station_pt.x, station_pt.y).wkb
 
+            distance = func.ST_Distance(
+                func.CastToXY(Station.geom), func.ST_GeomFromWKB(geom_2d_wkb), 1
+            )
             nearby_stations = (
-                session.query(Station)
+                session.query(Station, distance)
                 .filter(Station.id != station.id)
                 .filter(Station.id.in_(station_ids_in_use))
                 .filter(
-                    func.ST_Distance(
-                        func.CastToXY(Station.geom), func.ST_GeomFromWKB(geom_2d_wkb), 1
-                    )
-                    <= max_distance_meters
+                    distance <= max(max_distance_meters, self.UNCONDITIONAL_MERGE_DISTANCE_METERS)
                 )
                 .all()
             )
 
             if len(nearby_stations) > 0:
                 # Also check if they're named similarly using fuzzy matching
-                for nearby_station in nearby_stations:
+                for nearby_station, distance_meters in nearby_stations:
                     orig_station_name = station.name
                     nearby_station_name = nearby_station.name
                     percentage = fuzz.ratio(orig_station_name, nearby_station_name)
-                    if percentage >= match_percentage:
+                    same_place = distance_meters <= self.UNCONDITIONAL_MERGE_DISTANCE_METERS
+                    similar = (
+                        percentage >= match_percentage and distance_meters <= max_distance_meters
+                    )
+                    # Each pair is seen from both stations; warn once
+                    if same_place and not similar and station.id < nearby_station.id:
+                        self.logger.warning(
+                            f"Merging stations {orig_station_name!r} and {nearby_station_name!r} "
+                            f"although their names differ ({percentage}%): they are "
+                            f"{distance_meters:.2f} m apart"
+                        )
+                    if similar or same_place:
                         # See if one of the stations is already in the to_merge list
                         found = False
                         for merge_group in to_merge:

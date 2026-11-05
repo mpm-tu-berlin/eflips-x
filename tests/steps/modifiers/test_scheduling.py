@@ -546,13 +546,90 @@ class TestVehicleScheduling:
             graphml_files = list(output_dir.glob("*.graphml"))
             assert len(graphml_files) == 0, "GraphML files created despite save_graphs=False"
 
+    @staticmethod
+    def _deadhead_trips_in_rotations(db_session: Session) -> list[Trip]:
+        """The empty trips between two passenger trips of a rotation."""
+        result = []
+        for rotation in db_session.query(Rotation).all():
+            trips = sorted(rotation.trips, key=lambda t: t.departure_time)
+            # Empty trips at either end would be depot trips, not deadheads to nearby stops
+            result += [t for t in trips[1:-1] if t.trip_type == TripType.EMPTY]
+        return result
+
+    def test_vehicle_scheduling_nearby_departures(
+        self,
+        temp_db: Path,
+        scenario_with_vehicle_types: Scenario,
+        db_session: Session,
+    ):
+        """With the default nearby departures, deadheads to nearby stops are inserted where used."""
+        VehicleScheduling().modify(session=db_session, params={})
+        db_session.commit()
+
+        assert (
+            db_session.query(Rotation)
+            .filter(Rotation.name == "Deadhead candidates (temporary)")
+            .count()
+            == 0
+        ), "The deadhead candidates must be removed"
+
+        deadheads = self._deadhead_trips_in_rotations(db_session)
+        assert len(deadheads) > 0, "The test data should use a deadhead to a nearby stop"
+        for deadhead in deadheads:
+            trips = sorted(deadhead.rotation.trips, key=lambda t: t.departure_time)
+            index = trips.index(deadhead)
+            before, after = trips[index - 1], trips[index + 1]
+            assert deadhead.route.name.startswith("Leerfahrt")
+            assert deadhead.route.departure_station_id == before.route.arrival_station_id
+            assert deadhead.route.arrival_station_id == after.route.departure_station_id
+            assert deadhead.departure_time >= before.arrival_time
+            assert deadhead.arrival_time == after.departure_time
+
+    def test_vehicle_scheduling_without_nearby_departures(
+        self,
+        temp_db: Path,
+        scenario_with_vehicle_types: Scenario,
+        db_session: Session,
+    ):
+        """With nearby_departures=None, trips are only connected at the same stop."""
+        VehicleScheduling().modify(
+            session=db_session, params={"VehicleScheduling.nearby_departures": None}
+        )
+        db_session.commit()
+
+        for rotation in db_session.query(Rotation).all():
+            trips = sorted(rotation.trips, key=lambda t: t.departure_time)
+            passenger = [t for t in trips if t.trip_type == TripType.PASSENGER]
+            for trip, following in zip(passenger, passenger[1:]):
+                assert trip.route.arrival_station_id == following.route.departure_station_id
+        assert not any(
+            t.route.name.startswith("Leerfahrt")
+            for t in self._deadhead_trips_in_rotations(db_session)
+        )
+
+    def test_vehicle_scheduling_nearby_departures_validation(
+        self,
+        temp_db: Path,
+        scenario_with_vehicle_types: Scenario,
+        db_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Invalid nearby_departures values and a missing routing URL are rejected."""
+        with pytest.raises(ValueError, match="nearby_departures"):
+            VehicleScheduling().modify(
+                session=db_session, params={"VehicleScheduling.nearby_departures": True}
+            )
+        monkeypatch.delenv("OPENROUTESERVICE_BASE_URL", raising=False)
+        with pytest.raises(ValueError, match="OPENROUTESERVICE_BASE_URL"):
+            VehicleScheduling().modify(session=db_session, params={})
+
     def test_document_params(self):
         """Test that document_params returns expected parameters."""
         modifier = VehicleScheduling()
         docs = modifier.document_params()
 
         assert isinstance(docs, dict)
-        assert len(docs) == 8
+        assert len(docs) == 9
         assert "VehicleScheduling.minimum_break_time" in docs
         assert "VehicleScheduling.maximum_schedule_duration" in docs
         assert "VehicleScheduling.battery_margin" in docs
@@ -561,6 +638,7 @@ class TestVehicleScheduling:
         assert "VehicleScheduling.charge_type" in docs
         assert "VehicleScheduling.save_graphs" in docs
         assert "VehicleScheduling.graph_output_dir" in docs
+        assert "VehicleScheduling.nearby_departures" in docs
 
 
 class TestDepotAssignment:
