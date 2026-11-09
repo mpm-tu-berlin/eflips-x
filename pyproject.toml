@@ -7,7 +7,7 @@ authors = [
 ]
 license = {text = "AGPL-3.0-or-later"}
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "eflips-model (>=11.3.1,<12.0.0)",
     "eflips-depot",
@@ -25,6 +25,10 @@ dependencies = [
     "cartopy (>=0.25.0,<0.26.0)",
     "pandas (>=2.0)",
     "openpyxl (>=3.1.0)",
+    # xsdata < 26.1 cannot resolve the forward-referenced dataclass fields of eflips-ingest's
+    # BVG-XML bindings on Python 3.14 (XmlContextError: Failed to detect the declared class).
+    # Required on every Python version so that all of them test the same xsdata.
+    "xsdata (>=26.1)",
 ]
 
 [tool.poetry]
