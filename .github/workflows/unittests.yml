@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        PYTHON_VERSION: [ "3.12", "3.13" ]
+        PYTHON_VERSION: [ "3.11", "3.12", "3.13", "3.14" ]
         DATABASE: [ "sqlite" ]
         split: [ "1", "2", "3", "4" ]  # Number of splits for pytest-split
 

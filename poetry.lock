@@ -157,6 +157,19 @@ files = [
 ]
 
 [[package]]
+name = "async-timeout"
+version = "5.0.1"
+description = "Timeout context manager for asyncio programs"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+markers = "python_version == \"3.11\" and python_full_version < \"3.11.3\""
+files = [
+    {file = "async_timeout-5.0.1-py3-none-any.whl", hash = "sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c"},
+    {file = "async_timeout-5.0.1.tar.gz", hash = "sha256:d9321a7a3d5a6a5e187e824d2fa0793ce379a202935782d555d6e9d2735677d3"},
+]
+
+[[package]]
 name = "asyncpg"
 version = "0.31.0"
 description = "An asyncio PostgreSQL driver"
@@ -1141,6 +1154,7 @@ files = [
 click = ">=8.1"
 cloudpickle = ">=3.0.0"
 fsspec = ">=2021.9.0"
+importlib_metadata = {version = ">=4.13.0", markers = "python_version < \"3.12\""}
 packaging = ">=20.0"
 partd = ">=1.4.0"
 pyyaml = ">=5.3.1"
@@ -1323,9 +1337,34 @@ description = ""
 optional = false
 python-versions = "<3.14,>=3.10"
 groups = ["main"]
+markers = "python_version < \"3.14\""
 files = [
     {file = "eflips_eval-1.9.1-py3-none-any.whl", hash = "sha256:c7ad330a5009f83554a13343a79bff8780684248e21acbdec6476d203f7dd41c"},
     {file = "eflips_eval-1.9.1.tar.gz", hash = "sha256:b7b1cbf4c7b7965a6bddcde1db3ae4f4bba2bf5a4e1712670678949d62e91d6c"},
+]
+
+[package.dependencies]
+dash-cytoscape = ">=1.0.1,<2.0.0"
+folium = ">=0.17.0,<0.18.0"
+httpx = ">=0.27.0,<0.28.0"
+matplotlib = ">=3.9.0,<4.0.0"
+pandas = ">=2.2.0,<3.0.0"
+plotly = ">=5.19.0,<6.0.0"
+polyline = ">=2.0.0,<3.0.0"
+seaborn = ">=0.13.2,<0.14.0"
+shapely = ">=2.0.5,<3.0.0"
+
+[[package]]
+name = "eflips-eval"
+version = "1.11.0"
+description = ""
+optional = false
+python-versions = "<3.15,>=3.11"
+groups = ["main"]
+markers = "python_version == \"3.14\""
+files = [
+    {file = "eflips_eval-1.11.0-py3-none-any.whl", hash = "sha256:091b724b0c740bd436c43112e8a6a3dfb296e88675745a4715c80cc09131fb21"},
+    {file = "eflips_eval-1.11.0.tar.gz", hash = "sha256:6dc21223e718711a663e44b923fda32935ebdbb5626c2a58aafcbf16c2ed62e0"},
 ]
 
 [package.dependencies]
@@ -1346,9 +1385,28 @@ description = "TCO and LCA analysis for eFLIPS"
 optional = false
 python-versions = "<3.14,>=3.10"
 groups = ["main"]
+markers = "python_version < \"3.14\""
 files = [
     {file = "eflips_impact-2.1.0-py3-none-any.whl", hash = "sha256:6184c1d9b394deb859fe8c48ae87cc061ae61cb9d3d352963c3fa9168520d6bd"},
     {file = "eflips_impact-2.1.0.tar.gz", hash = "sha256:ff5c18e42041aecc4ffb3866320a415c45aef863032c236c1b4cf01b781121a1"},
+]
+
+[package.dependencies]
+eflips-eval = ">=1.9.0,<2.0.0"
+eflips-model = ">=11.1.0,<12.0.0"
+pytest = ">=9.0.3,<10.0.0"
+
+[[package]]
+name = "eflips-impact"
+version = "2.1.1"
+description = "TCO and LCA analysis for eFLIPS"
+optional = false
+python-versions = "<3.15,>=3.11"
+groups = ["main"]
+markers = "python_version == \"3.14\""
+files = [
+    {file = "eflips_impact-2.1.1-py3-none-any.whl", hash = "sha256:cc0e0d1fefcbb7cce331306130d668914d89c6dc19363c6b35892d966928bdb6"},
+    {file = "eflips_impact-2.1.1.tar.gz", hash = "sha256:6dbdfa86a29a26083ecae281a60d5272aeed578c113c00f85728762916f1bca2"},
 ]
 
 [package.dependencies]
@@ -1363,6 +1421,7 @@ description = "A collection of import scripts for converting bus schedule data i
 optional = false
 python-versions = "<3.14,>=3.11"
 groups = ["main"]
+markers = "python_version < \"3.14\""
 files = [
     {file = "eflips_ingest-2.3.0-py3-none-any.whl", hash = "sha256:f39f15543f7965f19650b86472338ec68d5cd14cd6c39dd7fd2eb3176de3e18f"},
     {file = "eflips_ingest-2.3.0.tar.gz", hash = "sha256:464df47c79fd61d3e77c6c5b814ba86dfbab5ad138262f39b655db89f2dcf68d"},
@@ -1375,6 +1434,27 @@ lxml = ">=6.1.0,<7.0.0"
 pyproj = ">=3.6.1,<4.0.0"
 pytz = ">=2024.1,<2025.0"
 xsdata = {version = ">=24.1,<25.0", extras = ["cli", "lxml"]}
+
+[[package]]
+name = "eflips-ingest"
+version = "2.4.1"
+description = "A collection of import scripts for converting bus schedule data into the [eflips-model](https://github.com/mpm-tu-berlin/eflips-model) data format."
+optional = false
+python-versions = "<3.15,>=3.11"
+groups = ["main"]
+markers = "python_version == \"3.14\""
+files = [
+    {file = "eflips_ingest-2.4.1-py3-none-any.whl", hash = "sha256:08401d1f77e2824e5ced71aa7a0c3f0cf971844061e6f584ff81dc4f3597cef1"},
+    {file = "eflips_ingest-2.4.1.tar.gz", hash = "sha256:cd22c79f3e4f534b8d7fc30200d94b07cbfa487081ea610fb57fc01614900e4d"},
+]
+
+[package.dependencies]
+eflips-model = ">=11.4.0,<12.0.0"
+gtfs-kit = ">=12.0.0,<13.0.0"
+lxml = ">=6.1.0,<7.0.0"
+pyproj = ">=3.6.1,<4.0.0"
+pytz = ">=2024.1,<2025.0"
+xsdata = {version = ">=24.1,<27", extras = ["cli", "lxml"]}
 
 [[package]]
 name = "eflips-model"
@@ -1418,7 +1498,10 @@ files = [
 dash-cytoscape = ">=1.0.2,<2.0"
 eflips-model = ">=11.4.0,<12.0.0"
 eflips-schedule-rust = ">=3.2.0,<4.0"
-gurobipy = {version = ">=12.0.1,<13.0", markers = "python_version < \"3.14\""}
+gurobipy = [
+    {version = ">=12.0.1,<13.0", markers = "python_version < \"3.14\""},
+    {version = ">=13.0.1,<14.0", markers = "python_version == \"3.14\""},
+]
 kaleido = "0.2.1"
 networkx = ">=3.3,<4.0"
 numpy = ">=1.26.4,<3.0"
@@ -1971,6 +2054,7 @@ description = "Python interface to Gurobi"
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "python_version < \"3.14\""
 files = [
     {file = "gurobipy-12.0.3-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:83882c4552e2b2f1bd70623b9822d307bd5119154d3d9ff5a0071a681c9a29a5"},
     {file = "gurobipy-12.0.3-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:1e6881e29f870f639bd005b53c217a58a8ad1f54c94d8f14269002654de515fa"},
@@ -1992,6 +2076,44 @@ files = [
     {file = "gurobipy-12.0.3-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:76224c12c8ce7cc1b3221ad9da392ccd955edd8d83becd6e41bd883cb235a94c"},
     {file = "gurobipy-12.0.3-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:940e21dfcb82fbbadeba893f4d01d3348f0d595692fac56f4e28a4199f541b18"},
     {file = "gurobipy-12.0.3-cp39-cp39-win_amd64.whl", hash = "sha256:af87114a6125a1e5171db5c61867f33c4a41605548de8766b3cbfa5aa2c6de05"},
+]
+
+[package.extras]
+matrixapi = ["numpy", "scipy"]
+
+[[package]]
+name = "gurobipy"
+version = "13.0.3"
+description = "Python interface to Gurobi"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+markers = "python_version == \"3.14\""
+files = [
+    {file = "gurobipy-13.0.3-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:fd5189bd3507fe546323f3dafa0d000e3691288a9ad8bb7e2f74eed7e4af1f8c"},
+    {file = "gurobipy-13.0.3-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:a3ed4b02d1412f94b579f329bacb8c9de31bfeb74c3b487c29ac75c0977aee2b"},
+    {file = "gurobipy-13.0.3-cp310-cp310-manylinux_2_26_aarch64.whl", hash = "sha256:908ef711983a6df6f04b769b687e72e8f42f9e033e606216262072d731c972bf"},
+    {file = "gurobipy-13.0.3-cp310-cp310-win_amd64.whl", hash = "sha256:92658ce26fe22d2aafa98bc67652c1b52cabd90f83502b7f234c48c5b7761ae3"},
+    {file = "gurobipy-13.0.3-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:ce2dd649e6859eeee350d2c22120f2180799696eba3cdf6b2810f6a695d2761c"},
+    {file = "gurobipy-13.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:8ce3da52cceaa06eee4d4bbe02db873076aa731fc6a66b59d92446be704921b5"},
+    {file = "gurobipy-13.0.3-cp311-cp311-manylinux_2_26_aarch64.whl", hash = "sha256:2f82af72e5eaf4bdce0162a05ca8c5a57a49f6dc9e3fcf79329dd8e4f79bf43c"},
+    {file = "gurobipy-13.0.3-cp311-cp311-win_amd64.whl", hash = "sha256:5a13eec9f02ca3ba54e59ea3802f93bfc596c402a0a7ecb2396cfadecb17c82c"},
+    {file = "gurobipy-13.0.3-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:ee439774ed56dca173cddf0017f1cb854d7f79dfcc12abc4fe5d83a7f22bb9b3"},
+    {file = "gurobipy-13.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:34f0b9528edfbf29e96a74e0b69b8cc832375d43342d6376754fd436c570bb2a"},
+    {file = "gurobipy-13.0.3-cp312-cp312-manylinux_2_26_aarch64.whl", hash = "sha256:3d4611c247850379e416daafd9a7ad624d94e7b2b416746c382a3a54c1ef89d7"},
+    {file = "gurobipy-13.0.3-cp312-cp312-win_amd64.whl", hash = "sha256:11ae3f75a17265e095695229a3ccbf14a8fe6fa9a4bc17a11e2698bedc16b28a"},
+    {file = "gurobipy-13.0.3-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:65ca7a0cd1e5ed57c80e613f35509c0aeaac1544d17705b73f9a5707d40e2588"},
+    {file = "gurobipy-13.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:d54ea7f41dff3518020c1a6240fa3ef8f8ae3077040b4e1e445fe69a239e98ca"},
+    {file = "gurobipy-13.0.3-cp313-cp313-manylinux_2_26_aarch64.whl", hash = "sha256:3a7c8cf118f2381ec9f80f1990d532ead67d61f5bbc0be4f977fe9eb0cd6fc41"},
+    {file = "gurobipy-13.0.3-cp313-cp313-win_amd64.whl", hash = "sha256:ab051b7783642c74e49821c3348e8803aa32ca6d1b29f4adcc699bfc67b0f92e"},
+    {file = "gurobipy-13.0.3-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:46d572e1ef5e39dacfbba263a933cbe12ffa7568105b3e43ed8135347d86622e"},
+    {file = "gurobipy-13.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:c2e87d9fb5297fa260a62666a67f29d8be939027905cda353ca1b62047212e88"},
+    {file = "gurobipy-13.0.3-cp314-cp314-manylinux_2_26_aarch64.whl", hash = "sha256:f70a0746a5405f7b0b3b69188a569621c228c90f6dffa26219e47b82dc8f4e89"},
+    {file = "gurobipy-13.0.3-cp314-cp314-win_amd64.whl", hash = "sha256:cfed66d8ca81098bb0671c5ba1b0b3af4cd7b4694e808d0fd3e4d26fdb9c73a6"},
+    {file = "gurobipy-13.0.3-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:6465a921eb81244f48ab12b260c15bed286013ecbcb91ca17c6e4c23eed08834"},
+    {file = "gurobipy-13.0.3-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:b4b5d5ff343e6c8acc36984eb447ee854f293d342dad05efc54aac9e624887b2"},
+    {file = "gurobipy-13.0.3-cp314-cp314t-manylinux_2_26_aarch64.whl", hash = "sha256:8796eb01b354779a75fbf4cdb0c02962f2af176240311c33fb5fe38dd72226e9"},
+    {file = "gurobipy-13.0.3-cp314-cp314t-win_amd64.whl", hash = "sha256:ab286f94ef9673cd493b992c504d758ffb5e866f4a706decf47360a543eae720"},
 ]
 
 [package.extras]
@@ -3234,11 +3356,36 @@ files = [
 
 [[package]]
 name = "networkx"
+version = "3.6"
+description = "Python package for creating and manipulating graphs and networks"
+optional = false
+python-versions = ">=3.11"
+groups = ["main"]
+markers = "python_version == \"3.14\""
+files = [
+    {file = "networkx-3.6-py3-none-any.whl", hash = "sha256:cdb395b105806062473d3be36458d8f1459a4e4b98e236a66c3a48996e07684f"},
+    {file = "networkx-3.6.tar.gz", hash = "sha256:285276002ad1f7f7da0f7b42f004bcba70d381e936559166363707fdad3d72ad"},
+]
+
+[package.extras]
+benchmarking = ["asv", "virtualenv"]
+default = ["matplotlib (>=3.8)", "numpy (>=1.25)", "pandas (>=2.0)", "scipy (>=1.11.2)"]
+developer = ["mypy (>=1.15)", "pre-commit (>=4.1)"]
+doc = ["intersphinx-registry", "myst-nb (>=1.1)", "numpydoc (>=1.8.0)", "pillow (>=10)", "pydata-sphinx-theme (>=0.16)", "sphinx (>=8.0)", "sphinx-gallery (>=0.18)", "texext (>=0.6.7)"]
+example = ["cairocffi (>=1.7)", "contextily (>=1.6)", "igraph (>=0.11)", "iplotx (>=0.9.0)", "momepy (>=0.7.2)", "osmnx (>=2.0.0)", "scikit-learn (>=1.5)", "seaborn (>=0.13)"]
+extra = ["lxml (>=4.6)", "pydot (>=3.0.1)", "pygraphviz (>=1.14)", "sympy (>=1.10)"]
+release = ["build (>=0.10)", "changelist (==0.5)", "twine (>=4.0)", "wheel (>=0.40)"]
+test = ["pytest (>=7.2)", "pytest-cov (>=4.0)", "pytest-xdist (>=3.0)"]
+test-extras = ["pytest-mpl", "pytest-randomly"]
+
+[[package]]
+name = "networkx"
 version = "3.6.1"
 description = "Python package for creating and manipulating graphs and networks"
 optional = false
 python-versions = "!=3.14.1,>=3.11"
 groups = ["main"]
+markers = "python_version < \"3.14\""
 files = [
     {file = "networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762"},
     {file = "networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509"},
@@ -3561,7 +3708,10 @@ files = [
 ]
 
 [package.dependencies]
-numpy = {version = ">=1.26.0", markers = "python_version >= \"3.12\""}
+numpy = [
+    {version = ">=1.23.2", markers = "python_version == \"3.11\""},
+    {version = ">=1.26.0", markers = "python_version >= \"3.12\""},
+]
 python-dateutil = ">=2.8.2"
 pytz = ">=2020.1"
 tzdata = ">=2022.7"
@@ -3650,7 +3800,7 @@ description = "Python datetimes made easy"
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "python_version == \"3.12\""
+markers = "python_version < \"3.13\""
 files = [
     {file = "pendulum-3.2.0-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:4a6bf778c6b42830b001c714dae5b9dad78da38e2e08203a4b0f5d53f8fa5e63"},
     {file = "pendulum-3.2.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:625209bb7133d990905e8935e1c04f0a82315ae777b67910969b16f665d62c0b"},
@@ -4194,7 +4344,7 @@ description = "C parser in Python"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "platform_python_implementation != \"PyPy\" and implementation_name != \"PyPy\""
+markers = "implementation_name != \"PyPy\" and platform_python_implementation != \"PyPy\""
 files = [
     {file = "pycparser-3.0-py3-none-any.whl", hash = "sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"},
     {file = "pycparser-3.0.tar.gz", hash = "sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29"},
@@ -5141,6 +5291,9 @@ files = [
     {file = "redis-7.4.0.tar.gz", hash = "sha256:64a6ea7bf567ad43c964d2c30d82853f8df927c5c9017766c55a1d1ed95d18ad"},
 ]
 
+[package.dependencies]
+async-timeout = {version = ">=4.0.3", markers = "python_full_version < \"3.11.3\""}
+
 [package.extras]
 circuit-breaker = ["pybreaker (>=1.4.0)"]
 hiredis = ["hiredis (>=3.2.0)"]
@@ -5952,11 +6105,44 @@ files = [
 
 [[package]]
 name = "sphinx"
+version = "9.0.4"
+description = "Python documentation generator"
+optional = false
+python-versions = ">=3.11"
+groups = ["dev"]
+markers = "python_version == \"3.11\""
+files = [
+    {file = "sphinx-9.0.4-py3-none-any.whl", hash = "sha256:5bebc595a5e943ea248b99c13814c1c5e10b3ece718976824ffa7959ff95fffb"},
+    {file = "sphinx-9.0.4.tar.gz", hash = "sha256:594ef59d042972abbc581d8baa577404abe4e6c3b04ef61bd7fc2acbd51f3fa3"},
+]
+
+[package.dependencies]
+alabaster = ">=0.7.14"
+babel = ">=2.13"
+colorama = {version = ">=0.4.6", markers = "sys_platform == \"win32\""}
+docutils = ">=0.20,<0.23"
+imagesize = ">=1.3"
+Jinja2 = ">=3.1"
+packaging = ">=23.0"
+Pygments = ">=2.17"
+requests = ">=2.30.0"
+roman-numerals = ">=1.0.0"
+snowballstemmer = ">=2.2"
+sphinxcontrib-applehelp = ">=1.0.7"
+sphinxcontrib-devhelp = ">=1.0.6"
+sphinxcontrib-htmlhelp = ">=2.0.6"
+sphinxcontrib-jsmath = ">=1.0.1"
+sphinxcontrib-qthelp = ">=1.0.6"
+sphinxcontrib-serializinghtml = ">=1.1.9"
+
+[[package]]
+name = "sphinx"
 version = "9.1.0"
 description = "Python documentation generator"
 optional = false
 python-versions = ">=3.12"
 groups = ["dev"]
+markers = "python_version >= \"3.12\""
 files = [
     {file = "sphinx-9.1.0-py3-none-any.whl", hash = "sha256:c84fdd4e782504495fe4f2c0b3413d6c2bf388589bb352d439b2a3bb99991978"},
     {file = "sphinx-9.1.0.tar.gz", hash = "sha256:7741722357dd75f8190766926071fed3bdc211c74dd2d7d4df5404da95930ddb"},
@@ -6618,7 +6804,7 @@ description = "Modern datetime library for Python"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "python_version == \"3.13\""
+markers = "python_version >= \"3.13\""
 files = [
     {file = "whenever-0.10.0-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:b58f46b4bbe56ac3059fbc912a40dac92a2df6a45b6f1681f292bcbe70f05c5c"},
     {file = "whenever-0.10.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:06b660d198c813dde21f1a32b426795ed3ba684ca8da84a3d4cdca5e330bfb17"},
@@ -6825,5 +7011,5 @@ type = ["pytest-mypy"]
 
 [metadata]
 lock-version = "2.1"
-python-versions = ">=3.12,<3.14"
-content-hash = "f2c016a126286db012ab25be842fb637a1f4a1ea12ee3d81ef0b2b5bbc19a0a0"
+python-versions = ">=3.11,<3.15"
+content-hash = "b8df6daaf931a44c1798d67b4902610d745bc80ca5ce7d485066c0f00f498380"
