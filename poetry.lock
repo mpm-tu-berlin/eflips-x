@@ -706,24 +706,6 @@ files = [
 colorama = {version = "*", markers = "platform_system == \"Windows\""}
 
 [[package]]
-name = "click-default-group"
-version = "1.2.4"
-description = "click_default_group"
-optional = false
-python-versions = ">=2.7"
-groups = ["main"]
-files = [
-    {file = "click_default_group-1.2.4-py2.py3-none-any.whl", hash = "sha256:9b60486923720e7fc61731bdb32b617039aba820e22e1c88766b1125592eaa5f"},
-    {file = "click_default_group-1.2.4.tar.gz", hash = "sha256:eb3f3c99ec0d456ca6cd2a7f08f7d4e91771bef51b01bdd9580cc6450fe1251e"},
-]
-
-[package.dependencies]
-click = "*"
-
-[package.extras]
-test = ["pytest"]
-
-[[package]]
 name = "cloudpickle"
 version = "3.1.2"
 description = "Pickler class to extend the standard pickle.Pickler functionality"
@@ -1221,24 +1203,6 @@ urllib3 = ">=1.26.5"
 zict = ">=3.0.0"
 
 [[package]]
-name = "docformatter"
-version = "1.7.8"
-description = "Formats docstrings to follow PEP 257"
-optional = false
-python-versions = "<4.0,>=3.10"
-groups = ["main"]
-files = [
-    {file = "docformatter-1.7.8-py3-none-any.whl", hash = "sha256:8e518948bacb8d8df5d5f625060e214a200f0a908d8e6797c9ebbdd2cdd17467"},
-    {file = "docformatter-1.7.8.tar.gz", hash = "sha256:6589b62a8f38c62c4c8c84cb1afa296af007c88c959e4c9d25c74c1f933c4dbf"},
-]
-
-[package.dependencies]
-charset_normalizer = ">=3.0.0,<4.0.0"
-
-[package.extras]
-tomli = ["tomli (>=2.0.0,<3.0.0) ; python_version < \"3.11\""]
-
-[[package]]
 name = "docker"
 version = "7.1.0"
 description = "A Python library for the Docker Engine API."
@@ -1332,36 +1296,11 @@ xlsxwriter = ">=3.1.9,<4.0.0"
 
 [[package]]
 name = "eflips-eval"
-version = "1.9.1"
-description = ""
-optional = false
-python-versions = "<3.14,>=3.10"
-groups = ["main"]
-markers = "python_version < \"3.14\""
-files = [
-    {file = "eflips_eval-1.9.1-py3-none-any.whl", hash = "sha256:c7ad330a5009f83554a13343a79bff8780684248e21acbdec6476d203f7dd41c"},
-    {file = "eflips_eval-1.9.1.tar.gz", hash = "sha256:b7b1cbf4c7b7965a6bddcde1db3ae4f4bba2bf5a4e1712670678949d62e91d6c"},
-]
-
-[package.dependencies]
-dash-cytoscape = ">=1.0.1,<2.0.0"
-folium = ">=0.17.0,<0.18.0"
-httpx = ">=0.27.0,<0.28.0"
-matplotlib = ">=3.9.0,<4.0.0"
-pandas = ">=2.2.0,<3.0.0"
-plotly = ">=5.19.0,<6.0.0"
-polyline = ">=2.0.0,<3.0.0"
-seaborn = ">=0.13.2,<0.14.0"
-shapely = ">=2.0.5,<3.0.0"
-
-[[package]]
-name = "eflips-eval"
 version = "1.11.0"
 description = ""
 optional = false
 python-versions = "<3.15,>=3.11"
 groups = ["main"]
-markers = "python_version == \"3.14\""
 files = [
     {file = "eflips_eval-1.11.0-py3-none-any.whl", hash = "sha256:091b724b0c740bd436c43112e8a6a3dfb296e88675745a4715c80cc09131fb21"},
     {file = "eflips_eval-1.11.0.tar.gz", hash = "sha256:6dc21223e718711a663e44b923fda32935ebdbb5626c2a58aafcbf16c2ed62e0"},
@@ -1380,30 +1319,11 @@ shapely = ">=2.0.5,<3.0.0"
 
 [[package]]
 name = "eflips-impact"
-version = "2.1.0"
-description = "TCO and LCA analysis for eFLIPS"
-optional = false
-python-versions = "<3.14,>=3.10"
-groups = ["main"]
-markers = "python_version < \"3.14\""
-files = [
-    {file = "eflips_impact-2.1.0-py3-none-any.whl", hash = "sha256:6184c1d9b394deb859fe8c48ae87cc061ae61cb9d3d352963c3fa9168520d6bd"},
-    {file = "eflips_impact-2.1.0.tar.gz", hash = "sha256:ff5c18e42041aecc4ffb3866320a415c45aef863032c236c1b4cf01b781121a1"},
-]
-
-[package.dependencies]
-eflips-eval = ">=1.9.0,<2.0.0"
-eflips-model = ">=11.1.0,<12.0.0"
-pytest = ">=9.0.3,<10.0.0"
-
-[[package]]
-name = "eflips-impact"
 version = "2.1.1"
 description = "TCO and LCA analysis for eFLIPS"
 optional = false
 python-versions = "<3.15,>=3.11"
 groups = ["main"]
-markers = "python_version == \"3.14\""
 files = [
     {file = "eflips_impact-2.1.1-py3-none-any.whl", hash = "sha256:cc0e0d1fefcbb7cce331306130d668914d89c6dc19363c6b35892d966928bdb6"},
     {file = "eflips_impact-2.1.1.tar.gz", hash = "sha256:6dbdfa86a29a26083ecae281a60d5272aeed578c113c00f85728762916f1bca2"},
@@ -1416,33 +1336,11 @@ pytest = ">=9.0.3,<10.0.0"
 
 [[package]]
 name = "eflips-ingest"
-version = "2.3.0"
-description = "A collection of import scripts for converting bus schedule data into the [eflips-model](https://github.com/mpm-tu-berlin/eflips-model) data format."
-optional = false
-python-versions = "<3.14,>=3.11"
-groups = ["main"]
-markers = "python_version < \"3.14\""
-files = [
-    {file = "eflips_ingest-2.3.0-py3-none-any.whl", hash = "sha256:f39f15543f7965f19650b86472338ec68d5cd14cd6c39dd7fd2eb3176de3e18f"},
-    {file = "eflips_ingest-2.3.0.tar.gz", hash = "sha256:464df47c79fd61d3e77c6c5b814ba86dfbab5ad138262f39b655db89f2dcf68d"},
-]
-
-[package.dependencies]
-eflips-model = ">=11.3.0,<12.0.0"
-gtfs-kit = ">=12.0.0,<13.0.0"
-lxml = ">=6.1.0,<7.0.0"
-pyproj = ">=3.6.1,<4.0.0"
-pytz = ">=2024.1,<2025.0"
-xsdata = {version = ">=24.1,<25.0", extras = ["cli", "lxml"]}
-
-[[package]]
-name = "eflips-ingest"
 version = "2.4.1"
 description = "A collection of import scripts for converting bus schedule data into the [eflips-model](https://github.com/mpm-tu-berlin/eflips-model) data format."
 optional = false
 python-versions = "<3.15,>=3.11"
 groups = ["main"]
-markers = "python_version == \"3.14\""
 files = [
     {file = "eflips_ingest-2.4.1-py3-none-any.whl", hash = "sha256:08401d1f77e2824e5ced71aa7a0c3f0cf971844061e6f584ff81dc4f3597cef1"},
     {file = "eflips_ingest-2.4.1.tar.gz", hash = "sha256:cd22c79f3e4f534b8d7fc30200d94b07cbfa487081ea610fb57fc01614900e4d"},
@@ -6938,32 +6836,30 @@ files = [
 
 [[package]]
 name = "xsdata"
-version = "24.12"
+version = "26.10"
 description = "Python XML Binding"
 optional = false
-python-versions = ">=3.9"
+python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "xsdata-24.12-py3-none-any.whl", hash = "sha256:2656cfa7240d215a4f2ff30abeebee9afad1e72b805f3ed29ded518a7d3785ee"},
-    {file = "xsdata-24.12.tar.gz", hash = "sha256:67c16c032bbde82c064f6c28cdf6b4f8adcbd0498e2668a346ff8e52a3a200b4"},
+    {file = "xsdata-26.10-py3-none-any.whl", hash = "sha256:37a697d60db1396a0431750486744a7e0491fd60669751d95e3ede08f034e0c6"},
+    {file = "xsdata-26.10.tar.gz", hash = "sha256:4bc944d9fa3955f84ecebb83c677e2f681687c002a777731a21104e8360a7522"},
 ]
 
 [package.dependencies]
-click = {version = ">=5.0", optional = true, markers = "extra == \"cli\""}
-click-default-group = {version = ">=1.2", optional = true, markers = "extra == \"cli\""}
-docformatter = {version = ">=1.7.2", optional = true, markers = "extra == \"cli\""}
-jinja2 = {version = ">=2.10", optional = true, markers = "extra == \"cli\""}
-lxml = {version = ">=4.5.0", optional = true, markers = "extra == \"lxml\""}
-ruff = {version = ">=0.3.0", optional = true, markers = "extra == \"cli\""}
-toposort = {version = ">=1.5", optional = true, markers = "extra == \"cli\""}
-typing-extensions = ">=4.7.0"
+click = {version = ">=8.0.0", optional = true, markers = "extra == \"cli\""}
+jinja2 = {version = ">=3.0.0", optional = true, markers = "extra == \"cli\""}
+lxml = {version = ">=5.0.0", optional = true, markers = "extra == \"lxml\""}
+ruff = {version = ">=0.9.8", optional = true, markers = "extra == \"cli\""}
+toposort = {version = ">=1.9", optional = true, markers = "extra == \"cli\""}
+typing-extensions = ">=4.12.0"
 
 [package.extras]
-cli = ["click (>=5.0)", "click-default-group (>=1.2)", "docformatter (>=1.7.2)", "jinja2 (>=2.10)", "ruff (>=0.3.0)", "toposort (>=1.5)"]
-docs = ["markdown-exec[ansi]", "mkdocs", "mkdocs-gen-files", "mkdocs-literate-nav", "mkdocs-material", "mkdocs-minify-plugin", "mkdocstrings[python]", "pymdownx-superfence-filter-lines"]
-lxml = ["lxml (>=4.5.0)"]
-soap = ["requests"]
-test = ["pre-commit", "pytest", "pytest-benchmark", "pytest-cov"]
+cli = ["click (>=8.0.0)", "jinja2 (>=3.0.0)", "ruff (>=0.9.8)", "toposort (>=1.9)"]
+docs = ["markdown-exec[ansi]", "mkdocs", "mkdocs-gen-files", "mkdocs-literate-nav", "mkdocs-material", "mkdocs-minify-plugin", "mkdocstrings[python]"]
+lxml = ["lxml (>=5.0.0)"]
+soap = ["requests (>=2.28.0)"]
+test = ["pre-commit (>=3.0.0)", "pytest (>=8.0.0)", "pytest-benchmark (>=4.0.0)", "pytest-cov (>=5.0.0)"]
 
 [[package]]
 name = "xyzservices"
@@ -7012,4 +6908,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "b8df6daaf931a44c1798d67b4902610d745bc80ca5ce7d485066c0f00f498380"
+content-hash = "c78c3177aa4273c96fea165ec1ffac6041348cc80264639fcd5644b22307c640"
