@@ -1056,7 +1056,7 @@ class VehicleScheduling(Modifier):
                 f"{type(nearby_departures).__name__}"
             )
         if nearby_departures is not None and nearby_departures.router is None:
-            # eflips-opt routes the deadheads with the OpenRouteService server given by BASE_URL
+            # eflips-opt routes the deadheads with the OpenRouteService server given by OPENROUTESERVICE_BASE_URL
             base_url = os.environ.get("OPENROUTESERVICE_BASE_URL")
             if not base_url:
                 raise ValueError(
@@ -1064,7 +1064,6 @@ class VehicleScheduling(Modifier):
                     "route the deadheads to nearby stops; set VehicleScheduling.nearby_departures "
                     "to None to schedule without them."
                 )
-            os.environ["BASE_URL"] = base_url
 
         # Validate save_graphs parameter
         if not isinstance(save_graphs, bool):
@@ -1487,8 +1486,8 @@ class DepotAssignment(Modifier):
         # Get depot configuration from the provided function
         self.logger.info(f"Loaded {len(depot_config)} depot configurations")
 
-        # Set the base URL for routing service
-        os.environ["BASE_URL"] = base_url
+        # Set the base URL for routing service (eflips-opt reads it from the environment)
+        os.environ["OPENROUTESERVICE_BASE_URL"] = base_url
 
         # Initialize the Optimizer
         optimizer = DepotRotationOptimizer(session, scenario.id)
